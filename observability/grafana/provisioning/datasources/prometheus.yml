@@ -1,0 +1,17 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: 1
+
+datasources:
+  - name: PhysicsNeMo Serve Prometheus
+    type: prometheus
+    access: proxy
+    url: ${SERVICE_URL}/prometheus
+    isDefault: true
+    editable: false
+    jsonData:
+      httpMethod: POST
+      httpHeaderName1: Authorization
+    secureJsonData:
+      httpHeaderValue1: Bearer ${EP_TOKEN}

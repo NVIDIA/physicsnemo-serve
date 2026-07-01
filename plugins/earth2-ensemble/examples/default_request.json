@@ -1,0 +1,10 @@
+{
+  "model": "dlwp",
+  "start_time": "2026-01-01T00:00:00Z",
+  "nsteps": 1,
+  "nensemble": 2,
+  "batch_size": 2,
+  "perturbation": "gaussian",
+  "noise_amplitude": 0.05,
+  "seed_base": 1000
+}

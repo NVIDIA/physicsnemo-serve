@@ -1,0 +1,6 @@
+{
+    "forecast_times": ["2024-01-01T00:00:00"],
+    "nsteps": 4,
+    "model_type": "dlwp",
+    "create_plots": false
+}

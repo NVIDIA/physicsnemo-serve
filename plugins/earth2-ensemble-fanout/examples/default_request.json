@@ -1,0 +1,11 @@
+{
+  "model": "fcn",
+  "start_time": "2026-01-01T00:00:00Z",
+  "nsteps": 1,
+  "nensemble": 2,
+  "batch_size": 2,
+  "max_in_flight": 1,
+  "perturbation": "spherical_gaussian",
+  "noise_amplitude": 0.05,
+  "seed_base": 1000
+}

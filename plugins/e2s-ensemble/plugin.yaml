@@ -1,0 +1,96 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+metadata:
+  id: e2s-ensemble
+  display_name: E2S Ensemble Workflow
+  version: 1.0.0
+  description: Ensemble forecast with configurable perturbation (maps to ensemble_workflow.py)
+  tags:
+    - earth2
+    - ensemble
+ingress:
+  json_schema_inline:
+    type: object
+    additionalProperties: false
+    required:
+      - forecast_times
+      - nsteps
+      - nensemble
+    properties:
+      forecast_times:
+        type: array
+        items:
+          type: string
+          pattern: "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}"
+        minItems: 1
+      nsteps:
+        type: integer
+        minimum: 1
+        maximum: 100
+      nensemble:
+        type: integer
+        minimum: 1
+      batch_size:
+        type: integer
+        minimum: 1
+      perturbation:
+        type: string
+        enum:
+          - gaussian
+          - brown
+          - spherical_gaussian
+      model_type:
+        type: string
+        enum: [fcn]
+      noise_amplitude:
+        type: number
+        exclusiveMinimum: 0
+      seed_base:
+        type: integer
+      data_source:
+        type: string
+        enum: [gfs]
+      output_format:
+        type: string
+        enum: [zarr]
+      output_variables:
+        type: array
+        items:
+          type: string
+      create_plots:
+        type: boolean
+      plot_variable:
+        type: string
+        enum: [t2m, msl, u10m, v10m, tcwv, z500]
+      plot_step:
+        type: integer
+        minimum: 0
+pipeline:
+  profile: default
+runtime:
+  executor_class: earth2-gpu
+  prepare_executor_class: earth2-cpu
+  readiness_executor_class: earth2-cpu
+outputs:
+  result_schema_inline:
+    type: object
+    properties:
+      dataset_path:
+        type: string
+        description: Path to the Zarr forecast dataset
+  primary_artifact:
+    name: forecast_dataset
+    media_type: application/x-zarr
+resources:
+  defaults:
+developer:
+  readiness:
+    recommended_check_phase: prepare
+    python_modules:
+      - torch
+      - earth2studio.models.px
+      - earth2studio.perturbation
+      - earth2studio.data
+      - earth2studio.io
+      - earth2studio.run

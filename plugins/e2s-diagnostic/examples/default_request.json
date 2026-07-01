@@ -1,0 +1,9 @@
+{
+    "forecast_times": ["2024-01-01T00:00:00"],
+    "nsteps": 6,
+    "prognostic_model_type": "fcn",
+    "diagnostic_model_type": "precipitation_afno",
+    "data_source": "gfs",
+    "output_format": "zarr",
+    "create_plots": false
+}

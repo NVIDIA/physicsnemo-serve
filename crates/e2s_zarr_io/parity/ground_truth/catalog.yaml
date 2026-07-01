@@ -1,0 +1,13 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Ground truth case catalog (manual Tier0 refresh source of truth).
+cases:
+  - case_id: deterministic_io_small_v1
+    workflow_id: deterministic_io_small_v1
+    tier: 0
+    status: committed_truth
+    case_spec: parity/ground_truth/cases/deterministic_io_small_v1.case_spec.json
+    truth_manifest: parity/ground_truth/truth/deterministic_io_small_v1.truth_manifest.json.zst
+    baseline_report: parity/ground_truth/reports/deterministic_io_small_v1.baseline_report.json
+

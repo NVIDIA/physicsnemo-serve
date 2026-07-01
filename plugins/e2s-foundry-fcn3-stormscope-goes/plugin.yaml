@@ -1,0 +1,94 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+metadata:
+  id: e2s-foundry-fcn3-stormscope-goes
+  display_name: E2S Foundry FCN3 StormScope GOES Workflow
+  version: 1.0.0
+  description: Foundry FCN3 plus StormScope GOES ensemble forecast using Planetary Computer inputs
+  tags:
+    - earth2
+    - foundry
+    - fcn3
+    - stormscope
+    - goes
+    - ensemble
+ingress:
+  json_schema_inline:
+    type: object
+    additionalProperties: false
+    required:
+      - start_time_fcn3
+      - start_time_stormscope
+    properties:
+      start_time_fcn3:
+        type: string
+        pattern: "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}"
+      start_time_stormscope:
+        type: string
+        pattern: "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}"
+      n_steps:
+        type: integer
+        minimum: 1
+        maximum: 32
+      n_samples_fcn3:
+        type: integer
+        minimum: 1
+      n_samples_stormscope:
+        type: integer
+        minimum: 1
+      seeds_fcn3:
+        type: array
+        items:
+          type: integer
+      seeds_stormscope:
+        type: array
+        items:
+          type: integer
+      variables:
+        type: array
+        items:
+          type: string
+pipeline:
+  profile: default
+runtime:
+  executor_class: earth2-gpu
+  prepare_executor_class: earth2-cpu
+  readiness_executor_class: earth2-cpu
+outputs:
+  result_schema_inline:
+    type: object
+    properties:
+      dataset_path:
+        type: string
+        description: Path to the Zarr forecast dataset
+  primary_artifact:
+    name: forecast_dataset
+    media_type: application/x-zarr
+resources:
+  defaults:
+    gpus_required: 1
+    memory_mb: 65000
+developer:
+  readiness:
+    recommended_check_phase: prepare
+    python_modules:
+      - torch
+      - numpy
+      - zarr
+      - xarray
+      - cftime
+      - makani
+      - natten
+      - earth2studio.models.px
+      - earth2studio.models.dx
+      - earth2studio.models.px.stormscope
+      - earth2studio.data
+      - earth2studio.io
+      - earth2studio.utils.coords
+      - earth2studio.utils.time
+      - httpx
+      - planetary_computer
+      - rioxarray
+      - pystac
+      - pystac_client

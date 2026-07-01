@@ -1,0 +1,22 @@
+{
+  "schema_version": "case_spec.v1",
+  "case_id": "deterministic_io_small_v1",
+  "workflow_id": "deterministic_io_small_v1",
+  "deterministic_seed": 20260210,
+  "start_time": null,
+  "start_times": [
+    "2025-01-01T00:00:00Z",
+    "2025-01-01T06:00:00Z"
+  ],
+  "num_steps": 3,
+  "step_delta": "6h",
+  "output_array_names": [
+    "t2m",
+    "tcwv"
+  ],
+  "coords_policy": "default_parallel_coords",
+  "parallel_coords": null,
+  "zarr_format": "v3",
+  "chunk_key_encoding": "default",
+  "chunk_key_separator": null
+}

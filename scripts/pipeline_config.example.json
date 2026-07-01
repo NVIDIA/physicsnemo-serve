@@ -1,0 +1,73 @@
+{
+  "stream_prefix": "physicsnemo:",
+  "streams": [
+    "prepare",
+    "prefetch",
+    "schedule",
+    "release",
+    "results",
+    "execute.python.test"
+  ],
+  "roles": {
+    "prepare": {
+      "inputs": [
+        {
+          "stream": "prepare",
+          "max_dequeue_items": 4,
+          "poll_interval_ms": 100,
+          "block_ms": 1000
+        }
+      ],
+      "outputs": [
+        "prefetch",
+        "schedule",
+        "results"
+      ]
+    },
+    "prefetch": {
+      "inputs": [
+        {
+          "stream": "prefetch",
+          "max_dequeue_items": 4,
+          "poll_interval_ms": 100,
+          "block_ms": 1000
+        }
+      ],
+      "outputs": [
+        "schedule"
+      ]
+    },
+    "scheduler": {
+      "inputs": [
+        {
+          "stream": "schedule",
+          "max_dequeue_items": 4,
+          "poll_interval_ms": 75,
+          "block_ms": 900
+        },
+        {
+          "stream": "release",
+          "max_dequeue_items": 2,
+          "poll_interval_ms": 50,
+          "block_ms": 700
+        }
+      ],
+      "outputs": [
+        "execute.*"
+      ]
+    },
+    "results_worker": {
+      "inputs": [
+        {
+          "stream": "results",
+          "max_dequeue_items": 8,
+          "poll_interval_ms": 100,
+          "block_ms": 1000
+        }
+      ],
+      "outputs": [
+        "results"
+      ]
+    }
+  }
+}

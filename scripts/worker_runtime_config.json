@@ -1,0 +1,168 @@
+{
+  "stream_prefix": "physicsnemo:",
+  "max_retries": 20,
+  "shared_dlq_stream": "dlq",
+  "streams": [
+    "prepare",
+    "fanout",
+    "batch",
+    "prefetch",
+    "schedule",
+    "release",
+    "collect",
+    "postprocess",
+    "results"
+  ],
+  "roles": {
+    "prepare": {
+      "inputs": [
+        {
+          "stream": "prepare",
+          "max_dequeue_items": 4,
+          "poll_interval_ms": 100,
+          "block_ms": 1000,
+          "reclaim_idle_ms": 60000
+        }
+      ],
+      "outputs": [],
+      "config": {
+        "python_executable": "/opt/physicsnemo-serve-venv/bin/python",
+        "runner_path": "/app/scripts/plugin_hook_runner.py",
+        "hook_timeout_secs": 600
+      }
+    },
+    "fanout": {
+      "inputs": [
+        {
+          "stream": "fanout",
+          "max_dequeue_items": 4,
+          "poll_interval_ms": 100,
+          "block_ms": 1000,
+          "reclaim_idle_ms": 60000
+        }
+      ],
+      "outputs": []
+    },
+    "batch": {
+      "inputs": [
+        {
+          "stream": "batch",
+          "max_dequeue_items": 4,
+          "poll_interval_ms": 100,
+          "block_ms": 1000,
+          "reclaim_idle_ms": 60000
+        }
+      ],
+      "outputs": []
+    },
+    "prefetch": {
+      "inputs": [
+        {
+          "stream": "prefetch",
+          "max_dequeue_items": 4,
+          "poll_interval_ms": 100,
+          "block_ms": 1000,
+          "reclaim_idle_ms": 60000
+        }
+      ],
+      "outputs": []
+    },
+    "scheduler": {
+      "inputs": [
+        {
+          "stream": "schedule",
+          "max_dequeue_items": 2,
+          "poll_interval_ms": 75,
+          "block_ms": 900,
+          "reclaim_idle_ms": 60000
+        },
+        {
+          "stream": "release",
+          "max_dequeue_items": 2,
+          "poll_interval_ms": 50,
+          "block_ms": 700,
+          "reclaim_idle_ms": 60000
+        }
+      ],
+      "outputs": [],
+      "config": {
+        "scheduling_strategy": "round_robin",
+        "memory_utilization_percent": 90,
+        "gpu_discovery_interval_secs": 60
+      }
+    },
+    "collect": {
+      "inputs": [
+        {
+          "stream": "collect",
+          "max_dequeue_items": 4,
+          "poll_interval_ms": 100,
+          "block_ms": 1000,
+          "reclaim_idle_ms": 60000
+        }
+      ],
+      "outputs": []
+    },
+    "postprocess": {
+      "inputs": [
+        {
+          "stream": "postprocess",
+          "max_dequeue_items": 4,
+          "poll_interval_ms": 100,
+          "block_ms": 1000,
+          "reclaim_idle_ms": 60000
+        }
+      ],
+      "outputs": [],
+      "config": {
+        "python_executable": "/opt/physicsnemo-serve-venv/bin/python",
+        "runner_path": "/app/scripts/plugin_hook_runner.py",
+        "hook_timeout_secs": 1200
+      }
+    },
+    "results": {
+      "inputs": [
+        {
+          "stream": "results",
+          "max_dequeue_items": 8,
+          "poll_interval_ms": 100,
+          "block_ms": 1000,
+          "reclaim_idle_ms": 60000
+        }
+      ],
+      "outputs": [],
+      "config": {
+        "result_ttl_seconds": 86400
+      }
+    }
+  },
+  "python_runtime_envs": {
+    "earth2-cpu": {
+      "python_executable": "/opt/physicsnemo-serve-venv/bin/python",
+      "env": {},
+      "launch": {
+        "enabled": true,
+        "device_kind": "cpu",
+        "replicas": 1,
+        "memory_mb": 16384,
+        "tags": [
+          "earth2",
+          "cpu"
+        ]
+      }
+    },
+    "earth2-gpu": {
+      "python_executable": "/opt/physicsnemo-serve-venv/bin/python",
+      "env": {},
+      "launch": {
+        "enabled": true,
+        "device_kind": "gpu",
+        "workers_per_device": 1,
+        "tags": [
+          "earth2",
+          "gpu"
+        ]
+      }
+    }
+  }
+}

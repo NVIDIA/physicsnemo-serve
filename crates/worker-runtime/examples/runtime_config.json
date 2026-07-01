@@ -1,0 +1,71 @@
+{
+  "stream_prefix": "physicsnemo:",
+  "max_retries": 5,
+  "shared_dlq_stream": "dlq",
+  "streams": [
+    "prefetch",
+    "schedule",
+    "release",
+    "results"
+  ],
+  "roles": {
+    "prefetch": {
+      "inputs": [
+        {
+          "stream": "prefetch",
+          "max_dequeue_items": 8,
+          "poll_interval_ms": 100,
+          "block_ms": 2000
+        }
+      ],
+      "outputs": ["schedule"]
+    },
+    "scheduler": {
+      "inputs": [
+        {
+          "stream": "schedule",
+          "max_dequeue_items": 8,
+          "poll_interval_ms": 100,
+          "block_ms": 2000
+        },
+        {
+          "stream": "release",
+          "max_dequeue_items": 4,
+          "poll_interval_ms": 500,
+          "block_ms": 1000
+        }
+      ],
+      "outputs": [],
+      "config": {
+        "gpu_registry_key": "gpu:registry",
+        "scheduling_strategy": "round_robin"
+      }
+    },
+    "results": {
+      "inputs": [
+        {
+          "stream": "results",
+          "max_dequeue_items": 16,
+          "poll_interval_ms": 100,
+          "block_ms": 2000
+        }
+      ],
+      "outputs": [],
+      "config": {
+        "result_ttl_seconds": 86400
+      }
+    }
+  },
+  "python_runtime_envs": {
+    "python.test": {
+      "python_executable": "python3",
+      "env": {},
+      "launch": {
+        "enabled": true,
+        "device_kind": "cpu",
+        "replicas": 1,
+        "tags": ["demo", "cpu"]
+      }
+    }
+  }
+}

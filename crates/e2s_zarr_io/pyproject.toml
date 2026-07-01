@@ -1,0 +1,32 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[build-system]
+requires = ["maturin>=1.7,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "e2s-zarr-io"
+version = "0.1.0"
+description = "Rust-backed Zarr IO backend for Earth2Studio"
+readme = "README.md"
+license = { text = "Apache-2.0" }
+authors = [{ name = "NVIDIA Corporation" }]
+requires-python = ">=3.11"
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: Implementation :: CPython",
+]
+
+[project.optional-dependencies]
+read = [
+    "numpy",
+    "torch",
+    "zarr>=3",
+]
+
+[tool.maturin]
+bindings = "pyo3"
+features = ["python-extension-module"]
+module-name = "e2s_zarr_io"

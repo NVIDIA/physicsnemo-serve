@@ -1,0 +1,24 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# PhysicsNeMo Serve deployment configuration.
+#
+# Copy this file to config.yaml and fill in your own values before deploying.
+
+# -- Container registry --
+docker_registry: "your-registry.example.com/your-org"
+image_name: "physicsnemo-serve"
+runtime_base_image: "physicsnemo-serve-runtime-base"
+python_service_image: "earth2studio"
+
+# -- Lepton deployment --
+lepton_workspace_id: "your-workspace-id"
+lepton_node_group: "your-node-group"
+lepton_dashboard_url: "https://your-lepton-dashboard.example.com"
+pull_secret: "your-pull-secret"
+
+# -- Shared storage --
+nfs_mount_base: "/mnt/shared-storage"
+
+# -- Source repository --
+repo_url: "https://github.com/NVIDIA/physicsnemo-serve"

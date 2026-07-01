@@ -1,0 +1,56 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+metadata:
+  id: e2s-stormcast-fcn3
+  display_name: E2S StormCast FCN3 Workflow
+  version: 1.0.0
+  description: Two-stage FCN3 + StormCast forecast (maps to stormcast_fcn3_workflow.py)
+  tags:
+    - earth2
+    - stormcast
+    - fcn3
+ingress:
+  json_schema_inline:
+    type: object
+    additionalProperties: false
+    required:
+      - start_time
+    properties:
+      start_time:
+        type: string
+        pattern: "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}"
+      num_hours:
+        type: integer
+        minimum: 1
+      run_stormcast:
+        type: boolean
+pipeline:
+  profile: default
+runtime:
+  executor_class: earth2-gpu
+  prepare_executor_class: earth2-cpu
+  readiness_executor_class: earth2-cpu
+outputs:
+  result_schema_inline:
+    type: object
+    properties:
+      dataset_path:
+        type: string
+        description: Path to the Zarr forecast dataset
+  primary_artifact:
+    name: forecast_dataset
+    media_type: application/x-zarr
+resources:
+  defaults:
+developer:
+  readiness:
+    recommended_check_phase: prepare
+    python_modules:
+      - torch
+      - makani
+      - earth2studio.models.px
+      - earth2studio.models.dx
+      - earth2studio.data
+      - earth2studio.io
+      - earth2studio.run

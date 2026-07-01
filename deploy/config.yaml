@@ -1,0 +1,29 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# PhysicsNeMo Serve deployment configuration.
+#
+# All environment-specific values are centralized here. Scripts, Dockerfiles,
+# and documentation reference this file instead of hardcoding infrastructure
+# identifiers.
+#
+# For public / open-source usage, copy config.example.yaml to config.yaml and
+# fill in your own values.
+
+# -- Container registry --
+docker_registry: "nvcr.io/dycvht5ows21"
+image_name: "scicomp-ferroflux"
+runtime_base_image: "scicomp-ferroflux-runtime-base"
+python_service_image: "earth2studio-scicomp"
+
+# -- Lepton deployment --
+lepton_workspace_id: "r0whe339"
+lepton_node_group: "gcp-iad-lepton-002"
+lepton_dashboard_url: "https://dashboard.dgxc-lepton.nvidia.com"
+pull_secret: "scicomp-dev"
+
+# -- Shared storage --
+nfs_mount_base: "/PhysicsNeMo/platform"
+
+# -- Source repository --
+repo_url: "https://gitlab-master.nvidia.com/scicomp/performancelab/ferroflux"

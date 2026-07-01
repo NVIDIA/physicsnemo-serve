@@ -1,0 +1,8 @@
+{
+    "forecast_times": ["2024-01-01T00:00:00"],
+    "nsteps": 4,
+    "nensemble": 2,
+    "batch_size": 2,
+    "seed_base": 1000,
+    "create_plots": false
+}

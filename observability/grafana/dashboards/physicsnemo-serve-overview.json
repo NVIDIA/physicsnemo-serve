@@ -1,0 +1,1037 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "title": "GPU Metrics",
+      "type": "row",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "title": "GPU Overview",
+      "description": "High-level overview of all GPUs: compute utilization and memory usage.",
+      "type": "table",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 1 },
+      "datasource": { "type": "prometheus", "uid": "" },
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "align": "center" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 60 },
+              { "color": "red", "value": 85 }
+            ]
+          },
+          "unit": "percent"
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "GPU" },
+            "properties": [{ "id": "custom.width", "value": 80 }, { "id": "unit", "value": "string" }]
+          },
+          {
+            "matcher": { "id": "byName", "options": "Memory Used" },
+            "properties": [{ "id": "unit", "value": "decbytes" }]
+          },
+          {
+            "matcher": { "id": "byName", "options": "Memory Total" },
+            "properties": [{ "id": "unit", "value": "decbytes" }]
+          }
+        ]
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm",
+        "footer": { "show": false }
+      },
+      "targets": [
+        {
+          "expr": "physicsnemo_serve_gpu_compute_utilization_percent",
+          "format": "table",
+          "instant": true,
+          "legendFormat": "",
+          "refId": "Compute"
+        },
+        {
+          "expr": "physicsnemo_serve_gpu_memory_bus_utilization_percent",
+          "format": "table",
+          "instant": true,
+          "legendFormat": "",
+          "refId": "MemBus"
+        },
+        {
+          "expr": "physicsnemo_serve_gpu_memory_used_bytes",
+          "format": "table",
+          "instant": true,
+          "legendFormat": "",
+          "refId": "MemUsed"
+        },
+        {
+          "expr": "physicsnemo_serve_gpu_memory_total_bytes",
+          "format": "table",
+          "instant": true,
+          "legendFormat": "",
+          "refId": "MemTotal"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "joinByField",
+          "options": { "byField": "gpu_id", "mode": "outer" }
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "Time 1": true,
+              "Time 2": true,
+              "Time 3": true,
+              "Time 4": true,
+              "__name__": true,
+              "__name__ 1": true,
+              "__name__ 2": true,
+              "__name__ 3": true,
+              "__name__ 4": true,
+              "instance": true,
+              "instance 1": true,
+              "instance 2": true,
+              "instance 3": true,
+              "instance 4": true,
+              "job": true,
+              "job 1": true,
+              "job 2": true,
+              "job 3": true,
+              "job 4": true
+            },
+            "renameByName": {
+              "gpu_id": "GPU",
+              "Value #Compute": "Compute %",
+              "Value #MemBus": "Mem Bus %",
+              "Value #MemUsed": "Memory Used",
+              "Value #MemTotal": "Memory Total"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "title": "GPU Compute Utilization",
+      "description": "Compute engine utilization percentage per GPU over time.",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 9 },
+      "datasource": { "type": "prometheus", "uid": "" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "fillOpacity": 20,
+            "pointSize": 5,
+            "lineWidth": 2,
+            "showPoints": "auto"
+          },
+          "min": 0,
+          "max": 100,
+          "unit": "percent",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 70 },
+              { "color": "red", "value": 90 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "expr": "physicsnemo_serve_gpu_compute_utilization_percent",
+          "legendFormat": "GPU {{gpu_id}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "title": "GPU Memory Bus Utilization",
+      "description": "Memory bus utilization percentage per GPU over time.",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 9 },
+      "datasource": { "type": "prometheus", "uid": "" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "fillOpacity": 20,
+            "pointSize": 5,
+            "lineWidth": 2,
+            "showPoints": "auto"
+          },
+          "min": 0,
+          "max": 100,
+          "unit": "percent",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 70 },
+              { "color": "red", "value": 90 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "expr": "physicsnemo_serve_gpu_memory_bus_utilization_percent",
+          "legendFormat": "GPU {{gpu_id}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "title": "GPU $gpu — Memory",
+      "description": "GPU $gpu VRAM breakdown: used vs free. Total capacity shown in legend.",
+      "type": "piechart",
+      "gridPos": { "h": 8, "w": 6, "x": 0, "y": 17 },
+      "repeat": "gpu",
+      "repeatDirection": "h",
+      "maxPerRow": 4,
+      "datasource": { "type": "prometheus", "uid": "" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "decbytes",
+          "color": { "mode": "fixed" }
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "Used" },
+            "properties": [{ "id": "color", "value": { "fixedColor": "orange", "mode": "fixed" } }]
+          },
+          {
+            "matcher": { "id": "byName", "options": "Free" },
+            "properties": [{ "id": "color", "value": { "fixedColor": "green", "mode": "fixed" } }]
+          }
+        ]
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"] },
+        "pieType": "donut",
+        "tooltip": { "mode": "multi", "sort": "desc" },
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "values": ["value", "percent"]
+        },
+        "displayLabels": ["percent"]
+      },
+      "targets": [
+        {
+          "expr": "physicsnemo_serve_gpu_memory_used_bytes{gpu_id=\"$gpu\"}",
+          "legendFormat": "Used",
+          "instant": true,
+          "refId": "Used"
+        },
+        {
+          "expr": "physicsnemo_serve_gpu_memory_total_bytes{gpu_id=\"$gpu\"} - physicsnemo_serve_gpu_memory_used_bytes{gpu_id=\"$gpu\"}",
+          "legendFormat": "Free",
+          "instant": true,
+          "refId": "Free"
+        },
+        {
+          "expr": "physicsnemo_serve_gpu_memory_total_bytes{gpu_id=\"$gpu\"}",
+          "legendFormat": "Total",
+          "instant": true,
+          "refId": "Total",
+          "hide": true
+        }
+      ]
+    },
+    {
+      "title": "CPU / System Metrics",
+      "type": "row",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 25 },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "title": "Overall CPU Usage",
+      "description": "Aggregate CPU utilization percentage across all logical cores.",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 26 },
+      "datasource": { "type": "prometheus", "uid": "" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "fixedColor": "blue", "mode": "fixed" },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "fillOpacity": 25,
+            "pointSize": 5,
+            "lineWidth": 2,
+            "showPoints": "auto"
+          },
+          "min": 0,
+          "max": 100,
+          "unit": "percent",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 70 },
+              { "color": "red", "value": 90 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "single", "sort": "none" }
+      },
+      "targets": [
+        {
+          "expr": "physicsnemo_serve_cpu_usage_percent",
+          "legendFormat": "CPU Total",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "title": "CPU Core Distribution (min / avg / max)",
+      "description": "Statistical spread of CPU utilization across all 208 logical cores: hottest core, average, and coldest core.",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 26 },
+      "datasource": { "type": "prometheus", "uid": "" },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "fillOpacity": 0,
+            "pointSize": 5,
+            "lineWidth": 2,
+            "showPoints": "auto"
+          },
+          "min": 0,
+          "max": 100,
+          "unit": "percent",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 70 },
+              { "color": "red", "value": 90 }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "Max Core" },
+            "properties": [{ "id": "color", "value": { "fixedColor": "red", "mode": "fixed" } }]
+          },
+          {
+            "matcher": { "id": "byName", "options": "Avg" },
+            "properties": [
+              { "id": "color", "value": { "fixedColor": "blue", "mode": "fixed" } },
+              { "id": "custom.fillOpacity", "value": 15 }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "Min Core" },
+            "properties": [{ "id": "color", "value": { "fixedColor": "green", "mode": "fixed" } }]
+          }
+        ]
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "expr": "max(physicsnemo_serve_cpu_core_usage_percent)",
+          "legendFormat": "Max Core",
+          "refId": "max"
+        },
+        {
+          "expr": "avg(physicsnemo_serve_cpu_core_usage_percent)",
+          "legendFormat": "Avg",
+          "refId": "avg"
+        },
+        {
+          "expr": "min(physicsnemo_serve_cpu_core_usage_percent)",
+          "legendFormat": "Min Core",
+          "refId": "min"
+        }
+      ]
+    },
+    {
+      "title": "System Memory",
+      "description": "Host system RAM breakdown: used vs free.",
+      "type": "piechart",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 34 },
+      "datasource": { "type": "prometheus", "uid": "" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "decbytes",
+          "color": { "mode": "fixed" }
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "Used" },
+            "properties": [{ "id": "color", "value": { "fixedColor": "orange", "mode": "fixed" } }]
+          },
+          {
+            "matcher": { "id": "byName", "options": "Free" },
+            "properties": [{ "id": "color", "value": { "fixedColor": "green", "mode": "fixed" } }]
+          }
+        ]
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"] },
+        "pieType": "donut",
+        "tooltip": { "mode": "multi", "sort": "desc" },
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "values": ["value", "percent"]
+        },
+        "displayLabels": ["percent"]
+      },
+      "targets": [
+        {
+          "expr": "physicsnemo_serve_system_memory_used_bytes",
+          "legendFormat": "Used",
+          "instant": true,
+          "refId": "Used"
+        },
+        {
+          "expr": "physicsnemo_serve_system_memory_total_bytes - physicsnemo_serve_system_memory_used_bytes",
+          "legendFormat": "Free",
+          "instant": true,
+          "refId": "Free"
+        },
+        {
+          "expr": "physicsnemo_serve_system_memory_total_bytes",
+          "legendFormat": "Total",
+          "instant": true,
+          "refId": "Total",
+          "hide": true
+        }
+      ]
+    },
+    {
+      "title": "System Load Average",
+      "description": "1-minute, 5-minute, and 15-minute system load averages.",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 34 },
+      "datasource": { "type": "prometheus", "uid": "" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "fillOpacity": 10,
+            "pointSize": 5,
+            "lineWidth": 2,
+            "showPoints": "auto"
+          },
+          "min": 0,
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "expr": "physicsnemo_serve_load_average{window=\"1m\"}",
+          "legendFormat": "1 min",
+          "refId": "1m"
+        },
+        {
+          "expr": "physicsnemo_serve_load_average{window=\"5m\"}",
+          "legendFormat": "5 min",
+          "refId": "5m"
+        },
+        {
+          "expr": "physicsnemo_serve_load_average{window=\"15m\"}",
+          "legendFormat": "15 min",
+          "refId": "15m"
+        }
+      ]
+    },
+    {
+      "title": "Redis Stream Metrics",
+      "type": "row",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 42 },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "title": "Redis Stream Occupancy",
+      "description": "Number of pending entries in each Redis pipeline stream over time.",
+      "type": "timeseries",
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 43 },
+      "datasource": { "type": "prometheus", "uid": "" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "fillOpacity": 10,
+            "pointSize": 5,
+            "lineWidth": 2,
+            "showPoints": "auto",
+            "stacking": { "mode": "none" }
+          },
+          "min": 0,
+          "unit": "short",
+          "decimals": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 100 },
+              { "color": "red", "value": 1000 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "right", "calcs": ["lastNotNull", "max"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "expr": "physicsnemo_serve_redis_stream_length",
+          "legendFormat": "{{stream}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "title": "HTTP API Metrics",
+      "type": "row",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 53 },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "title": "API Request Rate by Endpoint",
+      "description": "HTTP requests per second grouped by endpoint and status class.",
+      "type": "barchart",
+      "gridPos": { "h": 10, "w": 12, "x": 0, "y": 54 },
+      "datasource": { "type": "prometheus", "uid": "" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "unit": "reqps",
+          "custom": {
+            "stacking": { "mode": "normal" },
+            "fillOpacity": 80,
+            "lineWidth": 1
+          }
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byRegexp", "options": ".*2xx.*" },
+            "properties": [{ "id": "color", "value": { "fixedColor": "green", "mode": "fixed" } }]
+          },
+          {
+            "matcher": { "id": "byRegexp", "options": ".*4xx.*" },
+            "properties": [{ "id": "color", "value": { "fixedColor": "yellow", "mode": "fixed" } }]
+          },
+          {
+            "matcher": { "id": "byRegexp", "options": ".*5xx.*" },
+            "properties": [{ "id": "color", "value": { "fixedColor": "red", "mode": "fixed" } }]
+          }
+        ]
+      },
+      "options": {
+        "orientation": "horizontal",
+        "xTickLabelRotation": -45,
+        "groupWidth": 0.7,
+        "barWidth": 0.9,
+        "showValue": "auto",
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "expr": "sum by (path_template, status_class) (rate(physicsnemo_serve_api_requests_total[5m]))",
+          "legendFormat": "{{path_template}} [{{status_class}}]",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "title": "API Latency (p50 / p99)",
+      "description": "Request duration percentiles per endpoint. Solid line = p50, dashed = p99.",
+      "type": "timeseries",
+      "gridPos": { "h": 10, "w": 12, "x": 12, "y": 54 },
+      "datasource": { "type": "prometheus", "uid": "" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "fillOpacity": 0,
+            "pointSize": 5,
+            "lineWidth": 2,
+            "showPoints": "auto"
+          },
+          "unit": "s",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 1 },
+              { "color": "red", "value": 5 }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byRegexp", "options": ".*p99.*" },
+            "properties": [
+              { "id": "custom.lineStyle", "value": { "fill": "dash", "dash": [10, 10] } },
+              { "id": "custom.lineWidth", "value": 1 }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.5, sum by (le, path_template) (rate(physicsnemo_serve_api_request_duration_seconds_bucket[5m])))",
+          "legendFormat": "{{path_template}} p50",
+          "refId": "p50"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum by (le, path_template) (rate(physicsnemo_serve_api_request_duration_seconds_bucket[5m])))",
+          "legendFormat": "{{path_template}} p99",
+          "refId": "p99"
+        }
+      ]
+    },
+    {
+      "title": "Scheduler Metrics",
+      "type": "row",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 64 },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "title": "Scheduler Scrape Health",
+      "description": "Prometheus scrape status for the worker-runtime scheduler metrics endpoint.",
+      "type": "stat",
+      "gridPos": { "h": 7, "w": 8, "x": 0, "y": 65 },
+      "datasource": { "type": "prometheus", "uid": "" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "decimals": 0,
+          "mappings": [
+            {
+              "options": {
+                "0": { "color": "red", "index": 0, "text": "Down" },
+                "1": { "color": "green", "index": 1, "text": "Up" }
+              },
+              "type": "value"
+            }
+          ],
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "green", "value": 1 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "textMode": "value"
+      },
+      "targets": [
+        {
+          "expr": "up{job=\"physicsnemo_serve_scheduler\"}",
+          "instant": true,
+          "legendFormat": "scheduler",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "title": "Scheduler GPU Worker Count",
+      "description": "Number of GPU worker resources currently known to the scheduler.",
+      "type": "stat",
+      "gridPos": { "h": 7, "w": 8, "x": 8, "y": 65 },
+      "datasource": { "type": "prometheus", "uid": "" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "decimals": 0,
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "yellow", "value": null },
+              { "color": "green", "value": 1 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "expr": "physicsnemo_serve_scheduler_discovered_workers",
+          "instant": true,
+          "legendFormat": "workers",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "title": "Scheduler Queue Depth",
+      "description": "Current in-memory scheduler queue depth.",
+      "type": "timeseries",
+      "gridPos": { "h": 7, "w": 8, "x": 16, "y": 65 },
+      "datasource": { "type": "prometheus", "uid": "" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "fixedColor": "blue", "mode": "fixed" },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "fillOpacity": 20,
+            "pointSize": 5,
+            "lineWidth": 2,
+            "showPoints": "auto"
+          },
+          "decimals": 0,
+          "min": 0,
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 10 },
+              { "color": "red", "value": 100 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "single", "sort": "none" }
+      },
+      "targets": [
+        {
+          "expr": "physicsnemo_serve_scheduler_queue_depth",
+          "legendFormat": "queue depth",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "title": "Scheduler Attempt Outcomes",
+      "description": "Cumulative scheduler decision attempts by outcome. Each line increases when that outcome occurs.",
+      "type": "timeseries",
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 82 },
+      "datasource": { "type": "prometheus", "uid": "" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "stepAfter",
+            "fillOpacity": 10,
+            "pointSize": 5,
+            "lineWidth": 2,
+            "showPoints": "auto",
+            "stacking": { "mode": "none" }
+          },
+          "decimals": 0,
+          "min": 0,
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byRegexp", "options": ".*dispatched.*" },
+            "properties": [{ "id": "color", "value": { "fixedColor": "green", "mode": "fixed" } }]
+          },
+          {
+            "matcher": { "id": "byRegexp", "options": ".*blocked.*" },
+            "properties": [{ "id": "color", "value": { "fixedColor": "yellow", "mode": "fixed" } }]
+          },
+          {
+            "matcher": { "id": "byRegexp", "options": ".*failed.*" },
+            "properties": [{ "id": "color", "value": { "fixedColor": "red", "mode": "fixed" } }]
+          },
+          {
+            "matcher": { "id": "byRegexp", "options": ".*dropped.*" },
+            "properties": [{ "id": "color", "value": { "fixedColor": "orange", "mode": "fixed" } }]
+          }
+        ]
+      },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "expr": "sum by (outcome) (physicsnemo_serve_scheduler_attempts_total)",
+          "legendFormat": "{{outcome}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "title": "Scheduler Queue Wait (p50 / p99)",
+      "description": "Time from scheduler enqueue until a terminal outcome, labeled by dispatched, dropped, or failed.",
+      "type": "timeseries",
+      "gridPos": { "h": 10, "w": 8, "x": 0, "y": 72 },
+      "datasource": { "type": "prometheus", "uid": "" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "fillOpacity": 0,
+            "pointSize": 5,
+            "lineWidth": 2,
+            "showPoints": "auto"
+          },
+          "unit": "s",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 5 },
+              { "color": "red", "value": 30 }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byRegexp", "options": ".*p99.*" },
+            "properties": [
+              { "id": "custom.lineStyle", "value": { "fill": "dash", "dash": [10, 10] } },
+              { "id": "custom.lineWidth", "value": 1 }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.5, sum by (le, outcome) (rate(physicsnemo_serve_scheduler_queue_wait_seconds_bucket[5m])))",
+          "legendFormat": "{{outcome}} p50",
+          "refId": "p50"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum by (le, outcome) (rate(physicsnemo_serve_scheduler_queue_wait_seconds_bucket[5m])))",
+          "legendFormat": "{{outcome}} p99",
+          "refId": "p99"
+        }
+      ]
+    },
+    {
+      "title": "Scheduler Decision Time (p50 / p99)",
+      "description": "Time spent inside one scheduler decision attempt after the request leaves the local queue.",
+      "type": "timeseries",
+      "gridPos": { "h": 10, "w": 8, "x": 8, "y": 72 },
+      "datasource": { "type": "prometheus", "uid": "" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "fillOpacity": 0,
+            "pointSize": 5,
+            "lineWidth": 2,
+            "showPoints": "auto"
+          },
+          "unit": "s",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 1 },
+              { "color": "red", "value": 5 }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byRegexp", "options": ".*p99.*" },
+            "properties": [
+              { "id": "custom.lineStyle", "value": { "fill": "dash", "dash": [10, 10] } },
+              { "id": "custom.lineWidth", "value": 1 }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.5, sum by (le, outcome) (rate(physicsnemo_serve_scheduler_attempt_duration_seconds_bucket[5m])))",
+          "legendFormat": "{{outcome}} p50",
+          "refId": "p50"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum by (le, outcome) (rate(physicsnemo_serve_scheduler_attempt_duration_seconds_bucket[5m])))",
+          "legendFormat": "{{outcome}} p99",
+          "refId": "p99"
+        }
+      ]
+    },
+    {
+      "title": "Scheduler Launch Latency (p50 / p99)",
+      "description": "Approximate resolved scheduler latency: terminal queue wait percentile plus matching attempt duration percentile.",
+      "type": "timeseries",
+      "gridPos": { "h": 10, "w": 8, "x": 16, "y": 72 },
+      "datasource": { "type": "prometheus", "uid": "" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "fillOpacity": 0,
+            "pointSize": 5,
+            "lineWidth": 2,
+            "showPoints": "auto"
+          },
+          "unit": "s",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 5 },
+              { "color": "red", "value": 30 }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byRegexp", "options": ".*p99.*" },
+            "properties": [
+              { "id": "custom.lineStyle", "value": { "fill": "dash", "dash": [10, 10] } },
+              { "id": "custom.lineWidth", "value": 1 }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.5, sum by (le, outcome) (rate(physicsnemo_serve_scheduler_queue_wait_seconds_bucket[5m]))) + on(outcome) histogram_quantile(0.5, sum by (le, outcome) (rate(physicsnemo_serve_scheduler_attempt_duration_seconds_bucket[5m])))",
+          "legendFormat": "{{outcome}} p50",
+          "refId": "p50"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum by (le, outcome) (rate(physicsnemo_serve_scheduler_queue_wait_seconds_bucket[5m]))) + on(outcome) histogram_quantile(0.99, sum by (le, outcome) (rate(physicsnemo_serve_scheduler_attempt_duration_seconds_bucket[5m])))",
+          "legendFormat": "{{outcome}} p99",
+          "refId": "p99"
+        }
+      ]
+    }
+  ],
+  "refresh": "15s",
+  "schemaVersion": 39,
+  "tags": ["physicsnemo-serve", "observability", "gpu", "scheduler"],
+  "templating": {
+    "list": [
+      {
+        "name": "gpu",
+        "type": "query",
+        "label": "GPU",
+        "datasource": { "type": "prometheus", "uid": "" },
+        "definition": "label_values(physicsnemo_serve_gpu_memory_used_bytes, gpu_id)",
+        "query": "label_values(physicsnemo_serve_gpu_memory_used_bytes, gpu_id)",
+        "refresh": 2,
+        "sort": 3,
+        "multi": true,
+        "includeAll": true,
+        "current": { "selected": true, "text": "All", "value": "$__all" },
+        "hide": 2
+      }
+    ]
+  },
+  "time": { "from": "now-1h", "to": "now" },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "PhysicsNeMo Serve Overview",
+  "uid": "physicsnemo-serve-overview-v0",
+  "version": 4
+}

@@ -1,0 +1,150 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://earth2studio.dev/schemas/e2s_zarr_io/case_spec.v1.schema.json",
+  "title": "CaseSpecV1",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "case_id",
+    "workflow_id",
+    "deterministic_seed",
+    "start_time",
+    "start_times",
+    "num_steps",
+    "step_delta",
+    "output_array_names",
+    "coords_policy",
+    "parallel_coords",
+    "zarr_format",
+    "chunk_key_encoding",
+    "chunk_key_separator"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "case_spec.v1"
+    },
+    "case_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "workflow_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "deterministic_seed": {
+      "type": "integer"
+    },
+    "start_time": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "start_times": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "num_steps": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "step_delta": {
+      "type": "string",
+      "minLength": 1
+    },
+    "output_array_names": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "coords_policy": {
+      "enum": [
+        "default_parallel_coords",
+        "explicit_parallel_coords"
+      ]
+    },
+    "parallel_coords": {
+      "type": [
+        "object",
+        "null"
+      ]
+    },
+    "zarr_format": {
+      "enum": [
+        "v2",
+        "v3"
+      ]
+    },
+    "chunk_key_encoding": {
+      "enum": [
+        "v2",
+        "default"
+      ]
+    },
+    "chunk_key_separator": {
+      "enum": [
+        ".",
+        "/",
+        null
+      ]
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "zarr_format": {
+            "const": "v2"
+          }
+        },
+        "required": [
+          "zarr_format"
+        ]
+      },
+      "then": {
+        "properties": {
+          "chunk_key_encoding": {
+            "const": "v2"
+          },
+          "chunk_key_separator": {
+            "enum": [
+              ".",
+              "/"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "zarr_format": {
+            "const": "v3"
+          }
+        },
+        "required": [
+          "zarr_format"
+        ]
+      },
+      "then": {
+        "properties": {
+          "chunk_key_encoding": {
+            "const": "default"
+          },
+          "chunk_key_separator": {
+            "type": "null"
+          }
+        }
+      }
+    }
+  ],
+  "additionalProperties": false
+}
+

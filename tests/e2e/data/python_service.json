@@ -1,0 +1,14 @@
+{
+    "parameters": {
+        "forecast_times": ["2024-01-01T00:00:00"],
+        "nsteps": 10,
+        "nensemble": 512,
+        "batch_size": 16,
+        "model_type": "fcn",
+        "noise_amplitude": 0.15,
+        "seed_base": 1000,
+        "data_source": "gfs",
+        "output_format": "zarr",
+        "create_plots": false
+    }
+}

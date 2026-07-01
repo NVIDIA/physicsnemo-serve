@@ -1,0 +1,60 @@
+# Rust
+target/
+
+# Go build output
+bin/
+
+# Python and packaging artifacts
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg-info/
+.eggs/
+build/
+dist/
+logs/
+pip-wheel-metadata/
+
+# Test and lint caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+.coverage
+.coverage.*
+htmlcov/
+runs/
+bin/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Maturin
+.maturin/
+
+# Editors and OS files
+.idea/
+.vscode/
+.DS_Store
+.smoke-output/
+.run-local/
+.example-output/
+.e2e/
+qa/artifacts/
+qa/inference/downloads/
+qa/inference/logs/
+qa/inference/reports/
+qa/inference/downloads/
+qa/logs/
+
+# Local large runtime assets
+checkpoints/*
+!checkpoints/.gitkeep
+
+# Claude Code skills (may contain tokens/secrets)
+.claude/skills/
+.codex

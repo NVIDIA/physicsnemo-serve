@@ -1,0 +1,31 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[project]
+name = "physicsnemo-serve-ci"
+version = "0.0.0"
+description = "CI tooling project for repository-level linting"
+license = { text = "Apache-2.0" }
+requires-python = ">=3.11"
+dependencies = [
+    "ruff>=0.15.2",
+    "pytest>=7.0",
+    "pytest-asyncio>=0.21",
+    "pyyaml>=6.0",
+    "numpy",
+    "pydantic>=2.0",
+    "redis>=5.0.0",
+    "hiredis>=2.0.0",
+    "python-dotenv>=1.0.0",
+    "aiofiles>=23.0.0",
+    "httpx>=0.25.0",
+    "huggingface_hub",
+    "jsonschema>=4.26.0",
+]
+
+[tool.pytest.ini_options]
+norecursedirs = ["scicomp-rq", ".uv-cache", ".venv", "qa"]
+pythonpath = [".", "scripts", "python", "python/e2s_tools"]
+
+[tool.uv]
+package = false

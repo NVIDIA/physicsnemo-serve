@@ -1,0 +1,265 @@
+# syntax=docker/dockerfile:1.4
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Multi-stage build using cargo-chef for optimal dependency caching
+# - Stage 1 (chef): Install shared Rust build tooling
+# - Stage 2 (planner): Generate dependency recipe from Cargo.toml/lock
+# - Stage 3 (builder): Cook dependencies (cached), then build binaries
+# - Stage 4 (runtime): Minimal image with binaries + Python wheel
+#
+# Build with: DOCKER_BUILDKIT=1 docker build -f Dockerfile.Earth2Studio.scicomp-rust-slim -t e2s-rust .
+
+# =============================================================================
+# Stage 1: Chef - Shared Rust build tooling
+# =============================================================================
+ARG PHYSICSNEMO_SERVE_RUNTIME_BASE_IMAGE=physicsnemo-serve-runtime-base:latest
+FROM --platform=linux/amd64 rust:bookworm AS chef
+WORKDIR /src
+
+# Install cargo-chef
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    cargo install cargo-chef --locked
+
+# =============================================================================
+# Stage 2: Planner - Generate cargo-chef recipe
+# =============================================================================
+FROM chef AS planner
+
+# Copy workspace manifests.
+COPY Cargo.toml Cargo.lock ./
+COPY crates/inference_server/Cargo.toml ./crates/inference_server/
+COPY crates/scicomp-rq/Cargo.toml ./crates/scicomp-rq/
+COPY crates/worker-runtime/Cargo.toml ./crates/worker-runtime/
+COPY crates/e2s_zarr_io/Cargo.toml ./crates/e2s_zarr_io/
+
+# Create minimal source stubs for cargo-chef to analyze
+RUN mkdir -p crates/inference_server/src && echo "fn main() {}" > crates/inference_server/src/main.rs \
+ && mkdir -p crates/scicomp-rq/src && echo "pub fn dummy() {}" > crates/scicomp-rq/src/lib.rs \
+ && mkdir -p crates/scicomp-rq/benches && echo "fn main() {}" > crates/scicomp-rq/benches/redis_utils_parser.rs \
+ && mkdir -p crates/worker-runtime/src && echo "fn main() {}" > crates/worker-runtime/src/main.rs \
+ && mkdir -p crates/e2s_zarr_io/src && echo "pub fn dummy() {}" > crates/e2s_zarr_io/src/lib.rs \
+ && mkdir -p crates/e2s_zarr_io/benches && echo "fn main() {}" > crates/e2s_zarr_io/benches/buffer_pool_latency.rs \
+ && echo "fn main() {}" > crates/e2s_zarr_io/benches/write_copy_barrier_latency.rs \
+ && echo "fn main() {}" > crates/e2s_zarr_io/benches/add_array_latency.rs
+
+# Generate recipe.json (dependency graph for caching)
+RUN cargo chef prepare --recipe-path recipe.json
+
+# =============================================================================
+# Stage 3: Builder - Cook dependencies, then build binaries
+# =============================================================================
+FROM chef AS builder
+
+# Optimize Rust compilation
+ENV CARGO_BUILD_JOBS=16 \
+    CARGO_INCREMENTAL=0 \
+    RUSTFLAGS="-C target-cpu=x86-64-v3"
+
+# Install build dependencies: python3-dev (for PyO3), sccache, maturin
+RUN apt-get clean \
+ && rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/* \
+ && find /etc/apt -type f \( -name '*.list' -o -name '*.sources' \) -print0 | xargs -0 sed -i \
+    -e 's|http://deb.debian.org|https://deb.debian.org|g' \
+    -e 's|http://security.debian.org|https://security.debian.org|g' \
+    -e 's|http://archive.ubuntu.com|https://archive.ubuntu.com|g' \
+    -e 's|http://security.ubuntu.com|https://security.ubuntu.com|g' \
+ && apt-get update -o Acquire::Retries=3 \
+ && apt-get install -y --no-install-recommends \
+    python3-dev curl ca-certificates \
+ && rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/* \
+ && curl -L https://github.com/mozilla/sccache/releases/download/v0.8.2/sccache-v0.8.2-x86_64-unknown-linux-musl.tar.gz | tar xz -C /tmp \
+ && mv /tmp/sccache-v0.8.2-x86_64-unknown-linux-musl/sccache /usr/local/bin/ \
+ && curl -L https://github.com/PyO3/maturin/releases/download/v1.8.3/maturin-x86_64-unknown-linux-musl.tar.gz | tar xz -C /usr/local/bin/
+
+# Set sccache as the Rust compiler wrapper.
+# Pass --build-arg SCCACHE_DISABLE=1 to bypass sccache wrapper behavior.
+ARG SCCACHE_DISABLE=0
+ENV RUSTC_WRAPPER=sccache \
+    SCCACHE_DIR=/tmp/sccache \
+    SCCACHE_DISABLE=${SCCACHE_DISABLE}
+
+# Copy recipe from planner stage
+COPY --from=planner /src/recipe.json recipe.json
+
+# Copy workspace manifests (needed for cargo chef cook).
+COPY Cargo.toml Cargo.lock ./
+COPY crates/inference_server/Cargo.toml ./crates/inference_server/
+COPY crates/scicomp-rq/Cargo.toml ./crates/scicomp-rq/
+COPY crates/worker-runtime/Cargo.toml ./crates/worker-runtime/
+COPY crates/e2s_zarr_io/Cargo.toml ./crates/e2s_zarr_io/
+
+# Create minimal source stubs required for manifest parsing during cargo-chef cook.
+RUN mkdir -p crates/inference_server/src && echo "fn main() {}" > crates/inference_server/src/main.rs \
+ && mkdir -p crates/scicomp-rq/src && echo "pub fn dummy() {}" > crates/scicomp-rq/src/lib.rs \
+ && mkdir -p crates/scicomp-rq/benches && echo "fn main() {}" > crates/scicomp-rq/benches/redis_utils_parser.rs \
+ && mkdir -p crates/worker-runtime/src && echo "fn main() {}" > crates/worker-runtime/src/main.rs \
+ && mkdir -p crates/e2s_zarr_io/src && echo "pub fn dummy() {}" > crates/e2s_zarr_io/src/lib.rs \
+ && mkdir -p crates/e2s_zarr_io/benches && echo "fn main() {}" > crates/e2s_zarr_io/benches/buffer_pool_latency.rs \
+ && echo "fn main() {}" > crates/e2s_zarr_io/benches/write_copy_barrier_latency.rs \
+ && echo "fn main() {}" > crates/e2s_zarr_io/benches/add_array_latency.rs
+
+# Cook dependencies for the Rust binaries this image actually ships.
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    --mount=type=cache,target=/tmp/sccache \
+    if [ "$SCCACHE_DISABLE" = "1" ]; then unset RUSTC_WRAPPER; fi; \
+    cargo chef cook --release --locked --recipe-path recipe.json \
+        --package inference_server \
+        --package worker-runtime
+
+# Cook the Python-extension dependency graph separately so maturin rebuilds are
+# mostly limited to scicomp-rq when only local source changes.
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    --mount=type=cache,target=/tmp/sccache \
+    if [ "$SCCACHE_DISABLE" = "1" ]; then unset RUSTC_WRAPPER; fi; \
+    cargo chef cook --release --locked --recipe-path recipe.json \
+        --package scicomp-rq \
+        --features python-extension
+
+# Cook e2s_zarr_io's extension dependency graph separately so the upcoming
+# runtime wheel build can reuse cached Rust dependencies.
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    --mount=type=cache,target=/tmp/sccache \
+    if [ "$SCCACHE_DISABLE" = "1" ]; then unset RUSTC_WRAPPER; fi; \
+    cargo chef cook --release --locked --recipe-path recipe.json \
+        --package e2s_zarr_io \
+        --features python-extension-module
+
+# Restore the real workspace manifest and lockfile after cargo-chef's synthetic
+# skeleton so the actual build can run with --locked.
+COPY Cargo.toml Cargo.lock ./
+COPY crates/inference_server/Cargo.toml ./crates/inference_server/
+COPY crates/scicomp-rq/Cargo.toml ./crates/scicomp-rq/
+COPY crates/worker-runtime/Cargo.toml ./crates/worker-runtime/
+COPY crates/e2s_zarr_io/Cargo.toml ./crates/e2s_zarr_io/
+
+# Build the Python wheel needed by the shipped execute worker before copying
+# the binary-only crates, so worker-runtime changes do not invalidate this layer.
+COPY crates/scicomp-rq ./crates/scicomp-rq
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    --mount=type=cache,target=/tmp/sccache \
+    cd crates/scicomp-rq && env -u RUSTC_WRAPPER maturin build --release --locked --features python-extension
+
+# Build the Rust-backed Zarr Python extension that will be used by upcoming
+# Earth2Studio output paths.
+COPY crates/e2s_zarr_io ./crates/e2s_zarr_io
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    --mount=type=cache,target=/tmp/sccache \
+    cd crates/e2s_zarr_io && env -u RUSTC_WRAPPER maturin build --release --locked --features python-extension-module
+
+# Copy binary source code after the wheel build to keep rebuilds scoped.
+COPY crates/inference_server ./crates/inference_server
+COPY crates/worker-runtime ./crates/worker-runtime
+COPY crates/e2s_zarr_io ./crates/e2s_zarr_io
+
+# Build binaries (only compiles your code, deps already built)
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    --mount=type=cache,target=/tmp/sccache \
+    if [ "$SCCACHE_DISABLE" = "1" ]; then unset RUSTC_WRAPPER; fi; \
+    cargo build --release --locked \
+        -p inference_server \
+        -p worker-runtime && \
+    if [ "$SCCACHE_DISABLE" != "1" ]; then sccache --show-stats; fi
+
+# =============================================================================
+# Stage 4: Runtime - Org-scoped PyTorch mirror + CUDA
+# =============================================================================
+FROM --platform=linux/amd64 ${PHYSICSNEMO_SERVE_RUNTIME_BASE_IMAGE} AS runtime
+WORKDIR /app
+
+ARG E2G_HASH=11dcf1b0787a7eb6a8497a3a5a5e1fdcc31232d3
+
+# Install third-party runtime dependencies before copying the repo-local wheel
+# so Rust/Python binding changes do not invalidate this heavy layer.
+RUN "$PHYSICSNEMO_SERVE_PYTHON_EXECUTABLE" -m pip install --no-cache-dir --no-build-isolation \
+    "earth2grid @ git+https://github.com/NVlabs/earth2grid@${E2G_HASH}" && \
+    "$PHYSICSNEMO_SERVE_PYTHON_EXECUTABLE" -m pip install --no-cache-dir \
+    natten==0.21.5+torch2100cu130 -f https://whl.natten.org && \
+    "$PHYSICSNEMO_SERVE_PYTHON_EXECUTABLE" -m pip install --no-cache-dir \
+    redis 'pydantic>=2.0.0' boto3 s3fs python-dotenv aiofiles httpx \
+    'warp-lang<1.12.0' \
+    "earth2studio[dlwp,fcn,fcn3,stormcast,stormscope,perturbation,data]==0.13.0" \
+    "git+https://github.com/NVIDIA/makani.git@b38fcb2799d7dbc146fa60459f3f9823394a8bf1" \
+    'warp-lang<1.12.0' \
+    cartopy cfgrib && \
+    "$PHYSICSNEMO_SERVE_PYTHON_EXECUTABLE" -m pip install --no-cache-dir 'scipy==1.13.1'
+
+# Copy local Python wheels after the third-party dependency layers so wheel
+# changes do not force a rebuild of torch-harmonics and Earth2Studio extras.
+COPY --from=builder /src/target/wheels/*.whl /tmp/wheels/
+RUN "$PHYSICSNEMO_SERVE_PYTHON_EXECUTABLE" -m pip install --no-cache-dir /tmp/wheels/*.whl \
+    && mkdir -p /app/bin /app/config /app/plugins /outputs
+
+# Copy Rust binaries after the heavy Python dependency layers so binary-only
+# rebuilds do not invalidate torch-harmonics or Earth2Studio installs.
+COPY --from=builder /src/target/release/inference_server /app/bin/inference-server
+COPY --from=builder /src/target/release/worker-runtime /app/bin/
+
+# Copy profiles
+COPY crates/worker-runtime/config/profiles.json /app/config/profiles.json
+
+# Copy current production plugins and repo-local assets used by them.
+COPY plugins/earth2-deterministic /app/plugins/earth2-deterministic
+COPY plugins/earth2-deterministic-batch /app/plugins/earth2-deterministic-batch
+COPY plugins/earth2-ensemble /app/plugins/earth2-ensemble
+COPY plugins/earth2-ensemble-fanout /app/plugins/earth2-ensemble-fanout
+COPY plugins/e2s-deterministic-earth2 /app/plugins/e2s-deterministic-earth2
+COPY plugins/e2s-deterministic /app/plugins/e2s-deterministic
+COPY plugins/e2s-deterministic-fcn /app/plugins/e2s-deterministic-fcn
+COPY plugins/e2s-diagnostic /app/plugins/e2s-diagnostic
+COPY plugins/e2s-ensemble /app/plugins/e2s-ensemble
+COPY plugins/e2s-example-user /app/plugins/e2s-example-user
+COPY plugins/e2s-foundry-fcn3 /app/plugins/e2s-foundry-fcn3
+COPY plugins/e2s-foundry-fcn3-stormscope-goes /app/plugins/e2s-foundry-fcn3-stormscope-goes
+COPY plugins/e2s-stormcast-fcn3 /app/plugins/e2s-stormcast-fcn3
+
+# Model checkpoints and other cached runtime artifacts.
+# The directory ships as an empty stub in git.
+COPY checkpoints /app/checkpoints
+
+# Copy e2s_tools Python package for python_bridge.py (workflow inspection)
+COPY python/e2s_tools /app/python/e2s_tools
+# Copy Earth2Workflow base class used by e2s-* plugins
+COPY python/e2s_workflow.py /app/python/e2s_workflow.py
+
+# Copy entrypoint scripts (supervisor-based process management)
+COPY scripts /app/scripts
+# Keep an explicit copy of runtime role config for clarity.
+COPY scripts/worker_runtime_config.json /app/scripts/worker_runtime_config.json
+
+# Keep legacy start.sh for backward compatibility (simple mode without supervisor)
+RUN <<'EOF'
+set -e
+chmod +x /app/scripts/*.sh
+rm -rf /tmp/*
+cat > /app/bin/start.sh <<'SCRIPT'
+#!/bin/bash
+set -e
+echo "Starting Redis server..."
+redis-server --daemonize yes --bind 127.0.0.1
+# Wait for Redis to be ready
+until redis-cli ping 2>/dev/null | grep -q PONG; do
+    sleep 0.1
+done
+echo "Redis is ready"
+if [ -x /app/bin/worker-runtime ] && [ -f "${WORKER_RUNTIME_CONFIG:-/app/scripts/worker_runtime_config.json}" ]; then
+    export WORKER_ROLE=scheduler
+    export WORKER_PIPELINE_CONFIG="${WORKER_RUNTIME_CONFIG:-/app/scripts/worker_runtime_config.json}"
+    exec /app/bin/worker-runtime --role scheduler --config-path "$WORKER_PIPELINE_CONFIG" "$@"
+fi
+echo "ERROR: no scheduler binary available (worker-runtime)" >&2
+exit 1
+SCRIPT
+chmod +x /app/bin/start.sh
+EOF
+
+# Use dumb-init for proper signal handling, run entrypoint.sh with supervisor
+ENTRYPOINT ["/usr/bin/dumb-init", "--"]
+CMD ["/app/scripts/entrypoint.sh"]

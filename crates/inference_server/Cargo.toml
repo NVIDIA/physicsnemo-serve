@@ -1,0 +1,46 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "inference_server"
+version = "0.1.0"
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+# Web framework
+axum = { version = "0.7", features = ["macros", "multipart"] }
+tower = "0.5.2"
+tower-http = { version = "0.5", features = ["cors", "limit", "trace"] }
+
+# Async runtime
+tokio = { workspace = true, features = ["fs"] }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = "0.9"
+
+# Error handling
+anyhow = { workspace = true }
+
+# Utilities
+uuid = { workspace = true }
+jsonschema = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+# Redis (via scicomp-rq)
+scicomp-rq = { path = "../scicomp-rq" }
+redis = { workspace = true }
+
+# Metrics / Observability
+prometheus-client.workspace = true
+nvml-wrapper.workspace = true
+sysinfo.workspace = true
+
+# HTTP client (for Prometheus proxy)
+reqwest = { version = "0.12", features = ["json"] }

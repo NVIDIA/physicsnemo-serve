@@ -1,0 +1,74 @@
+# syntax=docker/dockerfile:1.4
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Runtime dependency base for the Earth2Studio PhysicsNeMo Serve image.
+# Build and publish this image only when the PyTorch base image or stable Python
+# runtime dependencies change.
+
+ARG PYTORCH_BASE_IMAGE=pytorch:26.01-py3
+FROM --platform=linux/amd64 ${PYTORCH_BASE_IMAGE}
+WORKDIR /app
+
+# Install runtime dependencies shared by all PhysicsNeMo Serve runtime images.
+RUN apt-get clean \
+ && rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/* \
+ && find /etc/apt -type f \( -name '*.list' -o -name '*.sources' \) -print0 | xargs -0 sed -i \
+    -e 's|http://deb.debian.org|https://deb.debian.org|g' \
+    -e 's|http://security.debian.org|https://security.debian.org|g' \
+    -e 's|http://archive.ubuntu.com|https://archive.ubuntu.com|g' \
+    -e 's|http://security.ubuntu.com|https://security.ubuntu.com|g' \
+ && apt-get update -o Acquire::Retries=3 \
+ && apt-get install -y --no-install-recommends \
+    redis-server redis-tools dumb-init curl jq git \
+    libeccodes0 \
+    supervisor \
+ && rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*
+
+# Core environment variables shared with the application image.
+ENV REDIS_URL=redis://127.0.0.1:6379 \
+    QUEUE_CONFIG=/app/scripts/worker_runtime_config.json \
+    REDIS_STREAM_PREFIX=physicsnemo: \
+    WORKER_RUNTIME_CONFIG=/app/scripts/worker_runtime_config.json \
+    PHYSICSNEMO_SERVE_RUNTIME_ENVS_CONFIG=/app/scripts/worker_runtime_config.json \
+    NGC_CLI_ORG=no-org \
+    NGC_CLI_TEAM=no-team \
+    PHYSICSNEMO_SERVE_VENV=/opt/physicsnemo-serve-venv \
+    PHYSICSNEMO_SERVE_PYTHON_EXECUTABLE=/opt/physicsnemo-serve-venv/bin/python \
+    E2S_EXT_CACHE=/root/.cache/e2s_ext \
+    EARTH2STUDIO_CACHE=/root/.cache/e2s_ext \
+    CUDA_HOME=/usr/local/cuda \
+    FORCE_CUDA_EXTENSION=1 \
+    PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+    RUST_LOG=info \
+    LOG_LEVEL=info \
+    REDIS_MAXMEMORY=256mb \
+    WORKERS_PER_GPU=1 \
+    SERVER_PORT=8080 \
+    PLUGIN_DIR=/app/plugins \
+    PYTHON_BRIDGE_PATH=/app/python/e2s_tools/python_bridge.py \
+    PYTHONPATH=/app/python \
+    PATH=/opt/physicsnemo-serve-venv/bin:$PATH \
+    WORKFLOW_DIR=/app/plugins \
+    DEFAULT_OUTPUT_DIR=/outputs \
+    WORKERS=all
+
+EXPOSE 6379 8001 8080
+
+# Install Prometheus for in-container metrics storage.
+RUN mkdir -p /app/bin \
+    && curl -L https://github.com/prometheus/prometheus/releases/download/v3.3.0/prometheus-3.3.0.linux-amd64.tar.gz \
+    | tar xz --strip-components=1 -C /tmp prometheus-3.3.0.linux-amd64/prometheus \
+    && mv /tmp/prometheus /app/bin/prometheus \
+    && chmod +x /app/bin/prometheus
+
+# Create an isolated plugin runtime env that can still reuse the base Torch/CUDA
+# stack from the PyTorch image.
+RUN python3 -m venv --system-site-packages "$PHYSICSNEMO_SERVE_VENV"
+
+# Install stable Python build tooling and the expensive CUDA extension once in
+# the reusable base image.
+RUN "$PHYSICSNEMO_SERVE_PYTHON_EXECUTABLE" -m pip install --no-cache-dir --upgrade pip setuptools wheel
+RUN "$PHYSICSNEMO_SERVE_PYTHON_EXECUTABLE" -m pip install --no-cache-dir --no-build-isolation \
+    "torch-harmonics==0.8.1"
+RUN "$PHYSICSNEMO_SERVE_PYTHON_EXECUTABLE" -c "import torch_harmonics"

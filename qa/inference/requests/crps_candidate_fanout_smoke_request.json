@@ -1,0 +1,12 @@
+{
+  "model": "fcn",
+  "start_time": "2024-01-01T00:00:00",
+  "nsteps": 4,
+  "nensemble": 64,
+  "batch_size": 16,
+  "max_in_flight": 4,
+  "perturbation": "gaussian",
+  "noise_amplitude": 0.15,
+  "seed_base": 1000,
+  "perturbation_materialization_mode": "scheduled_gpu"
+}

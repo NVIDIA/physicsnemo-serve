@@ -1,0 +1,138 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+metadata:
+  id: earth2-ensemble-fanout
+  display_name: Earth2 Ensemble Fanout
+  version: 1.0.0
+  description: Earth2Studio ensemble forecast using PhysicsNeMo Serve fanout and postprocess aggregation
+  tags:
+  - earth2
+  - ensemble
+  - fanout
+ingress:
+  json_schema_inline:
+    type: object
+    additionalProperties: false
+    required:
+      - model
+      - start_time
+      - nsteps
+      - nensemble
+    properties:
+      model:
+        type: string
+        enum:
+          - fcn
+      start_time:
+        type: string
+        pattern: "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}"
+      nsteps:
+        type: integer
+        minimum: 1
+        maximum: 1000
+      nensemble:
+        type: integer
+        minimum: 1
+      batch_size:
+        type: integer
+        minimum: 1
+      max_in_flight:
+        type: integer
+        minimum: 1
+      perturbation:
+        type: string
+        enum:
+          - gaussian
+          - brown
+          - spherical_gaussian
+      noise_amplitude:
+        type: number
+        exclusiveMinimum: 0
+      seed_base:
+        type: integer
+      perturbation_materialization_mode:
+        type: string
+        enum:
+          - scheduled_gpu
+          - prepare_cpu
+        default: scheduled_gpu
+pipeline:
+  stages:
+    - id: prepare
+      phase: prepare
+      handler: plugin_phase
+      queue: prepare
+      next: schedule_materialize
+    - id: schedule_materialize
+      phase: schedule
+      handler: schedule
+      queue: schedule
+      next: materialize_perturbations
+    - id: materialize_perturbations
+      phase: execute
+      handler: plugin_phase
+      queue: execute.earth2-gpu
+      next: fanout
+    - id: fanout
+      phase: fanout
+      handler: fanout
+      queue: fanout
+      next: schedule
+    - id: schedule
+      phase: schedule
+      handler: schedule
+      queue: schedule
+      next: execute
+    - id: execute
+      phase: execute
+      handler: plugin_phase
+      queue: execute.earth2-gpu
+      next: collect
+    - id: collect
+      phase: collect
+      handler: collect
+      queue: collect
+      next: postprocess
+    - id: postprocess
+      phase: postprocess
+      handler: plugin_phase
+      queue: postprocess
+      next: results
+    - id: results
+      phase: results
+      handler: persist_results
+      queue: results
+runtime:
+  executor_class: earth2-gpu
+  prepare_executor_class: earth2-cpu
+  postprocess_executor_class: earth2-cpu
+  readiness_executor_class: earth2-cpu
+outputs:
+  result_schema_inline:
+    type: object
+    properties:
+      dataset_path:
+        type: string
+        description: Path to the Zarr forecast dataset
+  primary_artifact:
+    name: forecast_dataset
+    media_type: application/x-zarr
+resources:
+  defaults:
+    gpus_required: 1
+    memory_mb: 4096
+developer:
+  readiness:
+    recommended_check_phase: prepare
+    python_modules:
+      - numpy
+      - torch
+      - xarray
+      - earth2studio.models.px
+      - earth2studio.perturbation
+      - earth2studio.data
+      - earth2studio.io
+      - earth2studio.run
+      - earth2studio.utils.coords
+      - earth2studio.utils.time

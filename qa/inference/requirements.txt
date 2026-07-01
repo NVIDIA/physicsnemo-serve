@@ -1,0 +1,10 @@
+requests
+pytest
+pytest-html
+xarray
+zarr
+pytest-xdist
+
+# Required for scripts/run_qa.py and scripts/deploy-to-lepton.sh
+# (provides the `lep` CLI for Lepton endpoint management)
+leptonai

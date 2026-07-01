@@ -1,0 +1,213 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://earth2studio.dev/schemas/e2s_zarr_io/truth_manifest.v1.schema.json",
+  "title": "TruthManifestV1",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "case_id",
+    "generated_by_backend",
+    "zarr_info",
+    "truth_provenance",
+    "attrs_canonical_sha256",
+    "arrays",
+    "coords",
+    "dataset_sha256"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "truth_manifest.v1"
+    },
+    "case_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "generated_by_backend": {
+      "enum": [
+        "py_sync",
+        "py_async",
+        "rust"
+      ]
+    },
+    "zarr_info": {
+      "type": "object",
+      "required": [
+        "zarr_format",
+        "chunk_key_encoding",
+        "chunk_key_separator",
+        "store_kind"
+      ],
+      "properties": {
+        "zarr_format": {
+          "enum": [
+            "v2",
+            "v3"
+          ]
+        },
+        "chunk_key_encoding": {
+          "enum": [
+            "v2",
+            "default",
+            null
+          ]
+        },
+        "chunk_key_separator": {
+          "enum": [
+            ".",
+            "/",
+            null
+          ]
+        },
+        "store_kind": {
+          "const": "local_fs"
+        }
+      },
+      "additionalProperties": false
+    },
+    "truth_provenance": {
+      "type": "object",
+      "required": [
+        "generation_mode",
+        "earth2studio_commit",
+        "python_version",
+        "zarr_python_version",
+        "case_spec_sha256",
+        "generated_at_utc"
+      ],
+      "properties": {
+        "generation_mode": {
+          "const": "manual_tier0"
+        },
+        "earth2studio_commit": {
+          "type": "string",
+          "minLength": 1
+        },
+        "python_version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "zarr_python_version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "case_spec_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "generated_at_utc": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    "attrs_canonical_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "dataset_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "arrays": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/array_digest"
+      }
+    },
+    "coords": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/coord_digest"
+      }
+    }
+  },
+  "$defs": {
+    "array_digest": {
+      "type": "object",
+      "required": [
+        "name",
+        "dtype",
+        "shape",
+        "order",
+        "payload_sha256",
+        "nan_count",
+        "finite_min",
+        "finite_max"
+      ],
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "dtype": {
+          "type": "string"
+        },
+        "shape": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "order": {
+          "const": "C"
+        },
+        "payload_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "nan_count": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "finite_min": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "finite_max": {
+          "type": [
+            "number",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "coord_digest": {
+      "type": "object",
+      "required": [
+        "name",
+        "dtype",
+        "shape",
+        "payload_sha256"
+      ],
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "dtype": {
+          "type": "string"
+        },
+        "shape": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "payload_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}
+

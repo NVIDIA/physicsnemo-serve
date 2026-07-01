@@ -1,0 +1,23 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.cursor/
+.git/
+.venv/
+target/
+docs/
+tests/
+examples/
+*.log
+
+# Local runtime outputs
+.smoke-output/
+.run-local/
+.example-output/
+.e2e/
+**/.smoke-output/
+**/.run-local/
+**/.example-output/
+**/.e2e/

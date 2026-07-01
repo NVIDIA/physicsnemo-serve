@@ -1,0 +1,36 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+metadata:
+  id: e2s-example-user
+  display_name: E2S Example User Workflow
+  version: 1.0.0
+  description: Template workflow with no earth2studio dependencies (maps to example_user_workflow.py)
+  tags:
+    - example
+    - template
+ingress:
+  json_schema_inline:
+    type: object
+    additionalProperties: false
+    properties:
+      task_name:
+        type: string
+      num_iterations:
+        type: integer
+        minimum: 1
+      delay_seconds:
+        type: number
+        minimum: 0
+      generate_output:
+        type: boolean
+pipeline:
+  profile: default
+runtime:
+  executor_class: earth2-gpu
+  prepare_executor_class: earth2-cpu
+  readiness_executor_class: earth2-cpu
+resources:
+  defaults:
+    gpus_required: 1
+    memory_mb: 1024

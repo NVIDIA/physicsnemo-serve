@@ -1,0 +1,56 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+metadata:
+  id: earth2-deterministic
+  display_name: Earth2 Deterministic
+  version: 1.0.0
+  description: Deterministic Earth2Studio forecast using DLWP
+  tags:
+    - earth2
+    - deterministic
+ingress:
+  json_schema_inline:
+    type: object
+    additionalProperties: false
+    required:
+      - model
+      - start_time
+      - nsteps
+    properties:
+      model:
+        type: string
+        enum: [dlwp]
+      start_time:
+        type: string
+        pattern: "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}"
+      nsteps:
+        type: integer
+        minimum: 1
+        maximum: 1000
+pipeline:
+  profile: default
+runtime:
+  executor_class: earth2-gpu
+  prepare_executor_class: earth2-cpu
+  readiness_executor_class: earth2-cpu
+outputs:
+  result_schema_inline:
+    type: object
+    properties:
+      dataset_path:
+        type: string
+        description: Path to the Zarr forecast dataset
+  primary_artifact:
+    name: forecast_dataset
+    media_type: application/x-zarr
+developer:
+  readiness:
+    recommended_check_phase: prepare
+    python_modules:
+      - torch
+      - earth2studio.models.px
+      - earth2studio.data
+      - earth2studio.io
+      - earth2studio.run
+      - earth2studio.utils.time

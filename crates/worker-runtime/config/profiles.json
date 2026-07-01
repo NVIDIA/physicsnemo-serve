@@ -1,0 +1,157 @@
+{
+  "profiles": [
+    {
+      "workflow": "e2s-stormcast-fcn3",
+      "gpus.used": 1,
+      "average": {
+        "utilization.gpu": "55.38 %",
+        "utilization.memory": "25.52 %"
+      },
+      "peak": {
+        "utilization.gpu": "100 %",
+        "utilization.memory": "75 %",
+        "memory.used": "62807 MiB",
+        "memory.total": "81559 MiB"
+      }
+    },
+    {
+      "workflow": "e2s-deterministic-earth2",
+      "gpus.used": 1,
+      "average": {
+        "utilization.gpu": "3.45 %",
+        "utilization.memory": "1.92 %"
+      },
+      "peak": {
+        "utilization.gpu": "29 %",
+        "utilization.memory": "17 %",
+        "memory.used": "2223 MiB",
+        "memory.total": "81559 MiB"
+      }
+    },
+    {
+      "workflow": "e2s-diagnostic",
+      "prognostic_model": "fcn",
+      "diagnostic_model": "precipitation_afno",
+      "gpus.used": 1,
+      "average": {
+        "utilization.gpu": "33.67 %",
+        "utilization.memory": "24.17 %"
+      },
+      "peak": {
+        "utilization.gpu": "100 %",
+        "utilization.memory": "73 %",
+        "memory.used": "4257 MiB",
+        "memory.total": "81559 MiB"
+      }
+    },
+    {
+      "workflow": "e2s-diagnostic",
+      "prognostic_model": "dlwp",
+      "diagnostic_model": "precipitation_afno",
+      "gpus.used": 1,
+      "average": {
+        "utilization.gpu": "3.39 %",
+        "utilization.memory": "1.50 %"
+      },
+      "peak": {
+        "utilization.gpu": "45 %",
+        "utilization.memory": "20 %",
+        "memory.used": "4882 MiB",
+        "memory.total": "143771 MiB"
+      }
+    },
+    {
+      "workflow": "e2s-deterministic",
+      "model": "fcn",
+      "gpus.used": 1,
+      "average": {
+        "utilization.gpu": "2.18 %",
+        "utilization.memory": "1.13 %"
+      },
+      "peak": {
+        "utilization.gpu": "78 %",
+        "utilization.memory": "57 %",
+        "memory.used": "4777 MiB",
+        "memory.total": "81559 MiB"
+      }
+    },
+    {
+      "workflow": "e2s-deterministic",
+      "model": "dlwp",
+      "gpus.used": 1,
+      "average": {
+        "utilization.gpu": "0.93 %",
+        "utilization.memory": "0.13 %"
+      },
+      "peak": {
+        "utilization.gpu": "7 %",
+        "utilization.memory": "2 %",
+        "memory.used": "1293 MiB",
+        "memory.total": "81559 MiB"
+      }
+    },
+    {
+      "workflow": "earth2-deterministic",
+      "model": "dlwp",
+      "gpus.used": 1,
+      "average": {
+        "utilization.gpu": "0.93 %",
+        "utilization.memory": "0.13 %"
+      },
+      "peak": {
+        "utilization.gpu": "7 %",
+        "utilization.memory": "2 %",
+        "memory.used": "1293 MiB",
+        "memory.total": "81559 MiB"
+      }
+    },
+    {
+      "workflow": "e2s-deterministic",
+      "model": "fcn3",
+      "gpus.used": 1,
+      "average": {
+        "utilization.gpu": "21.93 %",
+        "utilization.memory": "4.93 %"
+      },
+      "peak": {
+        "utilization.gpu": "100 %",
+        "utilization.memory": "55 %",
+        "memory.used": "60511 MiB",
+        "memory.total": "81559 MiB"
+      }
+    },
+    {
+      "workflow": "e2s-deterministic-fcn",
+      "gpus.used": 1,
+      "average": {
+        "utilization.gpu": "21.93 %",
+        "utilization.memory": "4.93 %"
+      },
+      "peak": {
+        "utilization.gpu": "100 %",
+        "utilization.memory": "55 %",
+        "memory.used": "60511 MiB",
+        "memory.total": "81559 MiB"
+      }
+    },
+    {
+      "workflow": "e2s-ensemble",
+      "model": "fcn",
+      "gpus.used": 1,
+      "type": "ensemble",
+      "incremental": {
+        "memory.used": "900 MiB"
+      },
+      "average": {
+        "utilization.gpu": "2.65 %",
+        "utilization.memory": "1.48 %"
+      },
+      "peak": {
+        "utilization.gpu": "29 %",
+        "utilization.memory": "17 %",
+        "memory.used": "2799 MiB",
+        "memory.total": "81559 MiB"
+      }
+    }
+  ]
+}

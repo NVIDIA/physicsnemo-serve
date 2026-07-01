@@ -1,0 +1,76 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+metadata:
+  id: earth2-ensemble
+  display_name: Earth2 Ensemble
+  version: 1.0.0
+  description: Direct Earth2Studio ensemble forecast using DLWP
+  tags:
+  - earth2
+  - ensemble
+ingress:
+  json_schema_inline:
+    type: object
+    additionalProperties: false
+    required:
+      - model
+      - start_time
+      - nsteps
+      - nensemble
+    properties:
+      model:
+        type: string
+        enum: [dlwp]
+      start_time:
+        type: string
+        pattern: "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}"
+      nsteps:
+        type: integer
+        minimum: 1
+        maximum: 1000
+      nensemble:
+        type: integer
+        minimum: 1
+      batch_size:
+        type: integer
+        minimum: 1
+      perturbation:
+        type: string
+        enum: [gaussian, brown]
+      noise_amplitude:
+        type: number
+        exclusiveMinimum: 0
+      seed_base:
+        type: integer
+pipeline:
+  profile: default
+runtime:
+  executor_class: earth2-gpu
+  prepare_executor_class: earth2-cpu
+  readiness_executor_class: earth2-cpu
+outputs:
+  result_schema_inline:
+    type: object
+    properties:
+      dataset_path:
+        type: string
+        description: Path to the Zarr forecast dataset
+  primary_artifact:
+    name: forecast_dataset
+    media_type: application/x-zarr
+resources:
+  defaults:
+    gpus_required: 1
+    memory_mb: 8192
+developer:
+  readiness:
+    recommended_check_phase: prepare
+    python_modules:
+      - torch
+      - earth2studio.models.px
+      - earth2studio.perturbation
+      - earth2studio.data
+      - earth2studio.io
+      - earth2studio.run
+      - earth2studio.utils.time

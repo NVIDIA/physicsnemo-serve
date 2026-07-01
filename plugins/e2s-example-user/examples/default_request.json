@@ -1,0 +1,6 @@
+{
+    "task_name": "example_task",
+    "num_iterations": 5,
+    "delay_seconds": 0.5,
+    "generate_output": true
+}

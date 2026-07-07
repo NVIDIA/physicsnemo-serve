@@ -1,0 +1,60 @@
+name: Docker Build & Publish
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  RUNTIME_BASE_TAG: pytorch-26.01-py3-th0.8.1
+  PYTORCH_BASE_IMAGE: nvcr.io/nvidia/pytorch:26.01-py3
+
+jobs:
+  docker-publish:
+    name: Build & Push to NGC
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
+          sudo apt-get clean
+          df -h /
+
+      - name: Set image tag
+        id: tag
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            echo "tag=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=sha-$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Log in to NGC registry
+        run: echo "${{ secrets.NGC_REGISTRY_PASSWORD }}" | docker login ${{ vars.NGC_REGISTRY }} -u '$oauthtoken' --password-stdin
+
+      - name: Build runtime base image
+        run: |
+          docker build \
+            -f Dockerfile.Earth2Studio.runtime-base \
+            --build-arg PYTORCH_BASE_IMAGE=${{ env.PYTORCH_BASE_IMAGE }} \
+            -t ${{ vars.NGC_REGISTRY }}/${{ vars.NGC_ORG }}/${{ vars.NGC_RUNTIME_BASE_IMAGE }}:${{ env.RUNTIME_BASE_TAG }} \
+            .
+
+      - name: Build main image
+        run: |
+          docker build \
+            -f Dockerfile.Earth2Studio.scicomp-rust-slim \
+            --build-arg PHYSICSNEMO_SERVE_RUNTIME_BASE_IMAGE=${{ vars.NGC_REGISTRY }}/${{ vars.NGC_ORG }}/${{ vars.NGC_RUNTIME_BASE_IMAGE }}:${{ env.RUNTIME_BASE_TAG }} \
+            -t ${{ vars.NGC_REGISTRY }}/${{ vars.NGC_ORG }}/${{ vars.NGC_IMAGE }}:${{ steps.tag.outputs.tag }} \
+            .
+
+      - name: Push images to NGC
+        run: |
+          docker push ${{ vars.NGC_REGISTRY }}/${{ vars.NGC_ORG }}/${{ vars.NGC_RUNTIME_BASE_IMAGE }}:${{ env.RUNTIME_BASE_TAG }}
+          docker push ${{ vars.NGC_REGISTRY }}/${{ vars.NGC_ORG }}/${{ vars.NGC_IMAGE }}:${{ steps.tag.outputs.tag }}

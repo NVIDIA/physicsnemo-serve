@@ -16,8 +16,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # TODO: update to latest stable once GitLab CI is also upgraded
       - uses: actions-rust-lang/setup-rust-toolchain@150fca883cd4034361b621bd4e6a9d34e5143606
         with:
+          toolchain: "1.94.1"
           components: rustfmt
           cache: false
       - run: cargo fmt --check
@@ -29,6 +31,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions-rust-lang/setup-rust-toolchain@150fca883cd4034361b621bd4e6a9d34e5143606
         with:
+          toolchain: "1.94.1"
           components: clippy
           cache: false
       - uses: actions/cache@v4
@@ -49,6 +52,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions-rust-lang/setup-rust-toolchain@150fca883cd4034361b621bd4e6a9d34e5143606
         with:
+          toolchain: "1.94.1"
           cache: false
       - uses: actions/cache@v4
         with:
@@ -64,20 +68,11 @@ jobs:
   rust-test:
     name: Rust Test
     runs-on: ubuntu-latest
-    services:
-      redis:
-        image: redis:7
-        ports:
-          - 6379:6379
-        options: >-
-          --health-cmd "redis-cli ping"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
     steps:
       - uses: actions/checkout@v4
       - uses: actions-rust-lang/setup-rust-toolchain@150fca883cd4034361b621bd4e6a9d34e5143606
         with:
+          toolchain: "1.94.1"
           cache: false
       - uses: actions/cache@v4
         with:
@@ -90,8 +85,9 @@ jobs:
             ${{ runner.os }}-cargo-test-
       - name: Install system dependencies
         run: |
+          sudo rm -f /etc/apt/sources.list.d/microsoft-prod.list /etc/apt/sources.list.d/azure-cli.list
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends python3 python3-yaml
+          sudo apt-get install -y --no-install-recommends python3 python3-yaml redis-server
           sudo ln -sf /usr/bin/python3 /usr/local/bin/python
       - run: cargo test
 
@@ -112,6 +108,7 @@ jobs:
       - uses: astral-sh/setup-uv@v3
       - name: Install system dependencies
         run: |
+          sudo rm -f /etc/apt/sources.list.d/microsoft-prod.list /etc/apt/sources.list.d/azure-cli.list
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends build-essential
       - name: Run tests
@@ -127,6 +124,7 @@ jobs:
       - uses: astral-sh/setup-uv@v3
       - name: Install system dependencies
         run: |
+          sudo rm -f /etc/apt/sources.list.d/microsoft-prod.list /etc/apt/sources.list.d/azure-cli.list
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends build-essential
       - run: uv run pytest crates/e2s_zarr_io/parity/suites -v
@@ -134,15 +132,16 @@ jobs:
   scicomp-rq-test:
     name: scicomp-rq Tests
     runs-on: ubuntu-latest
-    container:
-      image: ghcr.io/pyo3/maturin:latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@150fca883cd4034361b621bd4e6a9d34e5143606
+        with:
+          toolchain: "1.94.1"
+          cache: false
       - name: Run scicomp-rq tests
         run: |
-          PY3=$(ls /opt/python/cp311*/bin/python3 /opt/python/cp312*/bin/python3 /opt/python/cp313*/bin/python3 2>/dev/null | sort -V | tail -1)
-          $PY3 -m venv .venv
+          python3 -m venv .venv
           . .venv/bin/activate
-          pip install pytest pytest-asyncio
+          pip install pytest pytest-asyncio maturin
           maturin develop --manifest-path crates/scicomp-rq/Cargo.toml --features python-extension
           pytest crates/scicomp-rq/tests -v

@@ -1,0 +1,147 @@
+name: Lepton QA
+
+on:
+  issue_comment:
+    types: [created]
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Image tag to test (e.g., sha-abc1234 or v0.1.20260701.0)"
+        required: true
+      suite:
+        description: "Test suite"
+        default: "cicd"
+        type: choice
+        options:
+          - smoke
+          - cicd
+          - full
+      service:
+        description: "Service backend"
+        default: "rust"
+        type: choice
+        options:
+          - rust
+          - python
+
+concurrency:
+  group: lepton-qa-${{ github.event.issue.number || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  lepton-qa:
+    name: Lepton QA (cicd)
+    runs-on: ubuntu-latest
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.issue.pull_request &&
+       contains(github.event.comment.body, '/run-lepton-cicd'))
+    steps:
+      - name: Check commenter authorization
+        if: github.event_name == 'issue_comment'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          PERMISSION=$(gh api repos/${{ github.repository }}/collaborators/${{ github.event.comment.user.login }}/permission --jq '.permission')
+          if [[ "$PERMISSION" != "admin" && "$PERMISSION" != "write" ]]; then
+            echo "User ${{ github.event.comment.user.login }} does not have write access (got: $PERMISSION)"
+            exit 1
+          fi
+
+      - name: Get PR details
+        if: github.event_name == 'issue_comment'
+        id: pr
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          PR_NUMBER=${{ github.event.issue.number }}
+          SHA=$(gh api repos/${{ github.repository }}/pulls/$PR_NUMBER --jq '.head.sha')
+          SHORT_SHA=$(echo "$SHA" | cut -c1-7)
+          echo "number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          echo "short_sha=$SHORT_SHA" >> "$GITHUB_OUTPUT"
+          echo "image_tag=pr-${PR_NUMBER}-${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Check Docker build status
+        if: github.event_name == 'issue_comment'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          SHA=${{ steps.pr.outputs.sha }}
+          CONCLUSION=$(gh api repos/${{ github.repository }}/commits/$SHA/check-runs \
+            --jq '.check_runs[] | select(.name == "Build & Push to NGC") | .conclusion' | head -1)
+          if [[ "$CONCLUSION" != "success" ]]; then
+            gh pr comment ${{ steps.pr.outputs.number }} \
+              --body "Cannot run Lepton QA: Docker image build has not succeeded for commit \`${SHA:0:7}\`. Current status: \`${CONCLUSION:-not found}\`. Please ensure the **Docker Build & Publish** check passes first."
+            exit 1
+          fi
+
+      - name: Set pending status
+        if: github.event_name == 'issue_comment'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh api repos/${{ github.repository }}/statuses/${{ steps.pr.outputs.sha }} \
+            -f state=pending \
+            -f context="Lepton QA (cicd)" \
+            -f description="Running inference tests on Lepton" \
+            -f target_url="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.pr.outputs.sha || github.sha }}
+
+      - uses: astral-sh/setup-uv@v3
+
+      - name: Install Python dependencies
+        run: |
+          sudo rm -f /etc/apt/sources.list.d/microsoft-prod.list /etc/apt/sources.list.d/azure-cli.list
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential
+
+      - name: Determine image tag
+        id: image
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "tag=${{ inputs.image_tag }}" >> "$GITHUB_OUTPUT"
+            echo "suite=${{ inputs.suite }}" >> "$GITHUB_OUTPUT"
+            echo "service=${{ inputs.service }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${{ steps.pr.outputs.image_tag }}" >> "$GITHUB_OUTPUT"
+            echo "suite=cicd" >> "$GITHUB_OUTPUT"
+            echo "service=rust" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Run Lepton QA
+        id: qa
+        env:
+          LEPTON_WORKSPACE_TOKEN: ${{ secrets.LEPTON_WORKSPACE_TOKEN }}
+          LEPTON_WORKSPACE_ID: ${{ secrets.LEPTON_WORKSPACE_ID }}
+          PYTHONPATH: ${{ github.workspace }}:${{ github.workspace }}/python/e2s_tools
+        run: |
+          uv run python -u qa/scripts/run_qa.py \
+            --service ${{ steps.image.outputs.service }} \
+            --image-tag "${{ vars.NGC_REGISTRY }}/${{ secrets.NGC_ORG }}/${{ secrets.NGC_IMAGE }}:${{ steps.image.outputs.tag }}" \
+            --suite ${{ steps.image.outputs.suite }}
+
+      - name: Report success
+        if: success() && github.event_name == 'issue_comment'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh api repos/${{ github.repository }}/statuses/${{ steps.pr.outputs.sha }} \
+            -f state=success \
+            -f context="Lepton QA (cicd)" \
+            -f description="All inference tests passed" \
+            -f target_url="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+      - name: Report failure
+        if: failure() && github.event_name == 'issue_comment' && steps.pr.outputs.sha != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh api repos/${{ github.repository }}/statuses/${{ steps.pr.outputs.sha }} \
+            -f state=failure \
+            -f context="Lepton QA (cicd)" \
+            -f description="Inference tests failed" \
+            -f target_url="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"

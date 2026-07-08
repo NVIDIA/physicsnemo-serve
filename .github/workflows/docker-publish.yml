@@ -44,16 +44,14 @@ jobs:
       - name: Log in to NGC registry
         run: echo "${{ secrets.NGC_REGISTRY_PASSWORD }}" | docker login ${{ vars.NGC_REGISTRY }} -u '$oauthtoken' --password-stdin
 
-      - name: Pull runtime base image
-        run: docker pull ${{ vars.NGC_REGISTRY }}/${{ vars.NGC_ORG }}/${{ vars.NGC_RUNTIME_BASE_IMAGE }}:${{ env.RUNTIME_BASE_TAG }}
+      - name: Set up Docker Buildx
+        run: docker buildx create --use --name builder
 
-      - name: Build main image
+      - name: Build and push main image
         run: |
-          docker build \
+          docker buildx build \
             -f Dockerfile.Earth2Studio.scicomp-rust-slim \
             --build-arg PHYSICSNEMO_SERVE_RUNTIME_BASE_IMAGE=${{ vars.NGC_REGISTRY }}/${{ vars.NGC_ORG }}/${{ vars.NGC_RUNTIME_BASE_IMAGE }}:${{ env.RUNTIME_BASE_TAG }} \
             -t ${{ vars.NGC_REGISTRY }}/${{ vars.NGC_ORG }}/${{ vars.NGC_IMAGE }}:${{ steps.tag.outputs.tag }} \
+            --push \
             .
-
-      - name: Push main image to NGC
-        run: docker push ${{ vars.NGC_REGISTRY }}/${{ vars.NGC_ORG }}/${{ vars.NGC_IMAGE }}:${{ steps.tag.outputs.tag }}

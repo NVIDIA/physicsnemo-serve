@@ -55,6 +55,9 @@ qa/logs/
 checkpoints/*
 !checkpoints/.gitkeep
 
+# Local deploy config (copy config.example.yaml -> config.yaml)
+deploy/config.yaml
+
 # Claude Code skills (may contain tokens/secrets)
 .claude/skills/
 .codex

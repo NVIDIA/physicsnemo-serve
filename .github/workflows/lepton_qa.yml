@@ -6,36 +6,42 @@ on:
   workflow_dispatch:
     inputs:
       image_tag:
-        description: "Image tag to test (e.g., sha-abc1234 or v0.1.20260701.0)"
+        description: "Full image reference or short tag (e.g., pr-5-abc1234)"
         required: true
       suite:
-        description: "Test suite"
-        default: "cicd"
+        description: "Which suite(s) to run"
+        default: "ci"
         type: choice
         options:
-          - smoke
+          - ci
           - cicd
-          - full
-      service:
-        description: "Service backend"
-        default: "rust"
-        type: choice
-        options:
-          - rust
-          - python
+          - crps
+          - benchmark
 
 concurrency:
   group: lepton-qa-${{ github.event.issue.number || github.run_id }}
   cancel-in-progress: true
 
 jobs:
-  lepton-qa:
-    name: Lepton QA (cicd)
+  # ─── Gate: auth, PR info, Docker check, parse command ───────────────
+  gate:
+    name: Gate
     runs-on: ubuntu-latest
     if: >-
       github.event_name == 'workflow_dispatch' ||
       (github.event.issue.pull_request &&
-       contains(github.event.comment.body, '/run-lepton-cicd'))
+       (contains(github.event.comment.body, '/lepton-ci') ||
+        contains(github.event.comment.body, '/lepton-cicd') ||
+        contains(github.event.comment.body, '/lepton-crps') ||
+        contains(github.event.comment.body, '/lepton-benchmark')))
+    outputs:
+      run_cicd: ${{ steps.parse.outputs.run_cicd }}
+      run_crps: ${{ steps.parse.outputs.run_crps }}
+      run_benchmark: ${{ steps.parse.outputs.run_benchmark }}
+      image_tag: ${{ steps.image.outputs.tag }}
+      full_image: ${{ steps.image.outputs.full_image }}
+      sha: ${{ steps.pr.outputs.sha }}
+      pr_number: ${{ steps.pr.outputs.number }}
     steps:
       - name: Check commenter authorization
         if: github.event_name == 'issue_comment'
@@ -44,7 +50,7 @@ jobs:
         run: |
           PERMISSION=$(gh api repos/${{ github.repository }}/collaborators/${{ github.event.comment.user.login }}/permission --jq '.permission')
           if [[ "$PERMISSION" != "admin" && "$PERMISSION" != "write" ]]; then
-            echo "User ${{ github.event.comment.user.login }} does not have write access (got: $PERMISSION)"
+            echo "::error::User ${{ github.event.comment.user.login }} does not have write access (got: $PERMISSION)"
             exit 1
           fi
 
@@ -76,72 +82,207 @@ jobs:
             exit 1
           fi
 
-      - name: Set pending status
+      - name: Parse command
+        id: parse
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            SUITE="${{ inputs.suite }}"
+            case "$SUITE" in
+              ci)
+                echo "run_cicd=true" >> "$GITHUB_OUTPUT"
+                echo "run_crps=true" >> "$GITHUB_OUTPUT"
+                echo "run_benchmark=false" >> "$GITHUB_OUTPUT"
+                ;;
+              cicd)
+                echo "run_cicd=true" >> "$GITHUB_OUTPUT"
+                echo "run_crps=false" >> "$GITHUB_OUTPUT"
+                echo "run_benchmark=false" >> "$GITHUB_OUTPUT"
+                ;;
+              crps)
+                echo "run_cicd=false" >> "$GITHUB_OUTPUT"
+                echo "run_crps=true" >> "$GITHUB_OUTPUT"
+                echo "run_benchmark=false" >> "$GITHUB_OUTPUT"
+                ;;
+              benchmark)
+                echo "run_cicd=false" >> "$GITHUB_OUTPUT"
+                echo "run_crps=false" >> "$GITHUB_OUTPUT"
+                echo "run_benchmark=true" >> "$GITHUB_OUTPUT"
+                ;;
+            esac
+          else
+            COMMENT="${{ github.event.comment.body }}"
+            RUN_CICD=false
+            RUN_CRPS=false
+            RUN_BENCHMARK=false
+            if echo "$COMMENT" | grep -q '/lepton-ci'; then
+              RUN_CICD=true
+              RUN_CRPS=true
+            fi
+            if echo "$COMMENT" | grep -q '/lepton-cicd'; then
+              RUN_CICD=true
+            fi
+            if echo "$COMMENT" | grep -q '/lepton-crps'; then
+              RUN_CRPS=true
+            fi
+            if echo "$COMMENT" | grep -q '/lepton-benchmark'; then
+              RUN_BENCHMARK=true
+            fi
+            echo "run_cicd=$RUN_CICD" >> "$GITHUB_OUTPUT"
+            echo "run_crps=$RUN_CRPS" >> "$GITHUB_OUTPUT"
+            echo "run_benchmark=$RUN_BENCHMARK" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Determine image
+        id: image
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            TAG="${{ inputs.image_tag }}"
+          else
+            TAG="${{ steps.pr.outputs.image_tag }}"
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          # Build full image reference if it's a short tag
+          if [[ "$TAG" == *"/"* ]]; then
+            echo "full_image=$TAG" >> "$GITHUB_OUTPUT"
+          else
+            echo "full_image=${{ vars.NGC_REGISTRY }}/${{ secrets.NGC_ORG }}/${{ secrets.NGC_IMAGE }}:${TAG}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set pending statuses
         if: github.event_name == 'issue_comment'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh api repos/${{ github.repository }}/statuses/${{ steps.pr.outputs.sha }} \
-            -f state=pending \
-            -f context="Lepton QA (cicd)" \
-            -f description="Running inference tests on Lepton" \
-            -f target_url="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          SHA=${{ steps.pr.outputs.sha }}
+          RUN_URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
 
+          set_status() {
+            gh api repos/${{ github.repository }}/statuses/$SHA \
+              -f state="$1" -f context="$2" -f description="$3" -f target_url="$RUN_URL"
+          }
+
+          if [[ "${{ steps.parse.outputs.run_cicd }}" == "true" ]]; then
+            set_status pending "Lepton QA (cicd)" "Queued"
+          fi
+          if [[ "${{ steps.parse.outputs.run_crps }}" == "true" ]]; then
+            set_status pending "Lepton QA (crps)" "Queued"
+          fi
+          if [[ "${{ steps.parse.outputs.run_benchmark }}" == "true" ]]; then
+            set_status pending "Lepton QA (benchmark)" "Queued"
+          fi
+
+  # ─── CICD: deploy → pytest → teardown ──────────────────────────────
+  cicd:
+    name: Lepton QA (cicd)
+    needs: [gate]
+    runs-on: ubuntu-latest
+    if: always() && needs.gate.result == 'success' && needs.gate.outputs.run_cicd == 'true'
+    steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ steps.pr.outputs.sha || github.sha }}
+          ref: ${{ needs.gate.outputs.sha || github.sha }}
 
       - uses: astral-sh/setup-uv@v3
 
-      - name: Install Python dependencies
-        run: |
-          sudo rm -f /etc/apt/sources.list.d/microsoft-prod.list /etc/apt/sources.list.d/azure-cli.list
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends build-essential
-
-      - name: Determine image tag
-        id: image
-        run: |
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            echo "tag=${{ inputs.image_tag }}" >> "$GITHUB_OUTPUT"
-            echo "suite=${{ inputs.suite }}" >> "$GITHUB_OUTPUT"
-            echo "service=${{ inputs.service }}" >> "$GITHUB_OUTPUT"
-          else
-            echo "tag=${{ steps.pr.outputs.image_tag }}" >> "$GITHUB_OUTPUT"
-            echo "suite=cicd" >> "$GITHUB_OUTPUT"
-            echo "service=rust" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Run Lepton QA
-        id: qa
+      - name: Run CICD tests
         env:
           LEPTON_WORKSPACE_TOKEN: ${{ secrets.LEPTON_WORKSPACE_TOKEN }}
           LEPTON_WORKSPACE_ID: ${{ secrets.LEPTON_WORKSPACE_ID }}
+          LEPTON_NODE_GROUP: ${{ secrets.LEPTON_NODE_GROUP }}
+          NFS_MOUNT_BASE: ${{ vars.NFS_MOUNT_BASE }}
           PYTHONPATH: ${{ github.workspace }}:${{ github.workspace }}/python/e2s_tools
         run: |
           uv run python -u qa/scripts/run_qa.py \
-            --service ${{ steps.image.outputs.service }} \
-            --image-tag "${{ vars.NGC_REGISTRY }}/${{ secrets.NGC_ORG }}/${{ secrets.NGC_IMAGE }}:${{ steps.image.outputs.tag }}" \
-            --suite ${{ steps.image.outputs.suite }}
+            --service rust \
+            --image-tag "${{ needs.gate.outputs.full_image }}" \
+            --suite cicd
 
-      - name: Report success
-        if: success() && github.event_name == 'issue_comment'
+  # ─── CRPS: deploy baseline + candidate, compare ────────────────────
+  crps:
+    name: Lepton QA (crps)
+    needs: [gate, cicd]
+    runs-on: ubuntu-latest
+    if: always() && needs.gate.result == 'success' && needs.gate.outputs.run_crps == 'true' && (needs.cicd.result == 'success' || needs.cicd.result == 'skipped')
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.gate.outputs.sha || github.sha }}
+
+      - uses: astral-sh/setup-uv@v3
+
+      - name: Run CRPS comparison
+        env:
+          LEPTON_WORKSPACE_TOKEN: ${{ secrets.LEPTON_WORKSPACE_TOKEN }}
+          LEPTON_WORKSPACE_ID: ${{ secrets.LEPTON_WORKSPACE_ID }}
+          LEPTON_NODE_GROUP: ${{ secrets.LEPTON_NODE_GROUP }}
+          NFS_MOUNT_BASE: ${{ vars.NFS_MOUNT_BASE }}
+          PYTHONPATH: ${{ github.workspace }}:${{ github.workspace }}/python/e2s_tools
+        run: |
+          uv run python -u qa/scripts/run_lepton_crps_compare.py \
+            --candidate-image-tag "${{ needs.gate.outputs.full_image }}" \
+            --candidate-service rust \
+            --baseline-service python
+
+  # ─── Benchmark: submit batch job ───────────────────────────────────
+  benchmark:
+    name: Lepton QA (benchmark)
+    needs: [gate, crps]
+    runs-on: ubuntu-latest
+    if: always() && needs.gate.result == 'success' && needs.gate.outputs.run_benchmark == 'true' && (needs.crps.result == 'success' || needs.crps.result == 'skipped')
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.gate.outputs.sha || github.sha }}
+
+      - uses: astral-sh/setup-uv@v3
+
+      - name: Run Rust IO benchmark
+        env:
+          LEPTON_WORKSPACE_TOKEN: ${{ secrets.LEPTON_WORKSPACE_TOKEN }}
+          LEPTON_WORKSPACE_ID: ${{ secrets.LEPTON_WORKSPACE_ID }}
+          LEPTON_NODE_GROUP: ${{ secrets.LEPTON_NODE_GROUP }}
+          LEPTON_PULL_SECRET: ${{ secrets.PULL_SECRET }}
+          NFS_MOUNT_BASE: ${{ vars.NFS_MOUNT_BASE }}
+          PYTHONPATH: ${{ github.workspace }}:${{ github.workspace }}/python/e2s_tools
+        run: |
+          uv run python -u qa/scripts/run_lepton_rust_io_benchmark.py \
+            --image-tag "${{ needs.gate.outputs.tag }}"
+
+  # ─── Report final status back to PR ────────────────────────────────
+  report-status:
+    name: Report Status
+    needs: [gate, cicd, crps, benchmark]
+    runs-on: ubuntu-latest
+    if: always() && needs.gate.result == 'success' && needs.gate.outputs.sha != ''
+    steps:
+      - name: Report commit statuses
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh api repos/${{ github.repository }}/statuses/${{ steps.pr.outputs.sha }} \
-            -f state=success \
-            -f context="Lepton QA (cicd)" \
-            -f description="All inference tests passed" \
-            -f target_url="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          SHA=${{ needs.gate.outputs.sha }}
+          RUN_URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
 
-      - name: Report failure
-        if: failure() && github.event_name == 'issue_comment' && steps.pr.outputs.sha != ''
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          gh api repos/${{ github.repository }}/statuses/${{ steps.pr.outputs.sha }} \
-            -f state=failure \
-            -f context="Lepton QA (cicd)" \
-            -f description="Inference tests failed" \
-            -f target_url="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          set_status() {
+            gh api repos/${{ github.repository }}/statuses/$SHA \
+              -f state="$1" -f context="$2" -f description="$3" -f target_url="$RUN_URL"
+          }
+
+          report_job() {
+            local JOB_RESULT="$1"
+            local CONTEXT="$2"
+            local WAS_REQUESTED="$3"
+
+            if [[ "$WAS_REQUESTED" != "true" ]]; then
+              return
+            fi
+
+            case "$JOB_RESULT" in
+              success)  set_status success "$CONTEXT" "Passed" ;;
+              skipped)  set_status success "$CONTEXT" "Skipped (dependency not met)" ;;
+              *)        set_status failure "$CONTEXT" "Failed" ;;
+            esac
+          }
+
+          report_job "${{ needs.cicd.result }}" "Lepton QA (cicd)" "${{ needs.gate.outputs.run_cicd }}"
+          report_job "${{ needs.crps.result }}" "Lepton QA (crps)" "${{ needs.gate.outputs.run_crps }}"
+          report_job "${{ needs.benchmark.result }}" "Lepton QA (benchmark)" "${{ needs.gate.outputs.run_benchmark }}"

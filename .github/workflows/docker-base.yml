@@ -1,0 +1,51 @@
+name: Docker Base Image
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - Dockerfile.Earth2Studio.runtime-base
+  pull_request:
+    branches: [main]
+    paths:
+      - Dockerfile.Earth2Studio.runtime-base
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  RUNTIME_BASE_TAG: pytorch-26.01-py3-th0.8.1
+  PYTORCH_BASE_IMAGE: nvcr.io/nvidia/pytorch:26.01-py3
+
+jobs:
+  build-base:
+    name: Build & Push Runtime Base
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache
+          sudo rm -rf /usr/local/share/boost /usr/share/swift
+          sudo apt-get remove -y '^llvm-.*' '^dotnet-.*' 'php.*' google-chrome-stable firefox powershell mono-devel || true
+          sudo apt-get autoremove -y
+          sudo apt-get clean
+          df -h /
+
+      - name: Log in to NGC registry
+        run: echo "${{ secrets.NGC_REGISTRY_PASSWORD }}" | docker login ${{ vars.NGC_REGISTRY }} -u '$oauthtoken' --password-stdin
+
+      - name: Build runtime base image
+        run: |
+          docker build \
+            -f Dockerfile.Earth2Studio.runtime-base \
+            --build-arg PYTORCH_BASE_IMAGE=${{ env.PYTORCH_BASE_IMAGE }} \
+            -t ${{ vars.NGC_REGISTRY }}/${{ vars.NGC_ORG }}/${{ vars.NGC_RUNTIME_BASE_IMAGE }}:${{ env.RUNTIME_BASE_TAG }} \
+            .
+
+      - name: Push runtime base image
+        if: github.event_name != 'pull_request'
+        run: docker push ${{ vars.NGC_REGISTRY }}/${{ vars.NGC_ORG }}/${{ vars.NGC_RUNTIME_BASE_IMAGE }}:${{ env.RUNTIME_BASE_TAG }}

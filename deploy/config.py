@@ -11,23 +11,41 @@ Usage from any Python script in this repo::
 
     cfg = load_deploy_config()
     registry = cfg.get("docker_registry", "")
+
+Resolution order (highest wins):
+    1. Environment variable (key uppercased, e.g. ``nfs_mount_base`` → ``NFS_MOUNT_BASE``)
+    2. ``deploy/config.yaml`` (local, git-ignored)
 """
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
 _DEPLOY_DIR = Path(__file__).resolve().parent
 _CONFIG_PATH = _DEPLOY_DIR / "config.yaml"
 
+_KNOWN_KEYS = (
+    "docker_registry",
+    "image_name",
+    "runtime_base_image",
+    "python_service_image",
+    "lepton_workspace_id",
+    "lepton_node_group",
+    "lepton_dashboard_url",
+    "pull_secret",
+    "nfs_mount_base",
+    "repo_url",
+)
+
 
 def load_deploy_config() -> dict[str, str]:
-    """Read flat key-value pairs from deploy/config.yaml.
+    """Read deploy configuration from config.yaml and environment variables.
 
-    If the file is missing, a warning is printed to stderr and an empty
-    dict is returned so that callers can still fall back to their own
-    defaults or environment variables.
+    Values from environment variables (uppercased key names) take
+    precedence over the YAML file.  If the YAML file is missing, only
+    environment variables are used (with a warning to stderr).
     """
     cfg: dict[str, str] = {}
     try:
@@ -44,4 +62,10 @@ def load_deploy_config() -> dict[str, str]:
             "fill in your environment-specific values.",
             file=sys.stderr,
         )
+
+    for key in _KNOWN_KEYS:
+        env_val = os.environ.get(key.upper())
+        if env_val is not None:
+            cfg[key] = env_val
+
     return cfg

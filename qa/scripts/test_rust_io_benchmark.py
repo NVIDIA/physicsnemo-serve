@@ -394,7 +394,10 @@ def test_job_runner_default_backends_build_valid_command(tmp_path: Path) -> None
     assert cmd[cmd.index("--backends") + 1] == "rust,py_async,zarr_sync"
 
 
-def test_lepton_wrapper_dry_run_builds_expected_job(tmp_path: Path) -> None:
+def test_lepton_wrapper_dry_run_builds_expected_job(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("NFS_MOUNT_BASE", "/mnt/test-nfs")
     module = load_module(
         "run_lepton_rust_io_benchmark",
         SCRIPTS_DIR / "run_lepton_rust_io_benchmark.py",
@@ -434,7 +437,7 @@ def test_lepton_wrapper_dry_run_builds_expected_job(tmp_path: Path) -> None:
     assert summary["artifacts"]["job_log"].endswith(f"{job_name}.log")
     assert "--container-image" in job_args
     assert "nvcr.io/example/scicomp-ferroflux:test" in job_args
-    assert "/PhysicsNeMo/platform/rust_io_tests:/outputs:node-nfs:lustre" in job_args
+    assert "/mnt/test-nfs/rust_io_tests:/outputs:node-nfs:lustre" in job_args
     assert "run_rust_io_benchmark_job.py" in command
     assert "--models fcn,dlwp" in command
     assert "--nsteps 1" in command

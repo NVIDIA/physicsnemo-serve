@@ -13,7 +13,7 @@ concurrency:
 jobs:
   rust-fmt:
     name: Rust Format
-    runs-on: ubuntu-latest
+    runs-on: linux-amd64-cpu8
     steps:
       - uses: actions/checkout@v4
       # TODO: update to latest stable once GitLab CI is also upgraded
@@ -26,7 +26,7 @@ jobs:
 
   rust-clippy:
     name: Rust Clippy
-    runs-on: ubuntu-latest
+    runs-on: linux-amd64-cpu8
     steps:
       - uses: actions/checkout@v4
       - uses: actions-rust-lang/setup-rust-toolchain@150fca883cd4034361b621bd4e6a9d34e5143606
@@ -47,7 +47,7 @@ jobs:
 
   rust-build:
     name: Rust Build
-    runs-on: ubuntu-latest
+    runs-on: linux-amd64-cpu8
     steps:
       - uses: actions/checkout@v4
       - uses: actions-rust-lang/setup-rust-toolchain@150fca883cd4034361b621bd4e6a9d34e5143606
@@ -67,7 +67,7 @@ jobs:
 
   rust-test:
     name: Rust Test
-    runs-on: ubuntu-latest
+    runs-on: linux-amd64-cpu8
     steps:
       - uses: actions/checkout@v4
       - uses: actions-rust-lang/setup-rust-toolchain@150fca883cd4034361b621bd4e6a9d34e5143606
@@ -93,7 +93,7 @@ jobs:
 
   python-lint:
     name: Python Lint
-    runs-on: ubuntu-latest
+    runs-on: linux-amd64-cpu8
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v3
@@ -102,7 +102,7 @@ jobs:
 
   python-test:
     name: Python Tests
-    runs-on: ubuntu-latest
+    runs-on: linux-amd64-cpu8
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v3
@@ -118,7 +118,7 @@ jobs:
 
   e2s-zarr-io-parity:
     name: E2S Zarr IO Parity
-    runs-on: ubuntu-latest
+    runs-on: linux-amd64-cpu8
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v3
@@ -131,7 +131,7 @@ jobs:
 
   scicomp-rq-test:
     name: scicomp-rq Tests
-    runs-on: ubuntu-latest
+    runs-on: linux-amd64-cpu8
     steps:
       - uses: actions/checkout@v4
       - uses: actions-rust-lang/setup-rust-toolchain@150fca883cd4034361b621bd4e6a9d34e5143606

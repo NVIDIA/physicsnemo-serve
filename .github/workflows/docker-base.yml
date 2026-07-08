@@ -1,12 +1,13 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 name: Docker Base Image
 
 on:
   push:
-    branches: [main]
-    paths:
-      - Dockerfile.Earth2Studio.runtime-base
-  pull_request:
-    branches: [main]
+    branches:
+      - main
+      - "pull-request/[0-9]+"
     paths:
       - Dockerfile.Earth2Studio.runtime-base
   workflow_dispatch:
@@ -38,5 +39,5 @@ jobs:
             .
 
       - name: Push runtime base image
-        if: github.event_name != 'pull_request'
+        if: github.ref == 'refs/heads/main'
         run: docker push ${{ vars.NGC_REGISTRY }}/${{ secrets.NGC_ORG }}/${{ secrets.NGC_RUNTIME_BASE_IMAGE }}:${{ env.RUNTIME_BASE_TAG }}

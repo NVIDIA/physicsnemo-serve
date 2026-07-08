@@ -1,11 +1,14 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 name: Docker Build & Publish
 
 on:
   push:
-    branches: [main]
+    branches:
+      - main
+      - "pull-request/[0-9]+"
     tags: ["v*"]
-  pull_request:
-    branches: [main]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -26,8 +29,9 @@ jobs:
         run: |
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
             echo "tag=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
-          elif [[ "${{ github.event_name }}" == "pull_request" ]]; then
-            echo "tag=pr-${{ github.event.number }}-$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+          elif [[ "$GITHUB_REF" == refs/heads/pull-request/* ]]; then
+            PR_NUM="${GITHUB_REF#refs/heads/pull-request/}"
+            echo "tag=pr-${PR_NUM}-$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
           else
             echo "tag=sha-$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
           fi

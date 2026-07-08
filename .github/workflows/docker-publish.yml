@@ -13,7 +13,6 @@ concurrency:
 
 env:
   RUNTIME_BASE_TAG: pytorch-26.01-py3-th0.8.1
-  PYTORCH_BASE_IMAGE: nvcr.io/nvidia/pytorch:26.01-py3
 
 jobs:
   docker-publish:
@@ -45,13 +44,8 @@ jobs:
       - name: Log in to NGC registry
         run: echo "${{ secrets.NGC_REGISTRY_PASSWORD }}" | docker login ${{ vars.NGC_REGISTRY }} -u '$oauthtoken' --password-stdin
 
-      - name: Build runtime base image
-        run: |
-          docker build \
-            -f Dockerfile.Earth2Studio.runtime-base \
-            --build-arg PYTORCH_BASE_IMAGE=${{ env.PYTORCH_BASE_IMAGE }} \
-            -t ${{ vars.NGC_REGISTRY }}/${{ vars.NGC_ORG }}/${{ vars.NGC_RUNTIME_BASE_IMAGE }}:${{ env.RUNTIME_BASE_TAG }} \
-            .
+      - name: Pull runtime base image
+        run: docker pull ${{ vars.NGC_REGISTRY }}/${{ vars.NGC_ORG }}/${{ vars.NGC_RUNTIME_BASE_IMAGE }}:${{ env.RUNTIME_BASE_TAG }}
 
       - name: Build main image
         run: |
@@ -61,7 +55,5 @@ jobs:
             -t ${{ vars.NGC_REGISTRY }}/${{ vars.NGC_ORG }}/${{ vars.NGC_IMAGE }}:${{ steps.tag.outputs.tag }} \
             .
 
-      - name: Push images to NGC
-        run: |
-          docker push ${{ vars.NGC_REGISTRY }}/${{ vars.NGC_ORG }}/${{ vars.NGC_RUNTIME_BASE_IMAGE }}:${{ env.RUNTIME_BASE_TAG }}
-          docker push ${{ vars.NGC_REGISTRY }}/${{ vars.NGC_ORG }}/${{ vars.NGC_IMAGE }}:${{ steps.tag.outputs.tag }}
+      - name: Push main image to NGC
+        run: docker push ${{ vars.NGC_REGISTRY }}/${{ vars.NGC_ORG }}/${{ vars.NGC_IMAGE }}:${{ steps.tag.outputs.tag }}

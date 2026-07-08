@@ -43,9 +43,9 @@ jobs:
           docker build \
             -f Dockerfile.Earth2Studio.runtime-base \
             --build-arg PYTORCH_BASE_IMAGE=${{ env.PYTORCH_BASE_IMAGE }} \
-            -t ${{ vars.NGC_REGISTRY }}/${{ vars.NGC_ORG }}/${{ vars.NGC_RUNTIME_BASE_IMAGE }}:${{ env.RUNTIME_BASE_TAG }} \
+            -t ${{ vars.NGC_REGISTRY }}/${{ secrets.NGC_ORG }}/${{ secrets.NGC_RUNTIME_BASE_IMAGE }}:${{ env.RUNTIME_BASE_TAG }} \
             .
 
       - name: Push runtime base image
         if: github.event_name != 'pull_request'
-        run: docker push ${{ vars.NGC_REGISTRY }}/${{ vars.NGC_ORG }}/${{ vars.NGC_RUNTIME_BASE_IMAGE }}:${{ env.RUNTIME_BASE_TAG }}
+        run: docker push ${{ vars.NGC_REGISTRY }}/${{ secrets.NGC_ORG }}/${{ secrets.NGC_RUNTIME_BASE_IMAGE }}:${{ env.RUNTIME_BASE_TAG }}

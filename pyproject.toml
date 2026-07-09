@@ -19,8 +19,17 @@ dependencies = [
     "python-dotenv>=1.0.0",
     "aiofiles>=23.0.0",
     "httpx>=0.25.0",
+    "requests",
     "huggingface_hub",
     "jsonschema>=4.26.0",
+]
+
+[project.optional-dependencies]
+qa = [
+    "pytest-html",
+    "pytest-xdist",
+    "xarray",
+    "zarr",
 ]
 
 [tool.pytest.ini_options]

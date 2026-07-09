@@ -848,6 +848,11 @@ def main():
     workspace_id = os.environ.get("LEPTON_WORKSPACE_ID", "").strip() or _deploy_cfg.get(
         "lepton_workspace_id", ""
     )
+    if not workspace_id:
+        sys.exit(
+            "Error: LEPTON_WORKSPACE_ID is required but not set.\n"
+            "Set it via environment variable or lepton_workspace_id in deploy/config.yaml."
+        )
     workspace_token = require_env("LEPTON_WORKSPACE_TOKEN")
     endpoint_token = get_or_generate_endpoint_token()
 

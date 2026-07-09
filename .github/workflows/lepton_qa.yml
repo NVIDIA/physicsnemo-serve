@@ -42,7 +42,6 @@ jobs:
       run_crps: ${{ steps.parse.outputs.run_crps }}
       run_benchmark: ${{ steps.parse.outputs.run_benchmark }}
       image_tag: ${{ steps.image.outputs.tag }}
-      full_image: ${{ steps.image.outputs.full_image }}
       sha: ${{ steps.pr.outputs.sha }}
       pr_number: ${{ steps.pr.outputs.number }}
     steps:
@@ -135,7 +134,7 @@ jobs:
             echo "run_benchmark=$RUN_BENCHMARK" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Determine image
+      - name: Determine image tag
         id: image
         run: |
           if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
@@ -144,12 +143,6 @@ jobs:
             TAG="${{ steps.pr.outputs.image_tag }}"
           fi
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-          # Build full image reference if it's a short tag
-          if [[ "$TAG" == *"/"* ]]; then
-            echo "full_image=$TAG" >> "$GITHUB_OUTPUT"
-          else
-            echo "full_image=${{ vars.NGC_REGISTRY }}/${{ secrets.NGC_ORG }}/${{ secrets.NGC_IMAGE }}:${TAG}" >> "$GITHUB_OUTPUT"
-          fi
 
       - name: Set pending statuses
         if: github.event_name == 'issue_comment'
@@ -197,12 +190,22 @@ jobs:
           LEPTON_WORKSPACE_TOKEN: ${{ secrets.LEPTON_WORKSPACE_TOKEN }}
           LEPTON_WORKSPACE_ID: ${{ secrets.LEPTON_WORKSPACE_ID }}
           LEPTON_NODE_GROUP: ${{ secrets.LEPTON_NODE_GROUP }}
+          LEPTON_PULL_SECRET: ${{ secrets.PULL_SECRET }}
           NFS_MOUNT_BASE: ${{ vars.NFS_MOUNT_BASE }}
+          DOCKER_REGISTRY: ${{ vars.NGC_REGISTRY }}/${{ secrets.NGC_ORG }}
+          IMAGE_NAME: ${{ secrets.NGC_IMAGE }}
+          PULL_SECRET: ${{ secrets.PULL_SECRET }}
           PYTHONPATH: ${{ github.workspace }}:${{ github.workspace }}/python/e2s_tools
         run: |
-          uv run python -u qa/scripts/run_qa.py \
+          IMAGE_TAG="${{ needs.gate.outputs.image_tag }}"
+          if [[ "$IMAGE_TAG" == *"/"* ]]; then
+            FULL_IMAGE="$IMAGE_TAG"
+          else
+            FULL_IMAGE="${{ vars.NGC_REGISTRY }}/${{ secrets.NGC_ORG }}/${{ secrets.NGC_IMAGE }}:${IMAGE_TAG}"
+          fi
+          uv run --extra qa python -u qa/scripts/run_qa.py \
             --service rust \
-            --image-tag "${{ needs.gate.outputs.full_image }}" \
+            --image-tag "$FULL_IMAGE" \
             --suite cicd
 
   # ─── CRPS: deploy baseline + candidate, compare ────────────────────
@@ -228,11 +231,22 @@ jobs:
           LEPTON_WORKSPACE_TOKEN: ${{ secrets.LEPTON_WORKSPACE_TOKEN }}
           LEPTON_WORKSPACE_ID: ${{ secrets.LEPTON_WORKSPACE_ID }}
           LEPTON_NODE_GROUP: ${{ secrets.LEPTON_NODE_GROUP }}
+          LEPTON_PULL_SECRET: ${{ secrets.PULL_SECRET }}
           NFS_MOUNT_BASE: ${{ vars.NFS_MOUNT_BASE }}
+          DOCKER_REGISTRY: ${{ vars.NGC_REGISTRY }}/${{ secrets.NGC_ORG }}
+          IMAGE_NAME: ${{ secrets.NGC_IMAGE }}
+          PYTHON_SERVICE_IMAGE: ${{ vars.PYTHON_SERVICE_IMAGE }}
+          PULL_SECRET: ${{ secrets.PULL_SECRET }}
           PYTHONPATH: ${{ github.workspace }}:${{ github.workspace }}/python/e2s_tools
         run: |
-          uv run python -u qa/scripts/run_lepton_crps_compare.py \
-            --candidate-image-tag "${{ needs.gate.outputs.full_image }}" \
+          IMAGE_TAG="${{ needs.gate.outputs.image_tag }}"
+          if [[ "$IMAGE_TAG" == *"/"* ]]; then
+            FULL_IMAGE="$IMAGE_TAG"
+          else
+            FULL_IMAGE="${{ vars.NGC_REGISTRY }}/${{ secrets.NGC_ORG }}/${{ secrets.NGC_IMAGE }}:${IMAGE_TAG}"
+          fi
+          uv run --extra qa python -u qa/scripts/run_lepton_crps_compare.py \
+            --candidate-image-tag "$FULL_IMAGE" \
             --candidate-service rust \
             --baseline-service python
 
@@ -261,10 +275,13 @@ jobs:
           LEPTON_NODE_GROUP: ${{ secrets.LEPTON_NODE_GROUP }}
           LEPTON_PULL_SECRET: ${{ secrets.PULL_SECRET }}
           NFS_MOUNT_BASE: ${{ vars.NFS_MOUNT_BASE }}
+          DOCKER_REGISTRY: ${{ vars.NGC_REGISTRY }}/${{ secrets.NGC_ORG }}
+          IMAGE_NAME: ${{ secrets.NGC_IMAGE }}
+          PULL_SECRET: ${{ secrets.PULL_SECRET }}
           PYTHONPATH: ${{ github.workspace }}:${{ github.workspace }}/python/e2s_tools
         run: |
-          uv run python -u qa/scripts/run_lepton_rust_io_benchmark.py \
-            --image-tag "${{ needs.gate.outputs.tag }}"
+          uv run --extra qa python -u qa/scripts/run_lepton_rust_io_benchmark.py \
+            --image-tag "${{ needs.gate.outputs.image_tag }}"
 
   # ─── Report final status back to PR ────────────────────────────────
   report-status:

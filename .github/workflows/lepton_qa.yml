@@ -188,7 +188,7 @@ jobs:
       - uses: astral-sh/setup-uv@v3
 
       - name: Install Lepton CLI
-        run: uv pip install --system leptonai
+        run: uv tool install leptonai
 
       - name: Run CICD tests
         env:
@@ -217,7 +217,7 @@ jobs:
       - uses: astral-sh/setup-uv@v3
 
       - name: Install Lepton CLI
-        run: uv pip install --system leptonai
+        run: uv tool install leptonai
 
       - name: Run CRPS comparison
         env:
@@ -246,7 +246,7 @@ jobs:
       - uses: astral-sh/setup-uv@v3
 
       - name: Install Lepton CLI
-        run: uv pip install --system leptonai
+        run: uv tool install leptonai
 
       - name: Run Rust IO benchmark
         env:

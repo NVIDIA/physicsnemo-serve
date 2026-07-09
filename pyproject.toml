@@ -11,8 +11,6 @@ dependencies = [
     "ruff>=0.15.2",
     "pytest>=7.0",
     "pytest-asyncio>=0.21",
-    "pytest-html",
-    "pytest-xdist",
     "pyyaml>=6.0",
     "numpy",
     "pydantic>=2.0",
@@ -24,8 +22,6 @@ dependencies = [
     "requests",
     "huggingface_hub",
     "jsonschema>=4.26.0",
-    "xarray",
-    "zarr",
 ]
 
 [tool.pytest.ini_options]

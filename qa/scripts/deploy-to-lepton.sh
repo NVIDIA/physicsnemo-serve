@@ -270,7 +270,11 @@ if [[ -z "$IMAGE_TAG" ]]; then
     IMAGE_TAG="v0.1.$(date +%Y%m%d).0"
 fi
 
-IMAGE_FULL="${IMAGE_NAME}:${IMAGE_TAG}"
+if [[ "$IMAGE_TAG" == *"/"* ]]; then
+    IMAGE_FULL="$IMAGE_TAG"
+else
+    IMAGE_FULL="${IMAGE_NAME}:${IMAGE_TAG}"
+fi
 
 # Echo where the source code is coming from, so it is visible before any
 # build or clone runs. With --source physicsnemo-serve/earth2studio, GIT_URL is

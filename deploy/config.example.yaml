@@ -9,7 +9,7 @@
 docker_registry: "your-registry.example.com/your-org"
 image_name: "physicsnemo-serve"
 runtime_base_image: "physicsnemo-serve-runtime-base"
-python_service_image: "earth2studio"
+python_service_image: "earth2studio-scicomp"
 
 # -- Lepton deployment --
 lepton_workspace_id: "your-workspace-id"

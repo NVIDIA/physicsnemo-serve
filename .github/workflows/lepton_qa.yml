@@ -190,7 +190,11 @@ jobs:
           LEPTON_WORKSPACE_TOKEN: ${{ secrets.LEPTON_WORKSPACE_TOKEN }}
           LEPTON_WORKSPACE_ID: ${{ secrets.LEPTON_WORKSPACE_ID }}
           LEPTON_NODE_GROUP: ${{ secrets.LEPTON_NODE_GROUP }}
+          LEPTON_PULL_SECRET: ${{ secrets.PULL_SECRET }}
           NFS_MOUNT_BASE: ${{ vars.NFS_MOUNT_BASE }}
+          DOCKER_REGISTRY: ${{ vars.NGC_REGISTRY }}/${{ secrets.NGC_ORG }}
+          IMAGE_NAME: ${{ secrets.NGC_IMAGE }}
+          PULL_SECRET: ${{ secrets.PULL_SECRET }}
           PYTHONPATH: ${{ github.workspace }}:${{ github.workspace }}/python/e2s_tools
         run: |
           IMAGE_TAG="${{ needs.gate.outputs.image_tag }}"
@@ -227,7 +231,12 @@ jobs:
           LEPTON_WORKSPACE_TOKEN: ${{ secrets.LEPTON_WORKSPACE_TOKEN }}
           LEPTON_WORKSPACE_ID: ${{ secrets.LEPTON_WORKSPACE_ID }}
           LEPTON_NODE_GROUP: ${{ secrets.LEPTON_NODE_GROUP }}
+          LEPTON_PULL_SECRET: ${{ secrets.PULL_SECRET }}
           NFS_MOUNT_BASE: ${{ vars.NFS_MOUNT_BASE }}
+          DOCKER_REGISTRY: ${{ vars.NGC_REGISTRY }}/${{ secrets.NGC_ORG }}
+          IMAGE_NAME: ${{ secrets.NGC_IMAGE }}
+          PYTHON_SERVICE_IMAGE: ${{ vars.PYTHON_SERVICE_IMAGE }}
+          PULL_SECRET: ${{ secrets.PULL_SECRET }}
           PYTHONPATH: ${{ github.workspace }}:${{ github.workspace }}/python/e2s_tools
         run: |
           IMAGE_TAG="${{ needs.gate.outputs.image_tag }}"
@@ -266,6 +275,9 @@ jobs:
           LEPTON_NODE_GROUP: ${{ secrets.LEPTON_NODE_GROUP }}
           LEPTON_PULL_SECRET: ${{ secrets.PULL_SECRET }}
           NFS_MOUNT_BASE: ${{ vars.NFS_MOUNT_BASE }}
+          DOCKER_REGISTRY: ${{ vars.NGC_REGISTRY }}/${{ secrets.NGC_ORG }}
+          IMAGE_NAME: ${{ secrets.NGC_IMAGE }}
+          PULL_SECRET: ${{ secrets.PULL_SECRET }}
           PYTHONPATH: ${{ github.workspace }}:${{ github.workspace }}/python/e2s_tools
         run: |
           uv run python -u qa/scripts/run_lepton_rust_io_benchmark.py \

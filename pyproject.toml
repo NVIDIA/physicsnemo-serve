@@ -24,6 +24,14 @@ dependencies = [
     "jsonschema>=4.26.0",
 ]
 
+[project.optional-dependencies]
+qa = [
+    "pytest-html",
+    "pytest-xdist",
+    "xarray",
+    "zarr",
+]
+
 [tool.pytest.ini_options]
 norecursedirs = ["scicomp-rq", ".uv-cache", ".venv", "qa"]
 pythonpath = [".", "scripts", "python", "python/e2s_tools"]

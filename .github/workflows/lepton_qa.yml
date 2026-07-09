@@ -203,7 +203,7 @@ jobs:
           else
             FULL_IMAGE="${{ vars.NGC_REGISTRY }}/${{ secrets.NGC_ORG }}/${{ secrets.NGC_IMAGE }}:${IMAGE_TAG}"
           fi
-          uv run python -u qa/scripts/run_qa.py \
+          uv run --extra qa python -u qa/scripts/run_qa.py \
             --service rust \
             --image-tag "$FULL_IMAGE" \
             --suite cicd
@@ -245,7 +245,7 @@ jobs:
           else
             FULL_IMAGE="${{ vars.NGC_REGISTRY }}/${{ secrets.NGC_ORG }}/${{ secrets.NGC_IMAGE }}:${IMAGE_TAG}"
           fi
-          uv run python -u qa/scripts/run_lepton_crps_compare.py \
+          uv run --extra qa python -u qa/scripts/run_lepton_crps_compare.py \
             --candidate-image-tag "$FULL_IMAGE" \
             --candidate-service rust \
             --baseline-service python
@@ -280,7 +280,7 @@ jobs:
           PULL_SECRET: ${{ secrets.PULL_SECRET }}
           PYTHONPATH: ${{ github.workspace }}:${{ github.workspace }}/python/e2s_tools
         run: |
-          uv run python -u qa/scripts/run_lepton_rust_io_benchmark.py \
+          uv run --extra qa python -u qa/scripts/run_lepton_rust_io_benchmark.py \
             --image-tag "${{ needs.gate.outputs.image_tag }}"
 
   # ─── Report final status back to PR ────────────────────────────────

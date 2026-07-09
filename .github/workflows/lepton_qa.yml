@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 name: Lepton QA
 
 on:
@@ -26,7 +29,7 @@ jobs:
   # ─── Gate: auth, PR info, Docker check, parse command ───────────────
   gate:
     name: Gate
-    runs-on: ubuntu-latest
+    runs-on: linux-amd64-cpu4
     if: >-
       github.event_name == 'workflow_dispatch' ||
       (github.event.issue.pull_request &&
@@ -175,7 +178,7 @@ jobs:
   cicd:
     name: Lepton QA (cicd)
     needs: [gate]
-    runs-on: ubuntu-latest
+    runs-on: linux-amd64-cpu4
     if: always() && needs.gate.result == 'success' && needs.gate.outputs.run_cicd == 'true'
     steps:
       - uses: actions/checkout@v4
@@ -183,6 +186,11 @@ jobs:
           ref: ${{ needs.gate.outputs.sha || github.sha }}
 
       - uses: astral-sh/setup-uv@v3
+
+      - name: Install Lepton CLI
+        run: |
+          uv tool install leptonai
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Run CICD tests
         env:
@@ -201,7 +209,7 @@ jobs:
   crps:
     name: Lepton QA (crps)
     needs: [gate, cicd]
-    runs-on: ubuntu-latest
+    runs-on: linux-amd64-cpu4
     if: always() && needs.gate.result == 'success' && needs.gate.outputs.run_crps == 'true' && (needs.cicd.result == 'success' || needs.cicd.result == 'skipped')
     steps:
       - uses: actions/checkout@v4
@@ -209,6 +217,11 @@ jobs:
           ref: ${{ needs.gate.outputs.sha || github.sha }}
 
       - uses: astral-sh/setup-uv@v3
+
+      - name: Install Lepton CLI
+        run: |
+          uv tool install leptonai
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Run CRPS comparison
         env:
@@ -227,7 +240,7 @@ jobs:
   benchmark:
     name: Lepton QA (benchmark)
     needs: [gate, crps]
-    runs-on: ubuntu-latest
+    runs-on: linux-amd64-cpu4
     if: always() && needs.gate.result == 'success' && needs.gate.outputs.run_benchmark == 'true' && (needs.crps.result == 'success' || needs.crps.result == 'skipped')
     steps:
       - uses: actions/checkout@v4
@@ -235,6 +248,11 @@ jobs:
           ref: ${{ needs.gate.outputs.sha || github.sha }}
 
       - uses: astral-sh/setup-uv@v3
+
+      - name: Install Lepton CLI
+        run: |
+          uv tool install leptonai
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Run Rust IO benchmark
         env:
@@ -252,7 +270,7 @@ jobs:
   report-status:
     name: Report Status
     needs: [gate, cicd, crps, benchmark]
-    runs-on: ubuntu-latest
+    runs-on: linux-amd64-cpu4
     if: always() && needs.gate.result == 'success' && needs.gate.outputs.sha != ''
     steps:
       - name: Report commit statuses

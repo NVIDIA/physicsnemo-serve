@@ -1,11 +1,14 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 name: Docker Build & Publish
 
 on:
   push:
-    branches: [main]
+    branches:
+      - main
+      - "pull-request/[0-9]+"
     tags: ["v*"]
-  pull_request:
-    branches: [main]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -17,30 +20,18 @@ env:
 jobs:
   docker-publish:
     name: Build & Push to NGC
-    runs-on: ubuntu-latest
+    runs-on: linux-amd64-cpu16
     steps:
       - uses: actions/checkout@v4
-
-      - name: Free disk space
-        run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
-            /opt/hostedtoolcache /usr/local/graalvm /usr/local/.ghcup \
-            /usr/local/share/powershell /usr/local/share/chromium \
-            /usr/local/share/boost /usr/share/swift /usr/share/az* \
-            /opt/microsoft /opt/pipx
-          sudo docker image prune -af || true
-          sudo apt-get remove -y '^llvm-.*' '^dotnet-.*' 'php.*' google-chrome-stable firefox powershell mono-devel || true
-          sudo apt-get autoremove -y
-          sudo apt-get clean
-          df -h /
 
       - name: Set image tag
         id: tag
         run: |
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
             echo "tag=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
-          elif [[ "${{ github.event_name }}" == "pull_request" ]]; then
-            echo "tag=pr-${{ github.event.number }}-$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+          elif [[ "$GITHUB_REF" == refs/heads/pull-request/* ]]; then
+            PR_NUM="${GITHUB_REF#refs/heads/pull-request/}"
+            echo "tag=pr-${PR_NUM}-$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
           else
             echo "tag=sha-$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
           fi

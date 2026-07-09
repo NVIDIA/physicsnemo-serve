@@ -1,12 +1,13 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 name: Docker Base Image
 
 on:
   push:
-    branches: [main]
-    paths:
-      - Dockerfile.Earth2Studio.runtime-base
-  pull_request:
-    branches: [main]
+    branches:
+      - main
+      - "pull-request/[0-9]+"
     paths:
       - Dockerfile.Earth2Studio.runtime-base
   workflow_dispatch:
@@ -22,18 +23,9 @@ env:
 jobs:
   build-base:
     name: Build & Push Runtime Base
-    runs-on: ubuntu-latest
+    runs-on: linux-amd64-cpu16
     steps:
       - uses: actions/checkout@v4
-
-      - name: Free disk space
-        run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache
-          sudo rm -rf /usr/local/share/boost /usr/share/swift
-          sudo apt-get remove -y '^llvm-.*' '^dotnet-.*' 'php.*' google-chrome-stable firefox powershell mono-devel || true
-          sudo apt-get autoremove -y
-          sudo apt-get clean
-          df -h /
 
       - name: Log in to NGC registry
         run: echo "${{ secrets.NGC_REGISTRY_PASSWORD }}" | docker login ${{ vars.NGC_REGISTRY }} -u '$oauthtoken' --password-stdin
@@ -47,5 +39,5 @@ jobs:
             .
 
       - name: Push runtime base image
-        if: github.event_name != 'pull_request'
+        if: github.ref == 'refs/heads/main'
         run: docker push ${{ vars.NGC_REGISTRY }}/${{ secrets.NGC_ORG }}/${{ secrets.NGC_RUNTIME_BASE_IMAGE }}:${{ env.RUNTIME_BASE_TAG }}

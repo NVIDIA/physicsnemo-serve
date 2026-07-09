@@ -6,6 +6,10 @@ name: Lepton QA
 on:
   issue_comment:
     types: [created]
+  workflow_run:
+    workflows: ["Docker Build & Publish"]
+    types: [completed]
+    branches: [main]
   workflow_dispatch:
     inputs:
       image_tag:
@@ -32,6 +36,7 @@ jobs:
     runs-on: linux-amd64-cpu4
     if: >-
       github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success') ||
       (github.event.issue.pull_request &&
        (contains(github.event.comment.body, '/lepton-ci') ||
         contains(github.event.comment.body, '/lepton-cicd') ||
@@ -42,7 +47,7 @@ jobs:
       run_crps: ${{ steps.parse.outputs.run_crps }}
       run_benchmark: ${{ steps.parse.outputs.run_benchmark }}
       image_tag: ${{ steps.image.outputs.tag }}
-      sha: ${{ steps.pr.outputs.sha }}
+      sha: ${{ steps.pr.outputs.sha || steps.wr.outputs.sha }}
       pr_number: ${{ steps.pr.outputs.number }}
     steps:
       - name: Check commenter authorization
@@ -69,6 +74,12 @@ jobs:
           echo "sha=$SHA" >> "$GITHUB_OUTPUT"
           echo "short_sha=$SHORT_SHA" >> "$GITHUB_OUTPUT"
           echo "image_tag=pr-${PR_NUMBER}-${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Get workflow_run details
+        if: github.event_name == 'workflow_run'
+        id: wr
+        run: |
+          echo "sha=${{ github.event.workflow_run.head_sha }}" >> "$GITHUB_OUTPUT"
 
       - name: Check Docker build status
         if: github.event_name == 'issue_comment'
@@ -111,6 +122,10 @@ jobs:
                 echo "run_benchmark=true" >> "$GITHUB_OUTPUT"
                 ;;
             esac
+          elif [[ "${{ github.event_name }}" == "workflow_run" ]]; then
+            echo "run_cicd=true" >> "$GITHUB_OUTPUT"
+            echo "run_crps=true" >> "$GITHUB_OUTPUT"
+            echo "run_benchmark=false" >> "$GITHUB_OUTPUT"
           else
             COMMENT="${{ github.event.comment.body }}"
             RUN_CICD=false
@@ -139,6 +154,9 @@ jobs:
         run: |
           if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
             TAG="${{ inputs.image_tag }}"
+          elif [[ "${{ github.event_name }}" == "workflow_run" ]]; then
+            SHORT_SHA=$(echo "${{ github.event.workflow_run.head_sha }}" | cut -c1-7)
+            TAG="sha-${SHORT_SHA}"
           else
             TAG="${{ steps.pr.outputs.image_tag }}"
           fi

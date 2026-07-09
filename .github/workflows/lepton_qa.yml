@@ -189,8 +189,25 @@ jobs:
 
       - name: Install Lepton CLI
         run: |
-          uv tool install leptonai
+          set -x
+          uv tool install leptonai || true
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          echo "--- uv tool dir ---"
+          uv tool dir || true
+          echo "--- HOME/.local/bin contents ---"
+          ls -la "$HOME/.local/bin/" 2>&1 || true
+          echo "--- which lep ---"
+          which lep 2>&1 || true
+          echo "--- PATH ---"
+          echo "$PATH"
+          echo "--- find lep anywhere ---"
+          find / -name "lep" -type f 2>/dev/null | head -20 || true
+
+      - name: Verify lep is on PATH
+        run: |
+          echo "PATH=$PATH"
+          which lep
+          lep --version
 
       - name: Run CICD tests
         env:

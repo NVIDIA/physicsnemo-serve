@@ -17,10 +17,12 @@ _DEPLOY_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 _cfg() {
     local key="$1"
-    grep "^${key}:" "$_DEPLOY_DIR/config.yaml" 2>/dev/null \
+    local value
+    value=$(grep "^${key}:" "$_DEPLOY_DIR/config.yaml" 2>/dev/null \
         | head -1 \
         | sed 's/^[^:]*:[[:space:]]*//' \
         | sed 's/"//g' \
         | sed "s/'//g" \
-        | sed 's/[[:space:]]*#.*//'
+        | sed 's/[[:space:]]*#.*//' || true)
+    printf '%s' "$value"
 }

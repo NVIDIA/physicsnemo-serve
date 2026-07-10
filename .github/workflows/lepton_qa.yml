@@ -299,7 +299,8 @@ jobs:
           PYTHONPATH: ${{ github.workspace }}:${{ github.workspace }}/python/e2s_tools
         run: |
           uv run --extra qa python -u qa/scripts/run_lepton_rust_io_benchmark.py \
-            --image-tag "${{ needs.gate.outputs.image_tag }}"
+            --image-tag "${{ needs.gate.outputs.image_tag }}" \
+            --preset benchmark-report
 
   # ─── Report final status back to PR ────────────────────────────────
   report-status:

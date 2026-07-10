@@ -17,10 +17,10 @@ on:
         required: true
       suite:
         description: "Which suite(s) to run"
-        default: "ci"
+        default: "all"
         type: choice
         options:
-          - ci
+          - all
           - cicd
           - crps
           - benchmark
@@ -38,7 +38,7 @@ jobs:
       github.event_name == 'workflow_dispatch' ||
       (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success') ||
       (github.event.issue.pull_request &&
-       (contains(github.event.comment.body, '/lepton-ci') ||
+       (contains(github.event.comment.body, '/lepton-all') ||
         contains(github.event.comment.body, '/lepton-cicd') ||
         contains(github.event.comment.body, '/lepton-crps') ||
         contains(github.event.comment.body, '/lepton-benchmark')))
@@ -101,10 +101,10 @@ jobs:
           if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
             SUITE="${{ inputs.suite }}"
             case "$SUITE" in
-              ci)
+              all)
                 echo "run_cicd=true" >> "$GITHUB_OUTPUT"
                 echo "run_crps=true" >> "$GITHUB_OUTPUT"
-                echo "run_benchmark=false" >> "$GITHUB_OUTPUT"
+                echo "run_benchmark=true" >> "$GITHUB_OUTPUT"
                 ;;
               cicd)
                 echo "run_cicd=true" >> "$GITHUB_OUTPUT"
@@ -125,15 +125,16 @@ jobs:
           elif [[ "${{ github.event_name }}" == "workflow_run" ]]; then
             echo "run_cicd=true" >> "$GITHUB_OUTPUT"
             echo "run_crps=true" >> "$GITHUB_OUTPUT"
-            echo "run_benchmark=false" >> "$GITHUB_OUTPUT"
+            echo "run_benchmark=true" >> "$GITHUB_OUTPUT"
           else
             COMMENT="${{ github.event.comment.body }}"
             RUN_CICD=false
             RUN_CRPS=false
             RUN_BENCHMARK=false
-            if echo "$COMMENT" | grep -q '/lepton-ci'; then
+            if echo "$COMMENT" | grep -q '/lepton-all'; then
               RUN_CICD=true
               RUN_CRPS=true
+              RUN_BENCHMARK=true
             fi
             if echo "$COMMENT" | grep -q '/lepton-cicd'; then
               RUN_CICD=true
@@ -299,7 +300,8 @@ jobs:
           PYTHONPATH: ${{ github.workspace }}:${{ github.workspace }}/python/e2s_tools
         run: |
           uv run --extra qa python -u qa/scripts/run_lepton_rust_io_benchmark.py \
-            --image-tag "${{ needs.gate.outputs.image_tag }}"
+            --image-tag "${{ needs.gate.outputs.image_tag }}" \
+            --preset benchmark-report
 
   # ─── Report final status back to PR ────────────────────────────────
   report-status:

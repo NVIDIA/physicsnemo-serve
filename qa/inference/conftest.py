@@ -196,6 +196,10 @@ def pytest_configure(config):
     config.addinivalue_line(
         "markers", "stress: load/stability tests that intentionally sustain concurrency"
     )
+    config.addinivalue_line(
+        "markers",
+        "publication: live object-store publication sync tests",
+    )
 
     pathlib.Path("reports").mkdir(exist_ok=True)
     pathlib.Path("logs").mkdir(exist_ok=True)

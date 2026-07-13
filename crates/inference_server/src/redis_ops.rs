@@ -109,10 +109,11 @@ impl RedisService {
         initial_stage: &str,
         api_received_at: &str,
         api_enqueued_at: &str,
+        output_publication_configured: bool,
     ) -> Result<(), redis::RedisError> {
         let mut conn = self.qm.connection();
-        redis::cmd("HSET")
-            .arg(Self::run_key(run_id))
+        let mut hset = redis::cmd("HSET");
+        hset.arg(Self::run_key(run_id))
             .arg("workflow")
             .arg(workflow)
             .arg("version")
@@ -128,9 +129,13 @@ impl RedisService {
             .arg("api_received_at")
             .arg(api_received_at)
             .arg("api_enqueued_at")
-            .arg(api_enqueued_at)
-            .query_async(&mut conn)
-            .await
+            .arg(api_enqueued_at);
+        if output_publication_configured {
+            hset.arg("output_location").arg("local_and_cloud");
+        } else {
+            hset.arg("output_location").arg("local");
+        }
+        hset.query_async(&mut conn).await
     }
 
     /// Delete queued run data from Redis.
@@ -307,6 +312,14 @@ fn run_hash_fields_to_value(fields: HashMap<String, String>) -> Value {
         obj.insert("batch_info".to_string(), Value::Object(batch_info));
     }
 
+    for json_field in ["published_artifacts", "outputs", "artifacts"] {
+        if let Some(value) = fields.get(json_field)
+            && let Ok(parsed) = serde_json::from_str::<Value>(value)
+        {
+            obj.insert(json_field.to_string(), parsed);
+        }
+    }
+
     Value::Object(obj)
 }
 
@@ -441,6 +454,7 @@ mod tests {
             stream_prefix: String::new(),
             swagger_cdn_url: None,
             python_runtime_envs: HashMap::new(),
+            output_publication: Default::default(),
         }
     }
 
@@ -532,6 +546,29 @@ mod tests {
         assert_eq!(value["batch_info"]["waited_ms"], 25);
     }
 
+    #[test]
+    fn test_run_hash_fields_to_value_rehydrates_publication_metadata() {
+        let value = run_hash_fields_to_value(HashMap::from([
+            ("status".to_string(), "running".to_string()),
+            (
+                "published_artifacts".to_string(),
+                r#"[{"provider":"s3","source_artifact":"primary","destination_uri":"s3://bucket/result.json","status":"uploaded"}]"#
+                    .to_string(),
+            ),
+            (
+                "outputs".to_string(),
+                r#"[{"name":"primary","storage_path":"/outputs/run/result.json","primary":true}]"#
+                    .to_string(),
+            ),
+        ]));
+
+        assert_eq!(value["published_artifacts"][0]["provider"], "s3");
+        assert_eq!(
+            value["outputs"][0]["storage_path"],
+            "/outputs/run/result.json"
+        );
+    }
+
     #[tokio::test]
     async fn connect_uses_server_config_redis_url() {
         let _lock = REDIS_ENV_LOCK.lock().await;
@@ -576,6 +613,7 @@ mod tests {
                 "prepare",
                 "100",
                 "100",
+                false,
             )
             .await
             .expect("queued run hash should be stored");
@@ -601,5 +639,37 @@ mod tests {
                 .is_none(),
             "queued run hash should be removed after deletion"
         );
+    }
+
+    #[tokio::test]
+    async fn store_queued_run_defers_publication_status_when_configured() {
+        let port = reserve_port();
+        let _redis_server = TestRedisServer::spawn("queued-run-publication", port).await;
+        let service = RedisService::connect(&test_config(format!("redis://127.0.0.1:{port}/0")))
+            .await
+            .expect("redis connect should succeed");
+
+        service
+            .store_queued_run(
+                "run-publish",
+                "demo-prefetch",
+                "1.0.0",
+                "run",
+                "prepare",
+                "100",
+                "100",
+                true,
+            )
+            .await
+            .expect("queued run hash should be stored");
+
+        let run_data = service
+            .get_run_data("run-publish")
+            .await
+            .expect("stored run should be readable")
+            .expect("queued run should exist");
+        assert_eq!(run_data["status"], "queued");
+        assert_eq!(run_data["output_location"], "local_and_cloud");
+        assert!(run_data.get("output_publication_status").is_none());
     }
 }

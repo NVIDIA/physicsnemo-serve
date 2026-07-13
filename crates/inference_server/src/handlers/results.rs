@@ -246,6 +246,7 @@ fn dummy_state_ref() -> &'static AppState {
             stream_prefix: String::new(),
             swagger_cdn_url: None,
             python_runtime_envs: std::collections::HashMap::new(),
+            output_publication: Default::default(),
         })
     });
     &DUMMY
@@ -872,6 +873,7 @@ mod tests {
             stream_prefix: String::new(),
             swagger_cdn_url: None,
             python_runtime_envs: std::collections::HashMap::new(),
+            output_publication: Default::default(),
         };
         Arc::new(AppState::new_for_testing(config))
     }
@@ -959,6 +961,7 @@ mod tests {
             stream_prefix: String::new(),
             swagger_cdn_url: None,
             python_runtime_envs: std::collections::HashMap::new(),
+            output_publication: Default::default(),
         };
         let redis_service = RedisService::connect(&config)
             .await

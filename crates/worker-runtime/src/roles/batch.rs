@@ -68,6 +68,8 @@ struct BatchEnvelope {
     #[serde(default)]
     runtime: Option<JsonValue>,
     #[serde(default)]
+    output_publication: Option<JsonValue>,
+    #[serde(default)]
     batch_profile: Option<BatchProfile>,
     stage_context: StageContext,
 }
@@ -100,6 +102,7 @@ struct BufferedGroup {
     manifest_version: Option<String>,
     resource_profile: Option<JsonValue>,
     runtime: Option<JsonValue>,
+    output_publication: Option<JsonValue>,
     batch_profile: BatchProfile,
     stage_context: StageContext,
     items: Vec<BufferedItem>,
@@ -419,6 +422,7 @@ impl BatchRole {
                     manifest_version: typed.manifest_version.clone(),
                     resource_profile: typed.resource_profile.clone(),
                     runtime: typed.runtime.clone(),
+                    output_publication: typed.output_publication.clone(),
                     batch_profile: batch_profile.clone(),
                     stage_context: typed.stage_context.clone(),
                     items: Vec::new(),
@@ -441,8 +445,18 @@ impl BatchRole {
         let batch_payload = build_batch_payload(&group, FlushReason::MaxBatchSize)?;
         let encoded = serde_json::to_string(&batch_payload)?;
         log_flushed_batch(&group, &batch_payload, FlushReason::MaxBatchSize);
-        sink.handoff(msg, &next_stage.queue, &encoded, &next_stage.phase)
-            .await?;
+        let batch_id = batch_payload
+            .get("batch_id")
+            .and_then(JsonValue::as_str)
+            .ok_or_else(|| anyhow!("batch: flushed payload missing batch_id"))?;
+        sink.handoff_to_run(
+            msg,
+            &next_stage.queue,
+            &encoded,
+            &next_stage.phase,
+            batch_id,
+        )
+        .await?;
         Ok(())
     }
 }
@@ -574,6 +588,7 @@ fn build_batch_payload(group: &BufferedGroup, flush_reason: FlushReason) -> Resu
         })).collect::<Vec<_>>(),
         "resource_profile": resource_profile,
         "runtime": group.runtime,
+        "output_publication": group.output_publication,
         "stage_context": {
             "current_stage_id": group.stage_context.current_stage_id,
             "current_phase": group.stage_context.current_phase,
@@ -620,6 +635,7 @@ mod tests {
     #[derive(Debug, Clone)]
     struct HandoffRecord {
         dest_stream: String,
+        run_id: String,
         payload: String,
         stage: String,
     }
@@ -642,13 +658,14 @@ mod tests {
         fn enqueue<'a>(
             &'a self,
             stream: &'a str,
-            _run_id: &'a str,
+            run_id: &'a str,
             payload: &'a str,
             stage: &'a str,
         ) -> BoxFuture<'a, Result<String>> {
             Box::pin(async move {
                 self.enqueues.lock().unwrap().push(HandoffRecord {
                     dest_stream: stream.to_string(),
+                    run_id: run_id.to_string(),
                     payload: payload.to_string(),
                     stage: stage.to_string(),
                 });
@@ -662,7 +679,7 @@ mod tests {
 
         fn handoff<'a>(
             &'a self,
-            _msg: &'a scicomp_rq::Message,
+            msg: &'a scicomp_rq::Message,
             dest_stream: &'a str,
             payload: &'a str,
             stage: &'a str,
@@ -670,6 +687,26 @@ mod tests {
             Box::pin(async move {
                 self.handoffs.lock().unwrap().push(HandoffRecord {
                     dest_stream: dest_stream.to_string(),
+                    run_id: msg.run_id().to_string(),
+                    payload: payload.to_string(),
+                    stage: stage.to_string(),
+                });
+                Ok("1-0".to_string())
+            })
+        }
+
+        fn handoff_to_run<'a>(
+            &'a self,
+            _msg: &'a scicomp_rq::Message,
+            dest_stream: &'a str,
+            payload: &'a str,
+            stage: &'a str,
+            run_id: &'a str,
+        ) -> BoxFuture<'a, Result<String>> {
+            Box::pin(async move {
+                self.handoffs.lock().unwrap().push(HandoffRecord {
+                    dest_stream: dest_stream.to_string(),
+                    run_id: run_id.to_string(),
                     payload: payload.to_string(),
                     stage: stage.to_string(),
                 });
@@ -723,6 +760,17 @@ mod tests {
                 "entrypoint": "workflow.py",
                 "executor_class": "python.gpu.test"
             },
+            "output_publication": {
+                "target": {
+                    "artifact": "primary",
+                    "provider": "s3",
+                    "storage": {
+                        "type": "s3",
+                        "bucket": "bucket",
+                        "prefix": "runs"
+                    }
+                }
+            },
             "batch_profile": {
                 "enabled": true,
                 "batch_key": "same-key",
@@ -772,11 +820,17 @@ mod tests {
         assert_eq!(handoffs.len(), 1);
         let forwarded: JsonValue = serde_json::from_str(&handoffs[0].payload).unwrap();
         assert_eq!(handoffs[0].dest_stream, "schedule");
+        assert_eq!(handoffs[0].run_id, forwarded["batch_id"]);
+        assert_ne!(handoffs[0].run_id, "run-b");
         assert_eq!(handoffs[0].stage, "schedule");
         assert_eq!(forwarded["items"].as_array().unwrap().len(), 2);
         assert_eq!(forwarded["resource_profile"]["memory_mb"], 120);
         assert_eq!(forwarded["batch_info"]["flush_reason"], "max_batch_size");
         assert_eq!(forwarded["batch_info"]["batch_size"], 2);
+        assert_eq!(
+            forwarded["output_publication"]["target"]["artifact"],
+            "primary"
+        );
     }
 
     #[tokio::test]
@@ -794,6 +848,7 @@ mod tests {
         assert_eq!(enqueues.len(), 1);
         let forwarded: JsonValue = serde_json::from_str(&enqueues[0].payload).unwrap();
         assert_eq!(enqueues[0].dest_stream, "schedule");
+        assert_eq!(enqueues[0].run_id, forwarded["batch_id"]);
         assert_eq!(forwarded["items"].as_array().unwrap().len(), 1);
         assert_eq!(forwarded["batch_info"]["flush_reason"], "max_wait_ms");
         assert_eq!(forwarded["batch_info"]["batch_size"], 1);
@@ -862,6 +917,7 @@ mod tests {
             manifest_version: Some("1.0.0".to_string()),
             resource_profile: Some(json!({ "memory_mb": 1 })),
             runtime: None,
+            output_publication: None,
             batch_profile: BatchProfile {
                 enabled: true,
                 batch_key: "same-key".to_string(),

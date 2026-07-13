@@ -10,6 +10,7 @@ pub mod parent_run_state;
 pub mod postprocess;
 pub mod prefetch;
 pub mod prepare;
+pub mod publish;
 pub mod results;
 pub mod scheduler;
 pub(crate) mod stage;
@@ -107,6 +108,13 @@ pub fn build_role(env: &RoleEnv, providers: RoleProviders) -> Result<RoleBuildRe
             let role = postprocess::PostprocessRole::from_env(env)?;
             Ok((Box::new(role), vec![]))
         }
+        "publish" => {
+            let role = match providers.queue_manager {
+                Some(qm) => publish::PublishRole::from_env_with_queue_manager(env, qm)?,
+                None => publish::PublishRole::from_env(env)?,
+            };
+            Ok((Box::new(role), vec![]))
+        }
         "prefetch" => {
             let role = prefetch::PrefetchRole::from_env(env, providers.materializer)?;
             Ok((Box::new(role), vec![]))
@@ -130,7 +138,7 @@ pub fn build_role(env: &RoleEnv, providers: RoleProviders) -> Result<RoleBuildRe
             Ok((Box::new(role), vec![]))
         }
         unknown => Err(anyhow!(
-            "unknown role '{}': expected batch, collect, fanout, prepare, postprocess, prefetch, scheduler, or results",
+            "unknown role '{}': expected batch, collect, fanout, prepare, postprocess, prefetch, publish, scheduler, or results",
             unknown
         )),
     }
@@ -232,6 +240,14 @@ mod tests {
         let env = env_for("postprocess", &["results"]);
         let (role, tasks) = build_role(&env, RoleProviders::empty()).unwrap();
         assert_eq!(role.name(), "postprocess");
+        assert!(tasks.is_empty());
+    }
+
+    #[test]
+    fn build_role_creates_publish() {
+        let env = env_for("publish", &["results"]);
+        let (role, tasks) = build_role(&env, RoleProviders::empty()).unwrap();
+        assert_eq!(role.name(), "publish");
         assert!(tasks.is_empty());
     }
 

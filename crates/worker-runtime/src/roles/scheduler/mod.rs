@@ -10,7 +10,6 @@ mod reservation;
 mod reserved_memory;
 
 use std::collections::{HashSet, VecDeque};
-use std::fmt;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -26,7 +25,9 @@ use crate::config::{SchedulerRoleConfig, parse_role_config};
 use crate::metrics::WorkerMetrics;
 use crate::retry_dlq::{LocalFailureTracker, RetryDlqPolicy};
 use crate::roles::parent_run_state::{ParentRunStateStore, RedisParentRunStateStore};
-use crate::traits::{BackgroundTask, BoxFuture, MessageSink, RoleEnv, TaskCriticality, WorkerRole};
+use crate::traits::{
+    BackgroundTask, BoxFuture, MessageSink, RoleEnv, TaskCriticality, WorkerRole, message_deferred,
+};
 
 use self::discovery::discover_resources;
 pub(crate) use self::discovery::{
@@ -44,29 +45,42 @@ struct QueuedRequest {
     enqueued_at: Instant,
 }
 
+fn failed_run_ids(queued: &QueuedRequest) -> Vec<&str> {
+    let mut run_ids = vec![queued.msg.run_id()];
+    let mut seen = HashSet::from([queued.msg.run_id()]);
+
+    if let Some(items) = queued
+        .payload
+        .raw_payload
+        .get("items")
+        .and_then(JsonValue::as_array)
+    {
+        for item in items {
+            let Some(run_id) = item.get("run_id").and_then(JsonValue::as_str) else {
+                continue;
+            };
+            if !run_id.trim().is_empty() && seen.insert(run_id) {
+                run_ids.push(run_id);
+            }
+        }
+    }
+
+    run_ids
+}
+
 #[derive(Debug, Default)]
 struct SchedulerQueueState {
     queue: VecDeque<QueuedRequest>,
     pending_ids: HashSet<String>,
 }
 
-#[derive(Debug)]
-struct SchedulerDeferred;
-
-impl fmt::Display for SchedulerDeferred {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("scheduler: request queued for background scheduling")
-    }
-}
-
-impl std::error::Error for SchedulerDeferred {}
-
 pub(crate) fn scheduler_deferred_error() -> anyhow::Error {
-    SchedulerDeferred.into()
+    message_deferred("scheduler: request queued for background scheduling")
 }
 
+#[cfg(test)]
 pub(crate) fn is_scheduler_deferred_error(error: &anyhow::Error) -> bool {
-    error.downcast_ref::<SchedulerDeferred>().is_some()
+    crate::traits::is_message_deferred_error(error)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -721,14 +735,16 @@ impl SchedulerRole {
                 {
                     Ok(_) => {
                         self.record_scheduler_queue_wait(outcome_label, queue_wait_seconds);
-                        if let Err(status_err) = sink.mark_request_failed(queued.msg.run_id()).await
-                        {
-                            warn!(
-                                msg_id = queued.msg.id(),
-                                run_id = queued.msg.run_id(),
-                                error = %status_err,
-                                "scheduler DLQ handoff succeeded but failed to mark run status failed"
-                            );
+                        for failed_run_id in failed_run_ids(&queued) {
+                            if let Err(status_err) = sink.mark_request_failed(failed_run_id).await {
+                                warn!(
+                                    msg_id = queued.msg.id(),
+                                    run_id = failed_run_id,
+                                    batch_run_id = queued.msg.run_id(),
+                                    error = %status_err,
+                                    "scheduler DLQ handoff succeeded but failed to mark run status failed"
+                                );
+                            }
                         }
                         self.request_failures.clear(&queued.msg);
                         self.finish_request(&queued.msg).await;
@@ -2526,7 +2542,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn scheduler_dlqs_persistent_head_failures_after_retry_limit() {
+    async fn scheduler_dlqs_persistent_batch_and_marks_item_runs_failed() {
         let _guard = test_env::env_lock().lock().await;
         let prev_discovery = std::env::var("SCHEDULER_DISCOVERY_JSON").ok();
 
@@ -2550,6 +2566,10 @@ mod tests {
         let failing_payload = serde_json::json!({
             "workflow_id": "demo-fanout",
             "parent_run_id": "parent-broken",
+            "items": [
+                {"run_id": "run-broken-item-1", "payload": {"value": 1}},
+                {"run_id": "run-broken-item-2", "payload": {"value": 2}}
+            ],
             "resource_profile": {
                 "gpus_required": 1,
                 "memory_mb": 2048,
@@ -2596,7 +2616,14 @@ mod tests {
                 .payload
                 .contains("\"source_stream\":\"schedule\"")
         );
-        assert_eq!(sink.failed_run_ids(), vec!["run-broken".to_string()]);
+        assert_eq!(
+            sink.failed_run_ids(),
+            vec![
+                "run-broken".to_string(),
+                "run-broken-item-1".to_string(),
+                "run-broken-item-2".to_string(),
+            ]
+        );
         assert_eq!(role.queued_request_count().await, 1);
 
         run_scheduler_task(&tasks, &sink).await;

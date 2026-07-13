@@ -12,7 +12,7 @@
 # Environment Variables:
 #   WORKERS          - Which workers to run (default: all)
 #                      Values: all, server, prepare, fanout, batch, scheduler,
-#                      prefetch, collect, postprocess, results, execute, gpu,
+#                      prefetch, collect, postprocess, publish, results, execute, gpu,
 #                      or comma-separated list
 #   REDIS_URL        - Redis connection URL (default: redis://127.0.0.1:6379)
 #   QUEUE_CONFIG     - Stream configuration path (default: /app/scripts/worker_runtime_config.json)
@@ -20,7 +20,7 @@
 #   INFERENCE_STREAM - Inference server target stream (default: ${REDIS_STREAM_PREFIX}inference)
 #   PREFETCH_STREAM  - Inference server prefetch stream (default: ${REDIS_STREAM_PREFIX}prefetch)
 #   WORKER_RUNTIME_CONFIG - worker-runtime role config path for role mode
-#                           (scheduler/prefetch/results, default: /app/scripts/worker_runtime_config.json)
+#                           (scheduler/prefetch/publish/results, default: /app/scripts/worker_runtime_config.json)
 #   LOG_LEVEL        - Logging level for workers (default: info)
 #   REDIS_MAXMEMORY  - Redis max memory (default: 256mb)
 #   SERVER_PORT      - HTTP server listen port (default: 8080)
@@ -40,7 +40,7 @@
 #   docker run -p 8080:8080 -e WORKERS=server e2s-rust
 #
 #   # Run all orchestration workers without execute pools
-#   docker run -p 8080:8080 -e WORKERS=server,prepare,fanout,batch,scheduler,prefetch,collect,postprocess,results e2s-rust
+#   docker run -p 8080:8080 -e WORKERS=server,prepare,fanout,batch,scheduler,prefetch,collect,postprocess,publish,results e2s-rust
 #
 #   # Run just prefetch worker
 #   docker run -e WORKERS=prefetch e2s-rust
@@ -57,8 +57,13 @@ QUEUE_CONFIG="${QUEUE_CONFIG:-/app/scripts/worker_runtime_config.json}"
 REDIS_STREAM_PREFIX="${REDIS_STREAM_PREFIX:-physicsnemo:}"
 INFERENCE_STREAM="${INFERENCE_STREAM:-${REDIS_STREAM_PREFIX}inference}"
 PREFETCH_STREAM="${PREFETCH_STREAM:-${REDIS_STREAM_PREFIX}prefetch}"
-WORKER_RUNTIME_CONFIG="${WORKER_RUNTIME_CONFIG:-/app/scripts/worker_runtime_config.json}"
-PHYSICSNEMO_SERVE_RUNTIME_ENVS_CONFIG="${PHYSICSNEMO_SERVE_RUNTIME_ENVS_CONFIG:-$WORKER_RUNTIME_CONFIG}"
+DEFAULT_WORKER_RUNTIME_CONFIG="/app/scripts/worker_runtime_config.json"
+WORKER_RUNTIME_CONFIG="${WORKER_RUNTIME_CONFIG:-$DEFAULT_WORKER_RUNTIME_CONFIG}"
+if [[ -z "${PHYSICSNEMO_SERVE_RUNTIME_ENVS_CONFIG:-}" ]] || \
+   [[ "$PHYSICSNEMO_SERVE_RUNTIME_ENVS_CONFIG" == "$DEFAULT_WORKER_RUNTIME_CONFIG" && \
+      "$WORKER_RUNTIME_CONFIG" != "$DEFAULT_WORKER_RUNTIME_CONFIG" ]]; then
+    PHYSICSNEMO_SERVE_RUNTIME_ENVS_CONFIG="$WORKER_RUNTIME_CONFIG"
+fi
 PHYSICSNEMO_SERVE_PYTHON_EXECUTABLE="${PHYSICSNEMO_SERVE_PYTHON_EXECUTABLE:-python3}"
 LOG_LEVEL="${LOG_LEVEL:-info}"
 REDIS_MAXMEMORY="${REDIS_MAXMEMORY:-256mb}"
@@ -584,7 +589,51 @@ EOF
         fi
     fi
     
-    # Add results worker if requested (priority 50 = mid priority)
+    # Add publish worker if requested (priority 55 = after postprocess/execute and results)
+    if is_worker_requested "publish"; then
+        local publish_cmd=""
+        local publish_display_name=""
+        if check_binary "$WORKER_RUNTIME_BIN" "worker-runtime"; then
+            if [[ -f "$WORKER_RUNTIME_CONFIG" ]]; then
+                cat > /tmp/publish-runtime-wrapper.sh << EOF
+#!/bin/bash
+set -euo pipefail
+export WORKER_ROLE="publish"
+export WORKER_PIPELINE_CONFIG="$WORKER_RUNTIME_CONFIG"
+exec "$WORKER_RUNTIME_BIN" --role publish --config-path "$WORKER_RUNTIME_CONFIG"
+EOF
+                chmod +x /tmp/publish-runtime-wrapper.sh
+                publish_cmd="/tmp/publish-runtime-wrapper.sh"
+                publish_display_name="worker-runtime (role=publish)"
+            else
+                log "WARNING: worker-runtime config not found at $WORKER_RUNTIME_CONFIG"
+            fi
+        fi
+
+        if [[ -n "$publish_cmd" ]]; then
+            cat >> "$SUPERVISORD_CONF" << EOF
+
+[program:worker-runtime-publish]
+command=$publish_cmd
+directory=/app
+autostart=true
+autorestart=true
+startsecs=5
+startretries=3
+priority=55
+redirect_stderr=true
+stdout_logfile=/dev/stdout
+stdout_logfile_maxbytes=0
+environment=RUST_LOG="$LOG_LEVEL",REDIS_URL="$REDIS_URL",QUEUE_CONFIG="$QUEUE_CONFIG",REDIS_STREAM_PREFIX="$REDIS_STREAM_PREFIX",WORKER_RUNTIME_CONFIG="$WORKER_RUNTIME_CONFIG"
+EOF
+            programs_added=$((programs_added + 1))
+            log "  + $publish_display_name (priority=55)"
+        else
+            log "WARNING: no publish worker binary available (worker-runtime)"
+        fi
+    fi
+
+    # Add results worker if requested (priority 50 = starts before publish)
     if is_worker_requested "results"; then
         local results_cmd=""
         local results_display_name=""

@@ -25,9 +25,9 @@
 //!     let qm = QueueManager::from_redis_url("redis://localhost:6379").await?;
 //!
 //!     // Enqueue a job
-//!     let payload = serde_json::to_string(&serde_json::json!({"model": "pangu", "steps": 10}))?;
+//!     let payload = r#"{"model": "pangu", "steps": 10}"#;
 //!     let stream = scicomp_rq::LogicalStreamName::new("prefetch");
-//!     let msg_id = qm.enqueue(&stream, "run-001", &payload, "prefetch").await?;
+//!     let msg_id = qm.enqueue(&stream, "run-001", payload, "prefetch").await?;
 //!     println!("Enqueued: {}", msg_id);
 //!
 //!     Ok(())

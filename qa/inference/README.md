@@ -38,6 +38,7 @@ pytest -n 2
 - `test_smoke.py` - Fast sanity checks (@pytest.mark.smoke)
 - `test_cicd.py` - CI/CD pipeline tests (@pytest.mark.cicd)
 - `test_stress.py` - Sustained concurrency/load tests (@pytest.mark.stress)
+- `test_output_publication.py` - Live object-store sync tests (@pytest.mark.publication)
 - `test_basic.py` - Core workflow tests (health, list workflows, run workflows)
 - `test_negative.py` - Invalid parameter tests
 - `test_experiments.py` - Experimental/exploratory tests
@@ -85,6 +86,195 @@ python -u qa/scripts/run_qa.py \
   --image-tag v0.1.0 \
   --suite cicd \
   --lustre-dir cicd
+```
+
+## Output Publication Suite
+
+The `publication` suite is Rust-only and verifies that the local result served by
+PhysicsNeMo-Serve matches the artifact uploaded to one configured object-storage target.
+It is intentionally not part of `smoke` or `cicd` because it requires live cloud
+credentials and writes remote objects.
+
+The QA runner passes publication settings as JSON environment overrides by default.
+Set `QA_PUBLICATION_LOCAL_MOUNT_PATH` only when the deployed NFS path is also mounted
+locally; the runner then writes a runtime config through that explicit local mapping
+and passes the corresponding container path as both `WORKER_RUNTIME_CONFIG` and
+`PHYSICSNEMO_SERVE_RUNTIME_ENVS_CONFIG`. The effective config contains the normal
+worker role settings plus this top-level publication block:
+
+```json
+{
+  "output_publication": {
+    "enabled": true,
+    "storage": {
+      "type": "s3",
+      "bucket": "forecast-bucket",
+      "prefix": "outputs"
+    }
+  }
+}
+```
+
+Useful environment variables:
+
+- `QA_PUBLICATION_STORAGE_TYPE`: `s3` or `azure`.
+- `QA_PUBLICATION_PREFIX`: remote prefix, default `outputs`.
+- `QA_PUBLICATION_WORKFLOW`: workflow to run, default `earth2-deterministic`.
+- `QA_PUBLICATION_REQUEST_JSON`: optional JSON object with request parameters.
+- `QA_PUBLICATION_TIMEOUT_SECS`: upload wait timeout, default `900`.
+- `QA_PUBLICATION_S3_BUCKET`: S3 bucket for S3 publication.
+- `QA_PUBLICATION_S3_REGION`: optional S3 region. Falls back to
+  `AWS_DEFAULT_REGION` or `AWS_REGION`.
+- `QA_PUBLICATION_S3_ENDPOINT`: optional S3 or S3-compatible endpoint. Falls
+  back to `S3_ENDPOINT_URL`.
+- `QA_PUBLICATION_AZURE_ENDPOINT`: Azure Blob endpoint, for example
+  `https://<account>.blob.core.windows.net`.
+- `QA_PUBLICATION_AZURE_CONTAINER`: Azure container name.
+- `QA_PUBLICATION_LOCAL_MOUNT_PATH`: optional local path that maps to the deployed
+  NFS root mounted at `/outputs`; without it, JSON environment overrides are used.
+- `QA_PUBLICATION_COMPARE_IMAGE`: optional full image reference for the compare job.
+- `QA_PUBLICATION_NODE_GROUP`, `QA_PUBLICATION_PULL_SECRET`,
+  `QA_PUBLICATION_RESOURCE_SHAPE`, and `QA_PUBLICATION_LUSTRE_STORAGE`: optional
+  compare-job overrides.
+
+Compare-job settings use QA-specific environment variables first, then the matching
+`LEPTON_*` environment variable, then `deploy/config.yaml`, then built-in defaults.
+For the image, `QA_PUBLICATION_COMPARE_IMAGE` wins; otherwise a fully qualified
+`--image-tag` is used directly, or the configured `docker_registry` and `image_name`
+are combined with the tag.
+
+Provider credentials are forwarded from environment variables only; do not put
+secrets in request JSON or committed config files. S3 uses the usual AWS env
+chain. Azure uses `AZURE_STORAGE_SAS_TOKEN`, `AZURE_STORAGE_ACCOUNT_KEY`,
+`AZURE_STORAGE_ACCESS_KEY`, or default Azure credentials.
+
+S3 example:
+
+```bash
+QA_PUBLICATION_STORAGE_TYPE=s3 \
+QA_PUBLICATION_S3_BUCKET=<bucket> \
+QA_PUBLICATION_PREFIX=outputs \
+python -u qa/scripts/run_qa.py \
+  --service rust \
+  --image-tag <tag> \
+  --suite publication \
+  --lustre-dir publication
+```
+
+Azure example:
+
+```bash
+QA_PUBLICATION_STORAGE_TYPE=azure \
+QA_PUBLICATION_AZURE_ENDPOINT=https://<account>.blob.core.windows.net \
+QA_PUBLICATION_AZURE_CONTAINER=<container> \
+AZURE_STORAGE_ACCOUNT_NAME=<account> \
+AZURE_STORAGE_ACCOUNT_KEY=<storage-account-key> \
+QA_PUBLICATION_PREFIX=outputs \
+python -u qa/scripts/run_qa.py \
+  --service rust \
+  --image-tag <tag> \
+  --suite publication \
+  --lustre-dir publication
+```
+
+Concrete S3-compatible data upload QA command:
+
+```bash
+export LEPTON_WORKSPACE_ID="<workspace-id>"
+export LEPTON_WORKSPACE_TOKEN="<workspace-token>"
+export LEPTON_ENDPOINT_TOKEN="<endpoint-token>"
+
+export AWS_ACCESS_KEY_ID="<access-key>"
+export AWS_SECRET_ACCESS_KEY="<secret-key>"
+export AWS_REGION="us-ashburn-1"
+export S3_ENDPOINT_URL="https://<namespace>.compat.objectstorage.<region>.oraclecloud.com"
+
+export QA_PUBLICATION_STORAGE_TYPE=s3
+export QA_PUBLICATION_S3_BUCKET="<bucket>"
+export QA_PUBLICATION_S3_REGION="$AWS_REGION"
+export QA_PUBLICATION_S3_ENDPOINT="$S3_ENDPOINT_URL"
+export QA_PUBLICATION_PREFIX="outputs/s3-fcn-rerun"
+export QA_PUBLICATION_WORKFLOWS="deterministic_fcn_workflow"
+export QA_PUBLICATION_UPLOAD_MAX_CONCURRENT_FILES=96
+export PHYSICSNEMO_SERVE_ENABLED_PLUGIN_ID="e2s-deterministic-fcn"
+
+python3 qa/scripts/run_qa.py \
+  --service rust \
+  --image-tag <tag> \
+  --suite publication \
+  --lustre-dir s3-fcn-rerun \
+  --endpoint-name s3-fcn-upload \
+  --endpoint-log-interval 60
+```
+
+Concrete Azure Blob data upload QA command:
+
+```bash
+export LEPTON_WORKSPACE_ID="<workspace-id>"
+export LEPTON_WORKSPACE_TOKEN="<workspace-token>"
+export LEPTON_ENDPOINT_TOKEN="<endpoint-token>"
+
+export AZURE_STORAGE_ACCOUNT_NAME="<account>"
+export AZURE_STORAGE_ACCOUNT="$AZURE_STORAGE_ACCOUNT_NAME"
+export AZURE_STORAGE_ACCOUNT_KEY="<storage-account-key>"
+export AZURE_STORAGE_ACCESS_KEY="$AZURE_STORAGE_ACCOUNT_KEY"
+
+export QA_PUBLICATION_STORAGE_TYPE=azure
+export QA_PUBLICATION_AZURE_ENDPOINT="https://<account>.blob.core.windows.net"
+export QA_PUBLICATION_AZURE_CONTAINER="<container>"
+export QA_PUBLICATION_PREFIX="outputs/azure-fcn-rerun"
+export QA_PUBLICATION_WORKFLOWS="deterministic_fcn_workflow"
+export QA_PUBLICATION_UPLOAD_MAX_CONCURRENT_FILES=96
+export PHYSICSNEMO_SERVE_ENABLED_PLUGIN_ID="e2s-deterministic-fcn"
+
+python3 qa/scripts/run_qa.py \
+  --service rust \
+  --image-tag <tag> \
+  --suite publication \
+  --lustre-dir azure-fcn-rerun \
+  --endpoint-name azure-fcn-upload \
+  --endpoint-log-interval 60
+```
+
+For deployed services, object-store destinations are configured in the runtime
+config's top-level `output_publication.storage` block:
+
+```json
+{
+  "output_publication": {
+    "enabled": true,
+    "storage": {
+      "type": "azure",
+      "endpoint": "https://<account>.blob.core.windows.net",
+      "container": "<container>",
+      "prefix": "outputs"
+    }
+  }
+}
+```
+
+Upload performance is configured separately on `roles.publish.config`, for
+example:
+
+```json
+{
+  "roles": {
+    "publish": {
+      "config": {
+        "max_concurrent_files": 96,
+        "client_options": {
+          "timeout_secs": 300,
+          "connect_timeout_secs": 10,
+          "pool_max_idle_per_host": 192
+        },
+        "retry": {
+          "max_retries": 10,
+          "timeout_secs": 300
+        }
+      }
+    }
+  }
+}
 ```
 
 ## Stress Suite

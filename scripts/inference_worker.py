@@ -284,9 +284,18 @@ def _batch_item_parent_run_id(
     return None
 
 
+def _normalize_batch_outcome_status(raw_status: Any) -> str:
+    status = str(raw_status or "succeeded").strip().lower()
+    if status in {"success", "succeeded", "completed"}:
+        return "succeeded"
+    if status in {"cancelled", "canceled"}:
+        return "cancelled"
+    return "failed"
+
+
 def _batch_result_status(batch_results: list[dict[str, Any]]) -> str:
     statuses = [
-        str(entry.get("result", {}).get("status", "succeeded"))
+        _normalize_batch_outcome_status(entry.get("result", {}).get("status"))
         for entry in batch_results
         if isinstance(entry, dict) and isinstance(entry.get("result"), dict)
     ]
@@ -988,13 +997,14 @@ class WorkflowExecutor:
                 )
                 normalized_result.setdefault("run_id", item_ctx["run_id"])
                 normalized_result.setdefault("batch_info", batch_info)
+                outcome_status = _normalize_batch_outcome_status(
+                    normalized_result.get("status")
+                )
                 _update_execution_state(
                     self.redis_client,
                     workflow_id,
                     item_ctx["run_id"],
-                    "completed"
-                    if normalized_result.get("status") == "succeeded"
-                    else "failed",
+                    "completed" if outcome_status == "succeeded" else outcome_status,
                     execution_time,
                     normalized_result.get("output_path"),
                     normalized_result.get("error"),
@@ -1523,7 +1533,7 @@ def _should_handoff_to_postprocess(
     payload: dict[str, Any], result: dict[str, Any]
 ) -> bool:
     """Return True when a successful plugin execute result should go to postprocess."""
-    if result.get("status", "succeeded") != "succeeded":
+    if not _is_success_status(result.get("status", "succeeded")):
         return False
 
     next_stage = _next_plugin_stage(payload)
@@ -1541,7 +1551,7 @@ def _should_persist_run_status_after_execute(
     result: dict[str, Any],
 ) -> bool:
     """Skip status persistence for successful execute handoffs that are still internal."""
-    if result.get("status", "succeeded") != "succeeded":
+    if not _is_success_status(result.get("status", "succeeded")):
         return True
 
     next_stage = _next_plugin_stage(payload)
@@ -1549,12 +1559,25 @@ def _should_persist_run_status_after_execute(
         return True
 
     next_phase = next_stage.get("phase")
-    if next_phase == "postprocess":
+    if next_phase in {"postprocess", "publish"}:
         return False
 
     return not (
         next_phase == "fanout" and isinstance(result.get("_pipeline_updates"), dict)
     )
+
+
+def _should_mark_publication_skipped_after_execute_failure(
+    payload: dict[str, Any],
+    result: dict[str, Any],
+) -> bool:
+    if _is_success_status(result.get("status", "succeeded")):
+        return False
+    if not isinstance(payload.get("output_publication"), dict):
+        return False
+
+    next_stage = _next_plugin_stage(payload)
+    return not (isinstance(next_stage, dict) and next_stage.get("phase") == "publish")
 
 
 _PIPELINE_UPDATE_KEYS = {
@@ -1573,6 +1596,14 @@ def _result_without_private_pipeline_updates(result: dict[str, Any]) -> dict[str
     sanitized = dict(result)
     sanitized.pop("_pipeline_updates", None)
     return sanitized
+
+
+def _is_success_status(raw_status: Any) -> bool:
+    return str(raw_status or "succeeded").strip().lower() in {
+        "success",
+        "succeeded",
+        "completed",
+    }
 
 
 def _merge_pipeline_updates(
@@ -1707,13 +1738,14 @@ def _build_primary_completion(
     payload = _decode_payload_object(payload_raw)
     next_stage = _next_plugin_stage(payload)
     result_for_handoff = _result_without_private_pipeline_updates(result)
-    result_succeeded = result.get("status", "succeeded") == "succeeded"
+    result_succeeded = _is_success_status(result.get("status", "succeeded"))
     next_phase = next_stage.get("phase") if isinstance(next_stage, dict) else None
     should_handoff = bool(
         isinstance(next_stage, dict)
         and (
             result_succeeded
             or next_phase == "collect"
+            or next_phase == "publish"
             or _should_handoff_to_postprocess(payload, result)
         )
         and next_phase != "results"
@@ -1742,6 +1774,7 @@ def _build_primary_completion(
 
 def _build_batch_primary_outputs(
     stream_name: str,
+    batch_payload: dict[str, Any],
     batch_result: dict[str, Any],
 ) -> list[tuple[str, dict[str, Any], str, str]]:
     outputs: list[tuple[str, dict[str, Any], str, str]] = []
@@ -1752,16 +1785,150 @@ def _build_batch_primary_outputs(
         item_payload = entry.get("payload")
         if not isinstance(item_result, dict) or not isinstance(item_payload, dict):
             continue
-        run_id = str(item_result.get("run_id") or entry.get("run_id") or "").strip()
+        run_id = str(entry.get("run_id") or "").strip()
         if not run_id:
             continue
+        item_payload_for_handoff = _batch_item_completion_payload(
+            batch_payload, item_payload
+        )
+        item_result_for_handoff = dict(item_result)
+        item_result_for_handoff.pop("batch_info", None)
+        item_result_for_handoff["run_id"] = run_id
         stream_name_out, payload_out, stage_out = _build_primary_completion(
             stream_name,
-            item_payload,
-            item_result,
+            item_payload_for_handoff,
+            item_result_for_handoff,
         )
         outputs.append((stream_name_out, payload_out, stage_out, run_id))
     return outputs
+
+
+def _batch_item_completion_payload(
+    batch_payload: dict[str, Any], item_payload: dict[str, Any]
+) -> dict[str, Any]:
+    payload = copy.deepcopy(item_payload)
+    run_id = str(
+        payload.get("run_id")
+        or batch_payload.get("run_id")
+        or batch_payload.get("batch_id")
+        or ""
+    ).strip()
+    stage_context = batch_payload.get("stage_context")
+    if isinstance(stage_context, dict):
+        payload["stage_context"] = copy.deepcopy(stage_context)
+    for key in ("batch_id", "batch_info", "output_publication"):
+        if key in batch_payload and key not in payload:
+            payload[key] = copy.deepcopy(batch_payload[key])
+    if not isinstance(payload.get("output_publication"), dict):
+        workflow_id = str(
+            payload.get("workflow_id") or batch_payload.get("workflow_id") or ""
+        ).strip()
+        output_publication = _output_publication_from_env(workflow_id, run_id)
+        if output_publication is not None:
+            payload["output_publication"] = output_publication
+    if isinstance(payload.get("output_publication"), dict):
+        _ensure_publish_stage_after_execute(payload)
+    return payload
+
+
+def _output_publication_from_env(
+    workflow_id: str, run_id: str
+) -> dict[str, Any] | None:
+    if not workflow_id or not run_id:
+        return None
+    raw = os.environ.get("PHYSICSNEMO_SERVE_OUTPUT_PUBLICATION_CONFIG_JSON", "").strip()
+    if not raw:
+        return None
+    try:
+        config = json.loads(raw)
+    except json.JSONDecodeError:
+        logger.debug("Invalid output publication config JSON in environment")
+        return None
+    if not isinstance(config, dict) or not config.get("enabled"):
+        return None
+    storage = config.get("storage")
+    if not isinstance(storage, dict):
+        return None
+    provider = str(storage.get("type") or "").strip().lower()
+    prefix = "/".join(
+        part.strip("/")
+        for part in (str(storage.get("prefix") or "outputs"), workflow_id, run_id)
+        if part and part.strip("/")
+    )
+    if provider == "s3":
+        bucket = str(storage.get("bucket") or "").strip()
+        if not bucket:
+            return None
+        resolved_storage = {
+            "type": "s3",
+            "bucket": bucket,
+            "prefix": prefix,
+        }
+        for key in ("region", "endpoint"):
+            value = storage.get(key)
+            if isinstance(value, str) and value.strip():
+                resolved_storage[key] = value.strip()
+    elif provider == "azure":
+        container = str(storage.get("container") or "").strip().strip("/")
+        endpoint = str(storage.get("endpoint") or "").strip()
+        if not container or not endpoint:
+            return None
+        resolved_storage = {
+            "type": "azure",
+            "container": container,
+            "prefix": prefix,
+            "endpoint": endpoint.rstrip("/"),
+        }
+    else:
+        return None
+    return {
+        "target": {
+            "artifact": "primary",
+            "provider": provider,
+            "storage": resolved_storage,
+        }
+    }
+
+
+def _ensure_publish_stage_after_execute(payload: dict[str, Any]) -> None:
+    stage_context = payload.get("stage_context")
+    if not isinstance(stage_context, dict):
+        return
+    pipeline = stage_context.get("pipeline")
+    if not isinstance(pipeline, list):
+        return
+    current_stage_id = stage_context.get("current_stage_id")
+    if not isinstance(current_stage_id, str):
+        return
+    current_stage = next(
+        (
+            stage
+            for stage in pipeline
+            if isinstance(stage, dict) and stage.get("id") == current_stage_id
+        ),
+        None,
+    )
+    if not isinstance(current_stage, dict) or current_stage.get("phase") != "execute":
+        return
+    if any(
+        isinstance(stage, dict) and stage.get("phase") == "publish"
+        for stage in pipeline
+    ):
+        return
+    next_stage_id = current_stage.get("next")
+    publish_stage = {
+        "id": "publish",
+        "phase": "publish",
+        "handler": "publish_outputs",
+        "queue": "publish",
+        "next": next_stage_id,
+    }
+    try:
+        insert_at = pipeline.index(current_stage) + 1
+    except ValueError:
+        insert_at = len(pipeline)
+    pipeline.insert(insert_at, publish_stage)
+    current_stage["next"] = "publish"
 
 
 def _normalize_batch_info(
@@ -1867,6 +2034,8 @@ def _persist_run_status_and_result(
     workflow_name: str,
     run_id: str,
     result: dict[str, Any],
+    *,
+    publication_skipped: bool = False,
 ) -> None:
     """Persist run status and result payload for REST endpoints."""
     if redis_client is None:
@@ -1880,15 +2049,24 @@ def _persist_run_status_and_result(
         execution_time = result.get("execution_time_seconds")
 
         run_key = f"run:{run_id}"
-        redis_client.hset(
-            run_key,
-            mapping={
-                "status": status,
-                "stage": "completed" if status == "succeeded" else "failed",
-                "updated_at": now,
-                "inference_completed_at": now,
-            },
-        )
+        run_mapping = {
+            "status": status,
+            "stage": "completed" if status == "succeeded" else "failed",
+            "updated_at": now,
+            "inference_completed_at": now,
+        }
+        if publication_skipped:
+            run_mapping.update(
+                {
+                    "output_location": "local_and_cloud",
+                    "output_publication_status": "skipped",
+                    "publish_completed_at": now,
+                    "published_artifact_count": "0",
+                }
+            )
+        redis_client.hset(run_key, mapping=run_mapping)
+        if publication_skipped and hasattr(redis_client, "hdel"):
+            redis_client.hdel(run_key, "publish_error")
 
         result_key = f"result:{run_id}"
         result_payload: dict[str, Any] = {
@@ -2287,15 +2465,22 @@ def process_job(
                     item_run_id
                     and isinstance(item_result, dict)
                     and isinstance(item_payload, dict)
-                    and _should_persist_run_status_after_execute(
-                        item_payload, item_result
-                    )
                 ):
+                    item_payload_for_status = _batch_item_completion_payload(
+                        payload, item_payload
+                    )
+                    if not _should_persist_run_status_after_execute(
+                        item_payload_for_status, item_result
+                    ):
+                        continue
                     _persist_run_status_and_result(
                         executor.redis_client,
                         workflow_name,
                         item_run_id,
                         item_result,
+                        publication_skipped=_should_mark_publication_skipped_after_execute_failure(
+                            item_payload_for_status, item_result
+                        ),
                     )
         elif _should_persist_run_status_after_execute(payload, result):
             _persist_run_status_and_result(
@@ -2303,6 +2488,9 @@ def process_job(
                 workflow_name,
                 run_id,
                 result,
+                publication_skipped=_should_mark_publication_skipped_after_execute_failure(
+                    payload, result
+                ),
             )
         response = {
             "run_id": run_id,
@@ -2386,7 +2574,7 @@ def complete_job(
     parent_run_id = result.get("parent_run_id") or payload_obj.get("parent_run_id")
     release_stream = resolve_output_stream("release")
     if isinstance(result.get("batch_results"), list):
-        primary_outputs = _build_batch_primary_outputs(stream_name, result)
+        primary_outputs = _build_batch_primary_outputs(stream_name, payload_obj, result)
         for (
             primary_stream_name,
             primary_payload,
@@ -2478,13 +2666,14 @@ async def complete_job_async(
             primary_stream_name,
             primary_payload,
             primary_stage,
-            _item_run_id,
-        ) in _build_batch_primary_outputs(msg.stream, result):
+            item_run_id,
+        ) in _build_batch_primary_outputs(msg.stream, payload_obj, result):
             output_targets.append(
                 Output(
                     resolve_output_stream(primary_stream_name),
                     json.dumps(primary_payload),
                     stage=primary_stage,
+                    run_id=item_run_id,
                 )
             )
     else:

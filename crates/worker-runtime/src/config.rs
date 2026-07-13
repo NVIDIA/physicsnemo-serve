@@ -149,6 +149,81 @@ impl Default for PrefetchRoleConfig {
     }
 }
 
+/// Publish-role HTTP client options shared by S3 and Azure object stores.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+pub struct PublishClientOptionsConfig {
+    /// Overall request timeout in seconds. Missing keeps object_store defaults.
+    #[serde(default)]
+    pub timeout_secs: Option<u64>,
+    /// TCP connect timeout in seconds. Missing keeps object_store defaults.
+    #[serde(default)]
+    pub connect_timeout_secs: Option<u64>,
+    /// Maximum idle connections per host. Missing keeps object_store defaults.
+    #[serde(default)]
+    pub pool_max_idle_per_host: Option<usize>,
+}
+
+/// Publish-role retry options shared by S3 and Azure object stores.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+pub struct PublishRetryConfig {
+    /// Maximum request retries. Missing keeps object_store defaults.
+    #[serde(default)]
+    pub max_retries: Option<usize>,
+    /// Retry budget in seconds. Missing keeps object_store defaults.
+    #[serde(default)]
+    pub timeout_secs: Option<u64>,
+}
+
+/// Publish-specific configuration parsed from the `config` block.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct PublishRoleConfig {
+    /// Maximum number of local files uploaded concurrently for directory artifacts.
+    #[serde(default = "default_publish_max_concurrent_files")]
+    pub max_concurrent_files: usize,
+    /// Files at or above this size use multipart upload when overwriting is allowed.
+    #[serde(default = "default_publish_multipart_threshold_bytes")]
+    pub multipart_threshold_bytes: u64,
+    /// Multipart part size. This is S3 part size and Azure block size.
+    #[serde(default = "default_publish_multipart_part_size_bytes")]
+    pub multipart_part_size_bytes: usize,
+    /// Maximum in-flight parts for a single multipart object upload.
+    #[serde(default = "default_publish_multipart_max_concurrency")]
+    pub multipart_max_concurrency: usize,
+    #[serde(default)]
+    pub client_options: PublishClientOptionsConfig,
+    #[serde(default)]
+    pub retry: PublishRetryConfig,
+}
+
+fn default_publish_max_concurrent_files() -> usize {
+    16
+}
+
+fn default_publish_multipart_threshold_bytes() -> u64 {
+    64 * 1024 * 1024
+}
+
+fn default_publish_multipart_part_size_bytes() -> usize {
+    16 * 1024 * 1024
+}
+
+fn default_publish_multipart_max_concurrency() -> usize {
+    4
+}
+
+impl Default for PublishRoleConfig {
+    fn default() -> Self {
+        Self {
+            max_concurrent_files: default_publish_max_concurrent_files(),
+            multipart_threshold_bytes: default_publish_multipart_threshold_bytes(),
+            multipart_part_size_bytes: default_publish_multipart_part_size_bytes(),
+            multipart_max_concurrency: default_publish_multipart_max_concurrency(),
+            client_options: PublishClientOptionsConfig::default(),
+            retry: PublishRetryConfig::default(),
+        }
+    }
+}
+
 /// Prepare-specific configuration parsed from the `config` block.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct PrepareRoleConfig {

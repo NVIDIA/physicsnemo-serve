@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
 use std::time::Duration;
@@ -10,10 +11,118 @@ use std::time::Duration;
 use anyhow::Result;
 use scicomp_rq::{Message, Output};
 use serde::{Deserialize, Serialize};
+use tokio::sync::watch;
 
 use crate::config::{InputStreamSpec, PythonRuntimeEnvConfig};
 
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+
+/// Cooperative cancellation signal for message handlers whose lease ownership
+/// is lost while work is in progress.
+#[doc(hidden)]
+#[derive(Clone, Debug)]
+pub struct RoleCancellation {
+    cancelled: watch::Sender<bool>,
+}
+
+impl RoleCancellation {
+    pub(crate) fn new() -> Self {
+        let (cancelled, _) = watch::channel(false);
+        Self { cancelled }
+    }
+
+    pub(crate) fn cancel(&self) {
+        self.cancelled.send_replace(true);
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        *self.cancelled.borrow()
+    }
+
+    pub async fn cancelled(&self) {
+        let mut cancelled = self.cancelled.subscribe();
+        if *cancelled.borrow() {
+            return;
+        }
+        while cancelled.changed().await.is_ok() {
+            if *cancelled.borrow() {
+                return;
+            }
+        }
+    }
+
+    pub(crate) fn check_ownership(&self) -> Result<()> {
+        if self.is_cancelled() {
+            return Err(message_ownership_lost(
+                "message lease ownership was lost while the role was running",
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct LeaseRenewalUnsupported;
+
+impl fmt::Display for LeaseRenewalUnsupported {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("message lease renewal is not supported by this transport")
+    }
+}
+
+impl std::error::Error for LeaseRenewalUnsupported {}
+
+pub(crate) fn is_lease_renewal_unsupported(error: &anyhow::Error) -> bool {
+    error.downcast_ref::<LeaseRenewalUnsupported>().is_some()
+}
+
+#[derive(Debug)]
+struct MessageOwnershipLost {
+    reason: String,
+}
+
+impl fmt::Display for MessageOwnershipLost {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.reason)
+    }
+}
+
+impl std::error::Error for MessageOwnershipLost {}
+
+pub(crate) fn message_ownership_lost(reason: impl Into<String>) -> anyhow::Error {
+    MessageOwnershipLost {
+        reason: reason.into(),
+    }
+    .into()
+}
+
+pub(crate) fn is_message_ownership_lost_error(error: &anyhow::Error) -> bool {
+    error.downcast_ref::<MessageOwnershipLost>().is_some()
+}
+
+#[derive(Debug)]
+struct MessageDeferred {
+    reason: String,
+}
+
+impl fmt::Display for MessageDeferred {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.reason)
+    }
+}
+
+impl std::error::Error for MessageDeferred {}
+
+pub(crate) fn message_deferred(reason: impl Into<String>) -> anyhow::Error {
+    MessageDeferred {
+        reason: reason.into(),
+    }
+    .into()
+}
+
+pub(crate) fn is_message_deferred_error(error: &anyhow::Error) -> bool {
+    error.downcast_ref::<MessageDeferred>().is_some()
+}
 
 /// Criticality policy for background tasks.
 /// Critical tasks terminate the engine on failure; BestEffort tasks are retried.
@@ -117,6 +226,53 @@ pub trait MessageSink: Send + Sync {
         }
     }
 
+    /// Atomically hand off a message and commit an owner-fenced finalization
+    /// marker when the transport supports persistent guarded handoffs.
+    ///
+    /// Non-persistent sinks delegate to `handoff_to_run`; the owning role then
+    /// commits its in-memory claim immediately after the handoff.
+    #[allow(clippy::too_many_arguments)]
+    fn handoff_to_run_and_commit<'a>(
+        &'a self,
+        msg: &'a Message,
+        dest_stream: &'a str,
+        payload: &'a str,
+        stage: &'a str,
+        run_id: &'a str,
+        _finalization_key: &'a str,
+        _owner_token: &'a str,
+        _recovery_keys: &'a [String],
+    ) -> BoxFuture<'a, Result<String>> {
+        self.handoff_to_run(msg, dest_stream, payload, stage, run_id)
+    }
+
+    /// Consumer-fenced variant used by the engine so a stale worker cannot
+    /// commit a handoff after another consumer reclaims the source message.
+    #[allow(clippy::too_many_arguments)]
+    fn handoff_to_run_and_commit_for_consumer<'a>(
+        &'a self,
+        msg: &'a Message,
+        dest_stream: &'a str,
+        payload: &'a str,
+        stage: &'a str,
+        run_id: &'a str,
+        finalization_key: &'a str,
+        owner_token: &'a str,
+        recovery_keys: &'a [String],
+        _consumer: &'a str,
+    ) -> BoxFuture<'a, Result<String>> {
+        self.handoff_to_run_and_commit(
+            msg,
+            dest_stream,
+            payload,
+            stage,
+            run_id,
+            finalization_key,
+            owner_token,
+            recovery_keys,
+        )
+    }
+
     /// Atomic ack-current + fan-out to multiple destinations.
     fn forward_many<'a>(
         &'a self,
@@ -144,6 +300,30 @@ pub trait WorkerRole: Send + Sync + 'static {
         stream: &'a str,
         sink: &'a dyn MessageSink,
     ) -> BoxFuture<'a, Result<()>>;
+
+    /// Process a message with cooperative ownership-loss cancellation.
+    ///
+    /// The default immediately drops `handle` when cancellation is signalled.
+    /// Roles that own asynchronous cleanup may override this and finish that
+    /// cleanup before returning.
+    #[doc(hidden)]
+    fn handle_with_cancellation<'a>(
+        &'a self,
+        msg: &'a Message,
+        stream: &'a str,
+        sink: &'a dyn MessageSink,
+        cancellation: RoleCancellation,
+    ) -> BoxFuture<'a, Result<()>> {
+        Box::pin(async move {
+            tokio::select! {
+                biased;
+                _ = cancellation.cancelled() => Err(message_ownership_lost(
+                    "message lease ownership was lost while the role was running",
+                )),
+                result = self.handle(msg, stream, sink) => result,
+            }
+        })
+    }
 }
 
 /// Periodic background work registered alongside a role.
@@ -188,6 +368,18 @@ pub trait QueueTransport: Send + Sync + 'static {
         min_idle_ms: u64,
         count: usize,
     ) -> BoxFuture<'a, Result<Vec<Message>>>;
+
+    /// Renew the pending-entry lease for a message currently owned by `consumer`.
+    ///
+    /// The default reports that renewal is unsupported. The engine then processes
+    /// messages without a lease heartbeat instead of treating them as unowned.
+    fn renew_message_lease<'a>(
+        &'a self,
+        _msg: &'a Message,
+        _consumer: &'a str,
+    ) -> BoxFuture<'a, Result<bool>> {
+        Box::pin(async { Err(LeaseRenewalUnsupported.into()) })
+    }
 
     fn create_consumer_group<'a>(
         &'a self,

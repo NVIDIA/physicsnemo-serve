@@ -362,6 +362,23 @@ impl QueueTransport for InMemoryTransport {
         })
     }
 
+    fn renew_message_lease<'a>(
+        &'a self,
+        msg: &'a Message,
+        _consumer: &'a str,
+    ) -> BoxFuture<'a, Result<bool>> {
+        Box::pin(async move {
+            let logical = self.physical_to_logical(msg.stream());
+            let pending = self
+                .pending
+                .lock()
+                .map_err(|e| anyhow!("pending lock poisoned: {e}"))?;
+            Ok(pending
+                .get(&logical)
+                .is_some_and(|queue| queue.iter().any(|pending| pending.id() == msg.id())))
+        })
+    }
+
     fn create_consumer_group<'a>(
         &'a self,
         _stream: &'a str,

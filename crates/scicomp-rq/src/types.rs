@@ -421,16 +421,10 @@ impl Message {
     ///
     /// ```
     /// use scicomp_rq::Message;
-    /// use serde::Deserialize;
-    ///
-    /// #[derive(Deserialize)]
-    /// struct MyPayload {
-    ///     model: String,
-    /// }
     ///
     /// let msg = Message::new("1-0", "stream:test", "grp", "run-1", r#"{"model": "pangu"}"#, "stage");
-    /// let payload: MyPayload = msg.parse_payload().unwrap();
-    /// assert_eq!(payload.model, "pangu");
+    /// let payload: serde_json::Value = msg.parse_payload().unwrap();
+    /// assert_eq!(payload["model"], "pangu");
     /// ```
     pub fn parse_payload<T: for<'de> Deserialize<'de>>(&self) -> Result<T, serde_json::Error> {
         serde_json::from_str(&self.payload)

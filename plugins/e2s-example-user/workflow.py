@@ -72,6 +72,12 @@ class ExampleUserWorkflow(PluginWorkflow):
             }
             results_path = run_dir / "results.json"
             results_path.write_text(json.dumps(results, indent=2), encoding="utf-8")
+            ctx.outputs.register(
+                "results",
+                results_path,
+                media_type="application/json",
+                primary=True,
+            )
 
             summary_path = run_dir / "summary.txt"
             summary_path.write_text(

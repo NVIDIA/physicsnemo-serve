@@ -41,6 +41,8 @@ set -euo pipefail
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/deploy/config.sh"
 
+USER="${USER:-$(id -un)}"
+
 # ---------------------------------------------------------------------------
 # Defaults (env vars override)
 
@@ -122,6 +124,8 @@ Cluster / placement:
   --endpoint-name NAME      LEPTON_ENDPOINT_NAME   Endpoint name (default: $USER-<source>-ep)
   --port PORT               LEPTON_PORT            Container port; overrides preset
   --pull-secret SECRET      LEPTON_PULL_SECRET     Image pull secret (default: from deploy/config.yaml)
+  --env NAME=VALUE                                  Extra container environment variable.
+                                                   May be passed multiple times.
 
 Mounts:
   --nfs-path PATH           LEPTON_NFS_PATH        Host NFS path (default: from deploy/config.yaml)
@@ -153,6 +157,8 @@ EOF
 # ---------------------------------------------------------------------------
 # Argument parsing
 
+EXTRA_ENVS=()
+
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --source) SOURCE="$2"; shift 2 ;;
@@ -175,6 +181,7 @@ while [[ $# -gt 0 ]]; do
         --endpoint-name) LEPTON_ENDPOINT_NAME="$2"; shift 2 ;;
         --port) LEPTON_PORT="$2"; shift 2 ;;
         --pull-secret) LEPTON_PULL_SECRET="$2"; shift 2 ;;
+        --env) EXTRA_ENVS+=("$2"); shift 2 ;;
         --nfs-path) LEPTON_NFS_PATH="$2"; shift 2 ;;
         --mount-target) LEPTON_MOUNT_TARGET="$2"; shift 2 ;;
         --skip-build) SKIP_BUILD=1; shift ;;
@@ -243,6 +250,12 @@ require() {
 require "workspace id"     "$LEPTON_WORKSPACE_ID"
 require "workspace token"  "$LEPTON_WORKSPACE_TOKEN"
 require "endpoint token"   "$LEPTON_ENDPOINT_TOKEN"
+for env_pair in "${EXTRA_ENVS[@]}"; do
+    if [[ ! "$env_pair" =~ ^[A-Za-z_][A-Za-z0-9_]*=.*$ ]]; then
+        echo "Error: --env must be in valid NAME=VALUE form" >&2
+        exit 2
+    fi
+done
 
 if ! command -v lep >/dev/null 2>&1; then
     echo "Error: 'lep' CLI not found. Install with: pip install -U leptonai" >&2
@@ -452,14 +465,27 @@ deploy_args=(
     --tokens "$LEPTON_ENDPOINT_TOKEN"
     --replicas-static 1
 )
+for env_pair in "${EXTRA_ENVS[@]}"; do
+    deploy_args+=(--env "$env_pair")
+done
 # Don't pipe through run(); --tokens carries the endpoint bearer token.
 preview_args=()
+previous_arg=""
 for arg in "${deploy_args[@]}"; do
     if [[ "$arg" == "$LEPTON_ENDPOINT_TOKEN" ]]; then
         preview_args+=("<redacted>")
+    elif [[ "$previous_arg" == "--env" ]]; then
+        env_name="${arg%%=*}"
+        env_value="${arg#*=}"
+        if grep -qiE '(TOKEN|SECRET|PASSWORD|CREDENTIAL|KEY|SAS)' <<< "$env_name"; then
+            preview_args+=("${env_name}=<redacted>")
+        else
+            preview_args+=("${env_name}=${env_value}")
+        fi
     else
         preview_args+=("$arg")
     fi
+    previous_arg="$arg"
 done
 echo "+ lep deployment create ${preview_args[*]}"
 if [[ "$DRY_RUN" -eq 0 ]]; then

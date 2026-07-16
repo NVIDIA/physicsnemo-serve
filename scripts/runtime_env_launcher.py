@@ -101,6 +101,18 @@ def _build_gpu_stream_name(
     return f"{stream_prefix}execute.{executor_class}:gpu:{namespace}:{pod_name}:{device_index}"
 
 
+def _launch_is_selected(
+    executor_class: str,
+    launch: Any,
+    enabled_executor_classes: set[str] | None,
+) -> bool:
+    if not isinstance(launch, dict) or not launch:
+        return False
+    if enabled_executor_classes is not None:
+        return executor_class in enabled_executor_classes
+    return bool(launch.get("enabled"))
+
+
 def _safe_path_segment(value: object) -> str:
     segment = re.sub(r"[^A-Za-z0-9_.-]+", "-", str(value).strip()).strip(".-")
     return segment or "unknown"
@@ -153,12 +165,9 @@ def build_worker_launch_specs(
     gpu_inventory = gpu_inventory or []
 
     for executor_class in sorted(runtime_envs):
-        if enabled_executor_classes and executor_class not in enabled_executor_classes:
-            continue
-
         runtime_env = runtime_envs.get(executor_class) or {}
         launch = runtime_env.get("launch") or {}
-        if not isinstance(launch, dict) or not launch.get("enabled"):
+        if not _launch_is_selected(executor_class, launch, enabled_executor_classes):
             continue
 
         python_executable = str(runtime_env.get("python_executable") or "").strip()
@@ -331,6 +340,24 @@ def _resolve_enabled_executor_classes() -> set[str] | None:
     return values or None
 
 
+def _validate_one_gpu_executor_class_per_device(specs: list[dict[str, Any]]) -> None:
+    executor_by_device: dict[str, str] = {}
+    for spec in specs:
+        env = spec.get("env") or {}
+        if env.get("GPU_DEVICE_KIND") != "gpu":
+            continue
+        device = str(env.get("GPU_DEVICE_UUID") or env.get("GPU_DEVICE_INDEX") or "")
+        executor_class = str(spec.get("executor_class") or "")
+        existing = executor_by_device.setdefault(device, executor_class)
+        if existing != executor_class:
+            raise ValueError(
+                "multiple GPU executor classes selected for one physical device: "
+                f"{existing!r} and {executor_class!r} on {device!r}; select exactly "
+                "one with PHYSICSNEMO_SERVE_EXECUTOR_CLASSES until scheduler "
+                "capability routing supports co-resident runtime classes"
+            )
+
+
 def _load_launch_specs() -> list[dict[str, Any]]:
     config_path = os.environ.get(
         "PHYSICSNEMO_SERVE_RUNTIME_ENVS_CONFIG"
@@ -345,18 +372,16 @@ def _load_launch_specs() -> list[dict[str, Any]]:
     worker_script = os.environ.get("WORKER_SCRIPT", "/app/scripts/inference_worker.py")
 
     gpu_needed = any(
-        isinstance(runtime_env.get("launch"), dict)
-        and runtime_env.get("launch", {}).get("enabled")
+        _launch_is_selected(executor_class, runtime_env.get("launch"), enabled)
         and str(runtime_env.get("launch", {}).get("device_kind") or "cpu")
         .strip()
         .lower()
         == "gpu"
-        and (enabled is None or executor_class in enabled)
         for executor_class, runtime_env in runtime_envs.items()
     )
     gpu_inventory = detect_gpus() if gpu_needed else []
 
-    return build_worker_launch_specs(
+    specs = build_worker_launch_specs(
         runtime_envs,
         namespace=resolve_namespace(),
         pod_name=resolve_pod_name(),
@@ -365,6 +390,8 @@ def _load_launch_specs() -> list[dict[str, Any]]:
         worker_script=worker_script,
         stream_prefix=resolve_stream_prefix(),
     )
+    _validate_one_gpu_executor_class_per_device(specs)
+    return specs
 
 
 def spawn_worker(spec: dict[str, Any]) -> subprocess.Popen:

@@ -1655,16 +1655,16 @@ def _probe_python_module_contract(
     )
 
     probe_env = os.environ.copy()
-    python_paths = [
+    python_paths = [str(PYTHON_DIR), str(SCRIPT_DIR)]
+    python_paths.extend(
         str(Path(path).expanduser())
         for path in (extra_python_paths or [])
         if str(path).strip()
-    ]
-    if python_paths:
-        existing_pythonpath = probe_env.get("PYTHONPATH")
-        if existing_pythonpath:
-            python_paths.append(existing_pythonpath)
-        probe_env["PYTHONPATH"] = os.pathsep.join(python_paths)
+    )
+    existing_pythonpath = probe_env.get("PYTHONPATH")
+    if existing_pythonpath:
+        python_paths.append(existing_pythonpath)
+    probe_env["PYTHONPATH"] = os.pathsep.join(dict.fromkeys(python_paths))
 
     proc = subprocess.run(
         [sys.executable, "-c", probe_script],
@@ -2841,13 +2841,14 @@ def _legacy_artifacts_from_context(ctx: dict[str, Any]) -> list[dict[str, Any]]:
 
     artifacts: list[dict[str, Any]] = []
     for output in outputs.registered_outputs():
-        artifacts.append(
-            {
-                "name": str(output.name),
-                "media_type": str(output.media_type),
-                "storage_path": str(output.path),
-            }
-        )
+        artifact = {
+            "name": str(output.name),
+            "media_type": str(output.media_type),
+            "storage_path": str(output.path),
+        }
+        if bool(getattr(output, "primary", False)):
+            artifact["primary"] = True
+        artifacts.append(artifact)
     return artifacts
 
 

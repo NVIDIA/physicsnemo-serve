@@ -299,6 +299,53 @@ outputs:
 }
 
 #[test]
+fn manifest_preserves_plugin_configuration() {
+    let yaml = format!(
+        "{}\nconfiguration:\n  provider:\n    name: physicsnemo-cfd\n    version: 0.0.2\n  benchmark:\n    domain: surface\n",
+        minimal_manifest_yaml()
+    );
+    let manifest = PluginManifest::from_yaml_str(&yaml).expect("manifest should parse");
+
+    manifest.validate().expect("configuration should validate");
+    assert_eq!(
+        manifest.configuration["provider"]["name"],
+        "physicsnemo-cfd"
+    );
+    assert_eq!(manifest.configuration["benchmark"]["domain"], "surface");
+
+    let encoded = serde_json::to_value(&manifest).expect("manifest should serialize");
+    assert_eq!(encoded["configuration"]["provider"]["version"], "0.0.2");
+}
+
+#[test]
+fn manifest_validation_rejects_scalar_configuration() {
+    let yaml = format!("{}\nconfiguration: unsafe\n", minimal_manifest_yaml());
+    let manifest = PluginManifest::from_yaml_str(&yaml).expect("manifest should parse");
+
+    let error = manifest
+        .validate()
+        .expect_err("configuration must be a mapping");
+    assert!(
+        error
+            .to_string()
+            .contains("configuration must be an object")
+    );
+}
+
+#[test]
+fn manifest_parsing_rejects_null_configuration() {
+    let yaml = format!("{}\nconfiguration: null\n", minimal_manifest_yaml());
+
+    let error = PluginManifest::from_yaml_str(&yaml)
+        .expect_err("an explicit null configuration must be rejected");
+    assert!(
+        error
+            .to_string()
+            .contains("configuration must be an object")
+    );
+}
+
+#[test]
 fn manifest_from_yaml_expands_postprocess_profile_defaults() {
     let manifest = PluginManifest::from_yaml_str(postprocess_profile_manifest_yaml())
         .expect("postprocess profile manifest should parse");

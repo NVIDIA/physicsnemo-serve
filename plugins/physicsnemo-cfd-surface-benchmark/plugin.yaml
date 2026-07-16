@@ -1,0 +1,364 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+metadata:
+  id: physicsnemo-cfd-surface-benchmark
+  display_name: PhysicsNeMo-CFD Surface Benchmark
+  version: 1.0.0
+  description: Pinned DrivAerML surface benchmark for approved PhysicsNeMo-CFD models
+  tags:
+    - physicsnemo-cfd
+    - cfd
+    - benchmark
+    - surface
+
+ingress:
+  content_type: application/json
+  operation:
+    default: run
+    allowed: [run]
+  json_schema_inline:
+    type: object
+    additionalProperties: false
+    required: [models, cases]
+    properties:
+      models:
+        type: array
+        minItems: 1
+        uniqueItems: true
+        items:
+          type: string
+          enum:
+            - domino_surface
+            - geotransolver_surface
+            - transolver_surface
+            - xmgn_surface
+            - fignet_surface
+      cases:
+        type: array
+        minItems: 1
+        maxItems: 8
+        items:
+          type: object
+          additionalProperties: false
+          required:
+            - case_id
+            - mesh_uri
+            - sha256
+            - size_bytes
+            - geometry_uri
+            - geometry_sha256
+            - geometry_size_bytes
+          properties:
+            case_id:
+              type: string
+              pattern: '^run_[0-9]+$'
+              maxLength: 64
+            mesh_uri:
+              type: string
+              pattern: '^https://'
+              maxLength: 4096
+            sha256:
+              type: string
+              pattern: '^[0-9a-fA-F]{64}$'
+            size_bytes:
+              type: integer
+              minimum: 1
+              maximum: 68719476736
+            geometry_uri:
+              type: string
+              pattern: '^https://'
+              maxLength: 4096
+            geometry_sha256:
+              type: string
+              pattern: '^[0-9a-fA-F]{64}$'
+            geometry_size_bytes:
+              type: integer
+              minimum: 1
+              maximum: 68719476736
+      metrics:
+        type: array
+        minItems: 1
+        uniqueItems: true
+        items:
+          type: string
+          enum:
+            - l2_pressure
+            - l2_shear_stress
+            - l2_pressure_area_weighted
+            - drag
+            - lift
+      seed:
+        type: integer
+        minimum: 0
+        maximum: 4294967295
+        default: 42
+      save_inference_mesh:
+        type: boolean
+        default: false
+      visual_case_ids:
+        type: array
+        maxItems: 2
+        uniqueItems: true
+        items:
+          type: string
+          pattern: '^run_[0-9]+$'
+          maxLength: 64
+
+pipeline:
+  profile: prefetch
+
+runtime:
+  kind: python
+  entrypoint: workflow.py
+  executor_class: physicsnemo-cfd-gpu
+  readiness_executor_class: physicsnemo-cfd-gpu
+  hook_timeout_seconds:
+    prepare: 30
+    execute: 21720
+
+resources:
+  defaults:
+    device_kind: gpu
+    gpus_required: 1
+    memory_mb: 65000
+    cpu_cores: 8
+
+outputs:
+  result_schema_inline:
+    type: object
+    additionalProperties: false
+    required:
+      - report_path
+      - csv_path
+      - html_path
+      - resolved_config_path
+      - diagnostics_path
+      - model_names
+      - case_ids
+      - duration_seconds
+      - provider
+      - preset_sha256
+      - selected_metrics
+      - case_digests
+      - registered_artifact_names
+    properties:
+      report_path: {type: string}
+      csv_path: {type: string}
+      html_path: {type: string}
+      resolved_config_path: {type: string}
+      diagnostics_path: {type: string}
+      model_names:
+        type: array
+        items: {type: string}
+      case_ids:
+        type: array
+        items: {type: string, pattern: '^run_[0-9]+$', maxLength: 64}
+      duration_seconds:
+        type: number
+        minimum: 0
+      provider:
+        type: object
+        additionalProperties: false
+        required:
+          - repository
+          - tag
+          - version
+          - commit
+          - physicsnemo_version
+          - python_version
+        properties:
+          repository: {type: string}
+          tag: {type: string}
+          version: {type: string}
+          commit: {type: string, pattern: '^[0-9a-f]{40}$'}
+          physicsnemo_version: {type: string}
+          python_version: {type: string}
+      preset_sha256:
+        type: string
+        pattern: '^[0-9a-f]{64}$'
+      selected_metrics:
+        type: array
+        items: {type: string}
+      case_digests:
+        type: array
+        items:
+          type: object
+          additionalProperties: false
+          required:
+            - case_id
+            - sha256
+            - size_bytes
+            - geometry_sha256
+            - geometry_size_bytes
+          properties:
+            case_id: {type: string, pattern: '^run_[0-9]+$', maxLength: 64}
+            sha256: {type: string, pattern: '^[0-9a-f]{64}$'}
+            size_bytes: {type: integer, minimum: 1}
+            geometry_sha256: {type: string, pattern: '^[0-9a-f]{64}$'}
+            geometry_size_bytes: {type: integer, minimum: 1}
+      registered_artifact_names:
+        type: array
+        items: {type: string}
+  primary_artifact:
+    name: benchmark_results.json
+    media_type: application/json
+  retention_hours: 168
+
+developer:
+  readiness:
+    recommended_check_phase: execute
+    python_modules:
+      - physicsnemo_cfd_runtime
+      - physicsnemo_cfd_runtime.artifacts
+      - yaml
+      - physicsnemo.cfd.evaluation.benchmarks.run
+    env:
+      - name: PHYSICSNEMO_CFD_MODEL_CACHE
+        required: false
+
+# Immutable, non-secret execution policy. Request values select only allowlisted
+# entries below; they cannot supply paths, Python targets, checkpoints, devices,
+# output locations, environment logging, or HTTP headers.
+configuration:
+  provider:
+    repository: https://github.com/NVIDIA/physicsnemo-cfd.git
+    tag: v0.0.2
+    version: '0.0.2'
+    commit: 921f14dc2ac14c04aabffaba3290deb792379dd8
+    physicsnemo_version: '2.1.1'
+    python_version: '3.12'
+  benchmark:
+    domain: surface
+    module_argv:
+      - '{python}'
+      - -m
+      - physicsnemo.cfd.evaluation.benchmarks.run
+      - --config
+      - '{resolved_config}'
+    model_assets:
+      source: physicsnemo.cfd.evaluation.assets.builtin_packages
+      client_overrides_allowed: false
+    dataset:
+      name: drivaerml
+      layout: 'run_{number}/boundary_{number}.vtp'
+      geometry_layout: 'run_{number}/drivaer_{number}.stl'
+      file_extension: .vtp
+      geometry_file_extension: .stl
+      kwargs:
+        align_ground_truth_to_model: true
+        inference_domain: surface
+    models:
+      domino_surface:
+        name: domino_surface
+        inference_domain: surface
+        package: hf://nvidia/domino_drivaerml@35b1bf1edafdaa2600d16182825890cd51c07427
+        kwargs: {}
+      geotransolver_surface:
+        name: geotransolver_surface
+        inference_domain: surface
+        package: hf://nvidia/geotransolver_drivaerml@626c1158e14f6994382924055aa871f863ff8a8c
+        kwargs:
+          batch_resolution: 60000
+          geometry_sampling: 300000
+      transolver_surface:
+        name: transolver_surface
+        inference_domain: surface
+        package: hf://nvidia/transolver_drivaerml@96477aeb86d24c26ccf0797bca1b3851268017d0
+        kwargs:
+          batch_resolution: 60000
+          geometry_sampling: 300000
+      xmgn_surface:
+        name: xmgn_surface
+        inference_domain: surface
+        package: hf://nvidia/xmgn_drivaerml_surface@33909568711c0f60bd5fa6f8809e6d51c117f821
+        kwargs:
+          max_points: 250000
+          interpolation_k: 4
+      fignet_surface:
+        name: fignet_surface
+        inference_domain: surface
+        package: hf://nvidia/figconvnet_drivaerml_surface@49afb15f873c31134896f2e81fa8a3bff9c54790
+        kwargs:
+          max_points: 250000
+          interpolation_k: 4
+    metrics:
+      allowed:
+        - l2_pressure
+        - l2_shear_stress
+        - l2_pressure_area_weighted
+        - drag
+        - lift
+      defaults:
+        - l2_pressure
+        - l2_shear_stress
+        - l2_pressure_area_weighted
+        - drag
+        - lift
+    limits:
+      max_cases: 8
+      max_visual_cases: 2
+      max_case_id_length: 64
+      max_seed: 4294967295
+      max_object_size_bytes: 68719476736
+      max_request_size_bytes: 68719476736
+      user_headers_allowed: false
+    execution:
+      timeout_seconds: 21600
+      termination_grace_seconds: 10
+      max_log_bytes: 4194304
+      sequential: true
+      distributed: false
+      gpu_device: cuda:0
+      batch_size: 1
+    benchmark_config:
+      reproducibility:
+        log_env: false
+        save_artifacts: true
+      output:
+        surface_interpolate_point_to_cell_for_metrics: true
+        surface_metrics_idw_k: 5
+        surface_metrics_idw_device: cpu
+        mesh_field_names:
+          pressure: pressure_pred
+          shear_stress: wall_shear_stress_pred
+        ground_truth_mesh_field_names:
+          pressure: pressure_true
+          shear_stress: wall_shear_stress_true
+      reports:
+        enabled: false
+        save_comparison_meshes: false
+        comparison_mesh_subdir: comparison_meshes
+        visual_case_ids: []
+        visuals:
+          - name: field_comparison_surface
+            canonical_keys: [pressure, shear_stress]
+            view: xy
+          - name: line_plot
+            canonical_key: pressure
+            plot_coord: x
+            normalize_factor: 1.0
+          - name: line_plot
+            canonical_key: shear_stress
+            plot_coord: x
+            normalize_factor: 1.0
+          - name: design_scatter
+            pairs:
+              - {name: Cd, true_key: drag_true, pred_key: drag_pred}
+              - {name: Cl, true_key: lift_true, pred_key: lift_pred}
+          - name: design_trend
+            pairs:
+              - {name: Cd, true_key: drag_true, pred_key: drag_pred}
+              - {name: Cl, true_key: lift_true, pred_key: lift_pred}
+    outputs:
+      reports:
+        json: benchmark_results.json
+        csv: benchmark_results.csv
+        html: benchmark_results.html
+      optional_known_files:
+        - benchmark_artifacts.json
+        - run_config.json
+      visual_glob: visuals/**/*.png
+      mesh_globs:
+        - inference_*.vtp
+        - comparison_meshes/**/*.vtp

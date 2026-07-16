@@ -35,6 +35,10 @@ _HTTP_SESSION_TRACE_ENV = "PHYSICSNEMO_SERVE_TRACE_HTTP_SESSIONS"
 _HTTP_SESSION_TRACING_INSTALLED = False
 
 
+class PluginCancelledError(RuntimeError):
+    """Signal that a plugin stopped cooperatively and the run is cancelled."""
+
+
 def _debug_identity(value: Any) -> str:
     if value is None:
         return "None"

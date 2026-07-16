@@ -27,6 +27,7 @@ Usage:
     python scripts/run_qa.py --service rust --image-tag v0.1.20260518.0 --suite smoke
     python scripts/run_qa.py --service python --image-tag v0.1.20260518.0 --suite cicd
     python scripts/run_qa.py --service rust --image-tag v0.1.20260518.0 --suite stress
+    python scripts/run_qa.py --service rust --image-tag v0.1.20260518.0 --suite cfd_e2e
     python scripts/run_qa.py --service rust --image-tag v0.1.20260518.0 --num-proc 1
     python scripts/run_qa.py --service rust --image-tag v0.1.20260518.0 --suite cicd \
         --workflows e2s-deterministic,earth2-deterministic
@@ -81,6 +82,8 @@ ENDPOINT_LOG_POLL_INTERVAL = 30  # seconds
 ENDPOINT_LOG_COMMAND_TIMEOUT = 45  # seconds
 DEFAULT_ARTIFACT_DIR = REPO_ROOT / "artifacts"
 ENDPOINT_TOKEN_LENGTH = 32
+CFD_E2E_WORKFLOW_ID = "physicsnemo-cfd-surface-benchmark"
+CFD_E2E_EXECUTOR_CLASS = "physicsnemo-cfd-gpu"
 MULTIGPU_ENV_NAMES = (
     "QA_MULTIGPU_GPU_COUNT",
     "MULTIGPU_GPU_COUNT",
@@ -142,7 +145,8 @@ def determine_workflows(
     1. PHYSICSNEMO_SERVE_ENABLED_PLUGIN_ID env var (single workflow, legacy mode)
     2. --workflows CLI arg (comma-separated list)
     3. For Rust publication QA: plugins selected by the publication requests
-    4. For the Rust service: full list of all known plugin IDs (one deploy each)
+    4. For Rust CFD E2E QA: the PhysicsNeMo-CFD surface benchmark plugin
+    5. For the Rust service: full list of all known plugin IDs (one deploy each)
        For the Python service: single deployment running all workflows at once
     """
     env_plugin_id = os.environ.get("PHYSICSNEMO_SERVE_ENABLED_PLUGIN_ID", "").strip()
@@ -163,6 +167,9 @@ def determine_workflows(
                 for workflow, _payload in load_request_payloads()
             )
         )
+
+    if service == "rust" and suite == "cfd_e2e":
+        return [CFD_E2E_WORKFLOW_ID]
 
     if service == "python":
         return [WORKFLOW_ALL]
@@ -205,19 +212,6 @@ def env_int_any(names: tuple[str, ...], default: int) -> int:
     return default
 
 
-def multigpu_env_requested() -> bool:
-    """Return whether the caller explicitly selected multi-GPU QA behavior."""
-    return any(os.environ.get(name, "").strip() for name in MULTIGPU_ENV_NAMES)
-
-
-def _env_value(*names: str) -> str | None:
-    for name in names:
-        value = os.environ.get(name, "").strip()
-        if value:
-            return value
-    return None
-
-
 def _env_positive_int(*names: str) -> int | None:
     for name in names:
         value = os.environ.get(name, "").strip()
@@ -230,6 +224,31 @@ def _env_positive_int(*names: str) -> int | None:
         if parsed <= 0:
             sys.exit(f"Error: environment variable {name} must be greater than zero.")
         return parsed
+    return None
+
+
+def cfd_e2e_container_envs() -> list[str]:
+    """Return the non-secret, fail-closed deployment policy for the live CFD E2E."""
+    download_timeout = _env_positive_int("QA_CFD_E2E_DOWNLOAD_TIMEOUT_SECS") or 1800
+    return [
+        f"PHYSICSNEMO_SERVE_EXECUTOR_CLASSES={CFD_E2E_EXECUTOR_CLASS}",
+        "E2S_PREFETCH_ALLOWED_HTTPS_HOSTS=huggingface.co,us.aws.cdn.hf.co,cas-bridge.xethub.hf.co",
+        "E2S_PREFETCH_ALLOWED_SIGNED_REDIRECT_HOSTS=us.aws.cdn.hf.co,cas-bridge.xethub.hf.co",
+        "E2S_EXT_CACHE=/outputs/.cache/physicsnemo-cfd",
+        f"E2S_DOWNLOAD_TIMEOUT_SECS={download_timeout}",
+    ]
+
+
+def multigpu_env_requested() -> bool:
+    """Return whether the caller explicitly selected multi-GPU QA behavior."""
+    return any(os.environ.get(name, "").strip() for name in MULTIGPU_ENV_NAMES)
+
+
+def _env_value(*names: str) -> str | None:
+    for name in names:
+        value = os.environ.get(name, "").strip()
+        if value:
+            return value
     return None
 
 
@@ -902,6 +921,7 @@ def run_pytest(
     print(f"==> Running: {' '.join(cmd)}")
     env = {
         **os.environ,
+        **(extra_env or {}),
         "LEPTON_ENDPOINT_TOKEN": endpoint_token,
         "PYTHONUNBUFFERED": "1",
     }
@@ -932,8 +952,8 @@ def run_one_workflow(
     log_interval: int,
     artifact_dir: Path,
     post_health_wait_secs: int,
-    endpoint_name_override: str | None = None,
     container_envs: list[str] | None = None,
+    endpoint_name_override: str | None = None,
     deploy_config: dict[str, str] | None = None,
 ) -> int:
     """Deploy, test, and teardown a single workflow. Returns pytest exit code."""
@@ -1038,6 +1058,18 @@ def run_one_workflow(
                     deploy_config=deploy_config or {},
                 )
             )
+        elif suite == "cfd_e2e":
+            pytest_extra_env = {
+                "QA_CFD_E2E_ENABLED": "1",
+                "QA_CFD_E2E_ARTIFACT_DIR": str(artifact_dir / "cfd-e2e"),
+                "QA_CFD_E2E_TIMEOUT_SECS": os.environ.get(
+                    "QA_CFD_E2E_TIMEOUT_SECS", "23400"
+                ),
+                "QA_CFD_E2E_POLL_SECS": os.environ.get("QA_CFD_E2E_POLL_SECS", "20"),
+                "QA_CFD_E2E_SUBMIT_TIMEOUT_SECS": os.environ.get(
+                    "QA_CFD_E2E_SUBMIT_TIMEOUT_SECS", "300"
+                ),
+            }
         old_env = os.environ.copy()
         os.environ.update(pytest_env_override)
         exit_code = 1
@@ -1083,9 +1115,22 @@ def main():
     )
     parser.add_argument(
         "--suite",
-        choices=["smoke", "cicd", "basic", "negative", "stress", "publication", "full"],
+        choices=[
+            "smoke",
+            "cicd",
+            "basic",
+            "negative",
+            "stress",
+            "publication",
+            "cfd_e2e",
+            "full",
+        ],
         default="smoke",
-        help="Test suite to run (pytest marker). 'full' runs without marker filter.",
+        help=(
+            "Test suite to run (pytest marker). 'publication' runs live "
+            "object-store sync tests; 'cfd_e2e' runs the opt-in live "
+            "PhysicsNeMo-CFD test; 'full' runs without a marker filter."
+        ),
     )
     parser.add_argument(
         "-k",
@@ -1176,6 +1221,11 @@ def main():
         sys.exit("Error: --endpoint-log-interval must be greater than 0")
     if args.post_health_wait_secs < 0:
         sys.exit("Error: --post-health-wait-secs must be 0 or greater")
+    if args.suite == "cfd_e2e":
+        if args.service != "rust":
+            sys.exit("Error: --suite cfd_e2e only supports --service rust.")
+        if args.num_proc not in {0, 1}:
+            sys.exit("Error: --suite cfd_e2e requires --num-proc 0 or 1.")
 
     _deploy_cfg = load_deploy_config()
     workspace_id = os.environ.get("LEPTON_WORKSPACE_ID", "").strip() or _deploy_cfg.get(
@@ -1228,6 +1278,13 @@ def main():
         workflows_arg=args.workflows,
         suite=args.suite,
     )
+    if args.suite == "cfd_e2e" and workflows != [CFD_E2E_WORKFLOW_ID]:
+        sys.exit(
+            "Error: --suite cfd_e2e must run only "
+            f"{CFD_E2E_WORKFLOW_ID!r}; remove conflicting workflow selection."
+        )
+    if args.suite == "cfd_e2e":
+        container_envs.extend(cfd_e2e_container_envs())
 
     endpoint_name_override = None
     if len(workflows) == 1 and args.endpoint_name:

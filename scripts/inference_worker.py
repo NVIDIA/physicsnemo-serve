@@ -70,7 +70,7 @@ from plugin_runtime import (  # noqa: E402
     resolve_workflow_hook,
     workflow_is_cacheable,
 )
-from plugin_sdk import cleanup_python_and_torch_runtime  # noqa: E402
+from plugin_sdk import PluginCancelledError, cleanup_python_and_torch_runtime  # noqa: E402
 
 if TYPE_CHECKING:
     import redis as redis_lib
@@ -356,13 +356,14 @@ def _primary_registered_output_path(ctx: dict[str, Any]) -> str | None:
 def _legacy_artifacts_from_context(ctx: dict[str, Any]) -> list[dict[str, Any]]:
     artifacts: list[dict[str, Any]] = []
     for output in _registered_output_refs(ctx):
-        artifacts.append(
-            {
-                "name": str(output.name),
-                "media_type": str(output.media_type),
-                "storage_path": str(output.path),
-            }
-        )
+        artifact = {
+            "name": str(output.name),
+            "media_type": str(output.media_type),
+            "storage_path": str(output.path),
+        }
+        if bool(getattr(output, "primary", False)):
+            artifact["primary"] = True
+        artifacts.append(artifact)
     return artifacts
 
 
@@ -757,22 +758,54 @@ class WorkflowExecutor:
                 result, ctx, execution_time
             )
             output_path = normalized_result.get("output_path")
+            normalized_status = normalized_result.get("status")
+            execution_state = {
+                "succeeded": "completed",
+                "cancelled": "cancelled",
+            }.get(normalized_status, "failed")
             _update_execution_state(
                 self.redis_client,
                 workflow_id,
                 run_id,
-                "completed"
-                if normalized_result.get("status") == "succeeded"
-                else "failed",
+                execution_state,
                 execution_time,
                 output_path=output_path,
                 error_message=normalized_result.get("error"),
             )
             return normalized_result
+        except PluginCancelledError as exc:
+            execution_time = time.time() - start_time
+            logger.info("Plugin workflow %s was cancelled: %s", workflow_id, exc)
+            artifacts = (
+                _legacy_artifacts_from_context(ctx)
+                if "ctx" in locals() and isinstance(ctx, dict)
+                else []
+            )
+            _update_execution_state(
+                self.redis_client,
+                workflow_id,
+                run_id,
+                "cancelled",
+                execution_time,
+                output_path=None,
+                error_message=str(exc),
+            )
+            return {
+                "status": "cancelled",
+                "output_path": None,
+                "execution_time_seconds": execution_time,
+                "error": str(exc),
+                "artifacts": artifacts,
+            }
         except Exception as e:
             execution_time = time.time() - start_time
             logger.error("Plugin workflow %s failed: %s", workflow_id, e)
             logger.debug(traceback.format_exc())
+            artifacts = (
+                _legacy_artifacts_from_context(ctx)
+                if "ctx" in locals() and isinstance(ctx, dict)
+                else []
+            )
             _update_execution_state(
                 self.redis_client,
                 workflow_id,
@@ -788,6 +821,7 @@ class WorkflowExecutor:
                 "execution_time_seconds": execution_time,
                 "error": str(e),
                 "error_traceback": traceback.format_exc(),
+                "artifacts": artifacts,
             }
         except BaseException as exc:
             log_fatal_base_exception(

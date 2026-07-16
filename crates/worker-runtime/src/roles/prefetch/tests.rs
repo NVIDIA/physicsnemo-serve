@@ -247,6 +247,7 @@ fn artifact(name: &str, storage_path: &str, size_bytes: u64) -> MaterializedArti
         storage_path: storage_path.to_string(),
         size_bytes,
         media_type: Some("application/octet-stream".to_string()),
+        sha256: None,
     }
 }
 
@@ -449,6 +450,168 @@ async fn fail_open_mode_handoffs_with_degraded_marker_for_optional_failures() {
     .unwrap();
 
     let out: JsonValue = serde_json::from_str(&sink.handoffs()[0].1).unwrap();
+    assert_eq!(out["prefetch_degraded"], true);
+    assert_eq!(out["prefetch_optional_errors"], 1);
+    assert_eq!(out["prefetch_required_errors"], 0);
+}
+
+#[tokio::test]
+async fn fail_open_mode_returns_error_on_required_checksum_verified_failure() {
+    let mat = Arc::new(RecordingMaterializer::with_result(MaterializationResult {
+        stats: DownloadStats {
+            downloaded: 0,
+            cached: 0,
+            errors: 1,
+            required_errors: 1,
+            optional_errors: 0,
+            total_time_secs: 0.1,
+            throughput_mbps: 0.0,
+            total_mb: 0.0,
+        },
+        artifacts: vec![],
+    }));
+    let role = PrefetchRole::from_env(&env_with_fail_closed(false), Some(mat))
+        .expect("prefetch role should build");
+    let sink = RecordingSink::new();
+
+    let err = role
+        .handle(
+            &msg(
+                "run-1",
+                &plugin_payload(json!([{
+                    "source_uri": "https://assets.example.com/mesh.vtp",
+                    "target_artifact_name": "mesh",
+                    "expected_sha256": "abcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd"
+                }])),
+            ),
+            "prefetch",
+            &sink,
+        )
+        .await
+        .unwrap_err();
+
+    assert!(err.to_string().contains("required download failures"));
+    assert!(sink.handoffs().is_empty());
+}
+
+#[tokio::test]
+async fn fail_open_mode_returns_error_on_required_size_verified_failure() {
+    let mat = Arc::new(RecordingMaterializer::with_result(MaterializationResult {
+        stats: DownloadStats {
+            downloaded: 0,
+            cached: 0,
+            errors: 1,
+            required_errors: 1,
+            optional_errors: 0,
+            total_time_secs: 0.1,
+            throughput_mbps: 0.0,
+            total_mb: 0.0,
+        },
+        artifacts: vec![],
+    }));
+    let role = PrefetchRole::from_env(&env_with_fail_closed(false), Some(mat))
+        .expect("prefetch role should build");
+    let sink = RecordingSink::new();
+
+    let err = role
+        .handle(
+            &msg(
+                "run-1",
+                &plugin_payload(json!([{
+                    "source_uri": "https://assets.example.com/mesh.vtp",
+                    "target_artifact_name": "mesh",
+                    "expected_size_bytes": 512
+                }])),
+            ),
+            "prefetch",
+            &sink,
+        )
+        .await
+        .unwrap_err();
+
+    assert!(err.to_string().contains("required download failures"));
+    assert!(sink.handoffs().is_empty());
+}
+
+#[tokio::test]
+async fn fail_open_mode_preserves_legacy_required_failure_handoff() {
+    let mat = Arc::new(RecordingMaterializer::with_result(MaterializationResult {
+        stats: DownloadStats {
+            downloaded: 0,
+            cached: 0,
+            errors: 1,
+            required_errors: 1,
+            optional_errors: 0,
+            total_time_secs: 0.1,
+            throughput_mbps: 0.0,
+            total_mb: 0.0,
+        },
+        artifacts: vec![],
+    }));
+    let role = PrefetchRole::from_env(&env_with_fail_closed(false), Some(mat))
+        .expect("prefetch role should build");
+    let sink = RecordingSink::new();
+
+    role.handle(
+        &msg(
+            "run-1",
+            &plugin_payload(json!([{
+                "source_uri": "s3://bucket/path/input.bin",
+                "target_artifact_name": "prepared-input"
+            }])),
+        ),
+        "prefetch",
+        &sink,
+    )
+    .await
+    .unwrap();
+
+    let handoffs = sink.handoffs();
+    assert_eq!(handoffs.len(), 1);
+    let out: JsonValue = serde_json::from_str(&handoffs[0].1).unwrap();
+    assert_eq!(out["prefetch_degraded"], true);
+    assert_eq!(out["prefetch_required_errors"], 1);
+}
+
+#[tokio::test]
+async fn fail_open_mode_preserves_optional_verified_failure_handoff() {
+    let mat = Arc::new(RecordingMaterializer::with_result(MaterializationResult {
+        stats: DownloadStats {
+            downloaded: 0,
+            cached: 0,
+            errors: 1,
+            required_errors: 0,
+            optional_errors: 1,
+            total_time_secs: 0.1,
+            throughput_mbps: 0.0,
+            total_mb: 0.0,
+        },
+        artifacts: vec![],
+    }));
+    let role = PrefetchRole::from_env(&env_with_fail_closed(false), Some(mat))
+        .expect("prefetch role should build");
+    let sink = RecordingSink::new();
+
+    role.handle(
+        &msg(
+            "run-1",
+            &plugin_payload(json!([{
+                "source_uri": "https://assets.example.com/optional.bin",
+                "target_artifact_name": "optional",
+                "required": false,
+                "expected_sha256": "abcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd",
+                "expected_size_bytes": 512
+            }])),
+        ),
+        "prefetch",
+        &sink,
+    )
+    .await
+    .unwrap();
+
+    let handoffs = sink.handoffs();
+    assert_eq!(handoffs.len(), 1);
+    let out: JsonValue = serde_json::from_str(&handoffs[0].1).unwrap();
     assert_eq!(out["prefetch_degraded"], true);
     assert_eq!(out["prefetch_optional_errors"], 1);
     assert_eq!(out["prefetch_required_errors"], 0);

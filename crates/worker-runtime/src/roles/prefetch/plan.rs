@@ -49,6 +49,10 @@ pub struct PrefetchPlanItem {
     pub cache_key: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub media_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_size_bytes: Option<u64>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub headers: BTreeMap<String, String>,
 }
@@ -75,6 +79,10 @@ impl PrefetchPlanItem {
     }
 
     pub fn effective_cache_key(&self) -> String {
+        if let Some(expected_sha256) = &self.expected_sha256 {
+            return format!("sha256:{}", expected_sha256.to_ascii_lowercase());
+        }
+
         self.cache_key.clone().unwrap_or_else(|| {
             if let Some(byte_range) = &self.byte_range {
                 format!(
@@ -118,6 +126,8 @@ mod tests {
             byte_range: None,
             cache_key: Some("custom-key".to_string()),
             media_type: None,
+            expected_sha256: None,
+            expected_size_bytes: None,
             headers: BTreeMap::new(),
         };
 
@@ -137,6 +147,8 @@ mod tests {
             }),
             cache_key: None,
             media_type: None,
+            expected_sha256: None,
+            expected_size_bytes: None,
             headers: BTreeMap::new(),
         };
 
@@ -178,5 +190,37 @@ mod tests {
         .expect("plan item should parse");
 
         assert_eq!(item.effective_kind(), PrefetchOpKind::FileCopy);
+    }
+
+    #[test]
+    fn verified_item_uses_checksum_addressed_cache_key() {
+        let item: PrefetchPlanItem = serde_json::from_value(json!({
+            "source_uri": "https://assets.example.com/mesh.vtp",
+            "target_artifact_name": "mesh",
+            "cache_key": "client-controlled",
+            "expected_sha256": "ABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCD",
+            "expected_size_bytes": 42
+        }))
+        .expect("plan item should parse");
+
+        assert_eq!(
+            item.effective_cache_key(),
+            "sha256:abcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd"
+        );
+    }
+
+    #[test]
+    fn legacy_item_round_trip_omits_verification_fields() {
+        let item: PrefetchPlanItem = serde_json::from_value(json!({
+            "source_uri": "https://example.com/reference.txt",
+            "target_artifact_name": "reference"
+        }))
+        .expect("legacy plan item should parse");
+
+        assert_eq!(item.expected_sha256, None);
+        assert_eq!(item.expected_size_bytes, None);
+        let encoded = serde_json::to_value(item).expect("plan item should serialize");
+        assert!(encoded.get("expected_sha256").is_none());
+        assert!(encoded.get("expected_size_bytes").is_none());
     }
 }

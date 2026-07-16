@@ -434,6 +434,7 @@ async fn prefetch_from_real_config_processes_message_through_engine() {
             source_uri: "s3://bucket/path/input.bin".to_string(),
             storage_path: "/tmp/cache/prepared-input.bin".to_string(),
             size_bytes: 512,
+            sha256: None,
             media_type: Some("application/octet-stream".to_string()),
         }],
     }));

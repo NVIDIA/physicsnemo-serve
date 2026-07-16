@@ -1526,6 +1526,7 @@ WORKFLOW = DemoWorkflow()
             "name": "postprocessed-output",
             "media_type": "application/json",
             "storage_path": str(expected_output),
+            "primary": True,
         }
     ]
 
@@ -1559,6 +1560,51 @@ def test_inference_worker_supports_class_based_plugin_module(
 
     assert result["status"] == "succeeded"
     assert result["doubled"] == 10
+
+
+def test_inference_worker_maps_plugin_cancellation_to_cancelled_status(
+    tmp_path: Path, monkeypatch
+):
+    plugin_root = create_class_based_json_plugin(tmp_path, plugin_id="demo-cancel")
+    write_file(
+        plugin_root / "workflow.py",
+        """
+from plugin_sdk import PluginCancelledError, PluginWorkflow
+
+
+class CancelledWorkflow(PluginWorkflow):
+    def execute(self, ctx):
+        raise PluginCancelledError("operator requested shutdown")
+
+
+WORKFLOW = CancelledWorkflow
+""".strip(),
+    )
+    module = load_inference_worker_module()
+
+    monkeypatch.setenv("PLUGIN_DIR", str(plugin_root.parent))
+    monkeypatch.setenv("DEFAULT_OUTPUT_DIR", str(tmp_path / "outputs"))
+
+    result = module.WorkflowExecutor(DummyRedis()).execute(
+        plugin_root.name,
+        "run-cancelled",
+        {"value": 5},
+        payload={
+            "workflow_id": plugin_root.name,
+            "operation": "run",
+            "parameters": {"value": 5},
+            "request": {
+                "content_type": "application/json",
+                "raw_fields": {"value": 5},
+                "input_artifacts": [],
+            },
+            "runtime": {"entrypoint": "workflow.py", "kind": "python"},
+        },
+    )
+
+    assert result["status"] == "cancelled"
+    assert result["output_path"] is None
+    assert result["error"] == "operator requested shutdown"
 
 
 def test_inference_worker_execute_creates_fresh_workflow_object_per_request(
@@ -1905,6 +1951,7 @@ def test_inference_worker_builds_legacy_envelope_from_registered_outputs(
             "name": "demo-output",
             "media_type": "application/json",
             "storage_path": str(expected_output_path),
+            "primary": True,
         }
     ]
 
@@ -4173,6 +4220,21 @@ def test_plugin_dev_run_local_plan_uses_scheduler_profile_for_empty_resource_def
     ]
 
 
+@pytest.mark.parametrize("value", ["unsafe", "null"])
+def test_plugin_manifest_configuration_must_be_an_object(tmp_path: Path, value: str):
+    script_dir = repo_root() / "scripts"
+    if str(script_dir) not in sys.path:
+        sys.path.insert(0, str(script_dir))
+
+    from plugin_runtime import load_plugin_manifest  # type: ignore
+
+    manifest_path = tmp_path / "plugin.yaml"
+    manifest_path.write_text(f"configuration: {value}\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="configuration must be an object"):
+        load_plugin_manifest(manifest_path)
+
+
 def test_shipped_plugins_have_local_docs_and_example_fixtures():
     script_dir = repo_root() / "scripts"
     if str(script_dir) not in sys.path:
@@ -4346,6 +4408,9 @@ def test_plugin_runtime_build_context_exposes_abort_requested_for_parent_run():
     )
 
     assert callable(ctx["abort_requested"])
+    deadline = time.monotonic() + 1
+    while not ctx["abort_requested"]() and time.monotonic() < deadline:
+        time.sleep(0.01)
     assert ctx["abort_requested"]() is True
 
 
@@ -5622,6 +5687,7 @@ def test_plugin_dev_run_example_builds_legacy_metadata_for_new_contract_plugin(
             "name": "demo-output",
             "media_type": "application/json",
             "storage_path": str(expected_output_path),
+            "primary": True,
         }
     ]
 

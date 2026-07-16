@@ -4,10 +4,13 @@
  */
 
 use anyhow::{Context, Result};
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 use tokio::fs;
 use uuid::Uuid;
+
+const RESERVED_ARTIFACT_DIRECTORY_NAMES: &[&str] = &[".cache"];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StagedArtifact {
@@ -218,6 +221,13 @@ impl ArtifactStore {
             )
         })? {
             let path = entry.path();
+            let file_name = entry.file_name();
+            if RESERVED_ARTIFACT_DIRECTORY_NAMES
+                .iter()
+                .any(|reserved| file_name == OsStr::new(reserved))
+            {
+                continue;
+            }
             let metadata = entry.metadata().await.with_context(|| {
                 format!(
                     "failed to read artifact directory metadata '{}'",
@@ -440,6 +450,12 @@ mod tests {
             .await
             .unwrap();
 
+        let reserved_cache_dir = root.join(".cache");
+        fs::create_dir_all(&reserved_cache_dir).await.unwrap();
+        fs::write(reserved_cache_dir.join("model.bin"), b"cached model")
+            .await
+            .unwrap();
+
         tokio::time::sleep(max_age + std::time::Duration::from_millis(250)).await;
 
         let fresh_dir = root.join("run-fresh");
@@ -456,5 +472,6 @@ mod tests {
         assert_eq!(removed, 1);
         assert!(!old_dir.exists());
         assert!(fresh_dir.exists());
+        assert!(reserved_cache_dir.exists());
     }
 }

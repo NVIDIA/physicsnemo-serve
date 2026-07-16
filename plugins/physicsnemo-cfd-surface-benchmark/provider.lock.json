@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "provider": "physicsnemo-cfd",
+  "repository": "https://github.com/NVIDIA/physicsnemo-cfd.git",
+  "tag": "v0.0.2",
+  "version": "0.0.2",
+  "commit": "921f14dc2ac14c04aabffaba3290deb792379dd8",
+  "physicsnemo_version": "2.1.1",
+  "python_version": "3.12"
+}

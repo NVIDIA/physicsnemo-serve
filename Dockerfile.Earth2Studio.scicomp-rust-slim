@@ -175,6 +175,14 @@ FROM --platform=linux/amd64 ${PHYSICSNEMO_SERVE_RUNTIME_BASE_IMAGE} AS runtime
 WORKDIR /app
 
 ARG E2G_HASH=11dcf1b0787a7eb6a8497a3a5a5e1fdcc31232d3
+ARG PHYSICSNEMO_CFD_COMMIT=921f14dc2ac14c04aabffaba3290deb792379dd8
+ARG PHYSICSNEMO_CFD_VERSION=0.0.2
+ARG PHYSICSNEMO_VERSION=2.1.1
+ARG PHYSICSNEMO_CFD_TORCH_VERSION=2.10.0+cu130
+ARG PHYSICSNEMO_CFD_TORCHVISION_VERSION=0.25.0+cu130
+
+ENV PHYSICSNEMO_CFD_VENV=/opt/physicsnemo-cfd-venv \
+    PHYSICSNEMO_CFD_PYTHON_EXECUTABLE=/opt/physicsnemo-cfd-venv/bin/python
 
 # The runtime base image owns the Python venv contract.
 RUN test -x "$PHYSICSNEMO_SERVE_PYTHON_EXECUTABLE"
@@ -194,11 +202,86 @@ RUN "$PHYSICSNEMO_SERVE_PYTHON_EXECUTABLE" -m pip install --no-cache-dir --no-bu
     cartopy cfgrib && \
     "$PHYSICSNEMO_SERVE_PYTHON_EXECUTABLE" -m pip install --no-cache-dir 'scipy==1.13.1'
 
+# Keep PhysicsNeMo-CFD separate from the Earth2Studio environment. The venv
+# uses the base image's CUDA system libraries, while its Python packages and
+# newer Warp dependency remain isolated in this environment.
+RUN test "$(python3.12 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')" = "3.12" \
+    && python3.12 -m venv "$PHYSICSNEMO_CFD_VENV" \
+    && env -u PIP_CONSTRAINT "$PHYSICSNEMO_CFD_PYTHON_EXECUTABLE" -m pip install \
+        --no-cache-dir --upgrade pip setuptools wheel
+
+# PhysicsNeMo 2.1.1 requires the final PyTorch 2.10 release. Install the CUDA
+# 13.0 wheel into the CFD venv so the base image's 2.10 alpha build and global
+# pip constraint remain unchanged for Earth2Studio.
+# Use PhysicsNeMo's cu13 extra as the compatibility boundary for RAPIDS and
+# CuPy (notably its <14 CuPy cap), then layer the CFD GPU/HF extras on top.
+RUN env -u PIP_CONSTRAINT "$PHYSICSNEMO_CFD_PYTHON_EXECUTABLE" -m pip install \
+        --no-cache-dir --index-url https://download.pytorch.org/whl/cu130 \
+        "torch==${PHYSICSNEMO_CFD_TORCH_VERSION}" \
+        "torchvision==${PHYSICSNEMO_CFD_TORCHVISION_VERSION}" \
+    && printf 'torch==%s\ntorchvision==%s\n' \
+        "${PHYSICSNEMO_CFD_TORCH_VERSION}" \
+        "${PHYSICSNEMO_CFD_TORCHVISION_VERSION}" \
+        > /tmp/physicsnemo-cfd-constraints.txt \
+    && env -u PIP_CONSTRAINT "$PHYSICSNEMO_CFD_PYTHON_EXECUTABLE" -m pip install --no-cache-dir \
+        redis 'pydantic>=2.0.0' 'hiredis>=2.0.0' python-dotenv aiofiles \
+        'jsonschema>=4.26.0' \
+    && env -u PIP_CONSTRAINT "$PHYSICSNEMO_CFD_PYTHON_EXECUTABLE" -m pip install --no-cache-dir \
+        --constraint /tmp/physicsnemo-cfd-constraints.txt \
+        --extra-index-url https://pypi.nvidia.com \
+        "nvidia-physicsnemo[cu13]==${PHYSICSNEMO_VERSION}" \
+        "nvidia-physicsnemo-cfd[gpu,evaluation-hf] @ git+https://github.com/NVIDIA/physicsnemo-cfd.git@${PHYSICSNEMO_CFD_COMMIT}" \
+    && "$PHYSICSNEMO_CFD_PYTHON_EXECUTABLE" -m pip check
+
+# Fail the image build if the requested source revision, versions, Python ABI,
+# or either optional dependency family was not installed into the CFD venv.
+RUN "$PHYSICSNEMO_CFD_PYTHON_EXECUTABLE" - \
+        "$PHYSICSNEMO_VERSION" \
+        "$PHYSICSNEMO_CFD_VERSION" \
+        "$PHYSICSNEMO_CFD_COMMIT" \
+        "$PHYSICSNEMO_CFD_TORCH_VERSION" \
+        "$PHYSICSNEMO_CFD_TORCHVISION_VERSION" <<'PY'
+import importlib.metadata
+import importlib.util
+import json
+import sys
+
+import huggingface_hub
+import physicsnemo
+import physicsnemo.cfd
+import torch
+from packaging.version import Version
+
+expected_physicsnemo, expected_cfd, expected_commit, expected_torch, expected_torchvision = sys.argv[1:]
+assert sys.version_info[:2] == (3, 12), sys.version
+assert physicsnemo.__version__ == expected_physicsnemo
+assert physicsnemo.cfd.__version__ == expected_cfd
+assert torch.__version__ == expected_torch
+assert importlib.metadata.version("torchvision") == expected_torchvision
+assert torch.version.cuda == "13.0"
+
+distribution = importlib.metadata.distribution("nvidia-physicsnemo-cfd")
+direct_url_text = distribution.read_text("direct_url.json")
+assert direct_url_text is not None
+direct_url = json.loads(direct_url_text)
+assert direct_url["vcs_info"]["commit_id"] == expected_commit
+assert Version(importlib.metadata.version("cupy-cuda13x")) < Version("14.0.0")
+for package, module in (
+    ("cupy-cuda13x", "cupy"),
+    ("cuml-cu13", "cuml"),
+    ("huggingface-hub", "huggingface_hub"),
+):
+    assert importlib.metadata.version(package)
+    assert importlib.util.find_spec(module) is not None
+PY
+
 # Copy local Python wheels after the third-party dependency layers so wheel
 # changes do not force a rebuild of torch-harmonics and Earth2Studio extras.
 COPY --from=builder /src/target/wheels/*.whl /tmp/wheels/
 RUN "$PHYSICSNEMO_SERVE_PYTHON_EXECUTABLE" -m pip install --no-cache-dir /tmp/wheels/*.whl \
-    && mkdir -p /app/bin /app/config /app/plugins /outputs
+    && env -u PIP_CONSTRAINT "$PHYSICSNEMO_CFD_PYTHON_EXECUTABLE" -m pip install --no-cache-dir /tmp/wheels/*.whl \
+    && "$PHYSICSNEMO_CFD_PYTHON_EXECUTABLE" -c "import scicomp_rq" \
+    && mkdir -p /app/bin /app/config /app/plugins /outputs/.cache/physicsnemo-cfd/models
 
 # Copy Rust binaries after the heavy Python dependency layers so binary-only
 # rebuilds do not invalidate torch-harmonics or Earth2Studio installs.
@@ -222,6 +305,7 @@ COPY plugins/e2s-example-user /app/plugins/e2s-example-user
 COPY plugins/e2s-foundry-fcn3 /app/plugins/e2s-foundry-fcn3
 COPY plugins/e2s-foundry-fcn3-stormscope-goes /app/plugins/e2s-foundry-fcn3-stormscope-goes
 COPY plugins/e2s-stormcast-fcn3 /app/plugins/e2s-stormcast-fcn3
+COPY plugins/physicsnemo-cfd-surface-benchmark /app/plugins/physicsnemo-cfd-surface-benchmark
 
 # Model checkpoints and other cached runtime artifacts.
 # The directory ships as an empty stub in git.
@@ -231,6 +315,8 @@ COPY checkpoints /app/checkpoints
 COPY python/e2s_tools /app/python/e2s_tools
 # Copy Earth2Workflow base class used by e2s-* plugins
 COPY python/e2s_workflow.py /app/python/e2s_workflow.py
+# Copy import-light execution primitives shared by PhysicsNeMo-CFD plugins.
+COPY python/physicsnemo_cfd_runtime /app/python/physicsnemo_cfd_runtime
 
 # Copy entrypoint scripts (supervisor-based process management)
 COPY scripts /app/scripts

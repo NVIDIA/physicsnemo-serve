@@ -39,6 +39,7 @@ pytest -n 2
 - `test_cicd.py` - CI/CD pipeline tests (@pytest.mark.cicd)
 - `test_stress.py` - Sustained concurrency/load tests (@pytest.mark.stress)
 - `test_output_publication.py` - Live object-store sync tests (@pytest.mark.publication)
+- `test_physicsnemo_cfd_surface_e2e.py` - Opt-in live CFD GPU test (@pytest.mark.cfd_e2e)
 - `test_basic.py` - Core workflow tests (health, list workflows, run workflows)
 - `test_negative.py` - Invalid parameter tests
 - `test_experiments.py` - Experimental/exploratory tests
@@ -48,6 +49,42 @@ pytest -n 2
 - `deterministic_fcn_workflow`
 - `deterministic_workflow`
 - `diagnostic_workflow`
+
+## PhysicsNeMo-CFD E2E
+
+The Rust-only `cfd_e2e` suite is explicit opt-in and excluded from normal QA.
+It downloads the pinned public DrivAerML VTP and STL inputs, runs one
+`domino_surface` inference with `l2_pressure`, and validates the full
+API-to-GPU-to-artifact path. Submission uses a no-retry HTTP session so a
+transient response cannot duplicate the long-running GPU job.
+
+The deploy runner selects only `physicsnemo-cfd-gpu`, configures the exact
+Hugging Face source/CDN host policy, and increases the verified download
+timeout:
+
+```bash
+python -u qa/scripts/run_qa.py \
+  --service rust \
+  --image-tag <already-pushed-tag> \
+  --suite cfd_e2e \
+  --num-proc 1
+```
+
+For an existing correctly configured endpoint:
+
+```bash
+QA_CFD_E2E_ENABLED=1 \
+QA_CFD_E2E_TIMEOUT_SECS=23400 \
+pytest -m cfd_e2e \
+  --service rust \
+  --urls https://<endpoint> \
+  --token <endpoint-token> \
+  -v
+```
+
+Evidence is written under `QA_CFD_E2E_ARTIFACT_DIR` (default
+`artifacts/cfd-e2e`). The suite requires one compatible 80 GiB-class GPU,
+writable persistent `/outputs`, and outbound Hugging Face access.
 
 ## Multi-GPU CI/CD Check
 

@@ -5,9 +5,9 @@
 _cfg = $(shell grep '^$(1):' deploy/config.yaml 2>/dev/null | head -1 | sed 's/^[^:]*:[[:space:]]*//' | sed 's/"//g' | sed "s/'//g" | sed 's/[[:space:]]*\#.*//')
 
 DOCKER_REPO ?= $(call _cfg,docker_registry)
-IMAGE_NAME = $(DOCKER_REPO)/$(call _cfg,image_name)
-IMAGE_TAG = v0.1.20260629.0
-RUNTIME_BASE_IMAGE_NAME = $(DOCKER_REPO)/$(call _cfg,runtime_base_image)
+IMAGE_NAME ?= $(DOCKER_REPO)/$(call _cfg,image_name)
+IMAGE_TAG = v0.1.20260714.0
+RUNTIME_BASE_IMAGE_NAME ?= $(DOCKER_REPO)/$(call _cfg,runtime_base_image)
 RUNTIME_BASE_IMAGE_TAG = pytorch-26.01-py3-th0.8.0
 RUNTIME_BASE_IMAGE = $(RUNTIME_BASE_IMAGE_NAME):$(RUNTIME_BASE_IMAGE_TAG)
 

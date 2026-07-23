@@ -843,33 +843,6 @@ impl PublishRole {
                     })
                     .await;
             };
-            let publication_target = match build_publication_target(target, &self.config) {
-                Ok(target) => target,
-                Err(error) => {
-                    let error = error.to_string();
-                    self.persist_publish_failure(msg.run_id(), &error).await?;
-                    record_publication_failure(
-                        &mut result_payload,
-                        target,
-                        Some(&selected),
-                        &error,
-                    )?;
-                    status = "failed".to_string();
-                    return self
-                        .handoff_to_results(ResultsHandoff {
-                            msg,
-                            sink,
-                            cancellation,
-                            next_queue: next_stage.queue.as_str(),
-                            raw_payload: &raw_payload,
-                            workflow_id: typed.workflow_id.as_str(),
-                            operation: typed.operation.as_deref(),
-                            status: status.as_str(),
-                            result_payload,
-                        })
-                        .await;
-                }
-            };
             let target_fingerprint = publish_target_fingerprint(target, &selected);
             match self
                 .status_persistence
@@ -892,6 +865,41 @@ impl PublishRole {
                     )));
                 }
                 PublishClaim::Acquired { owner_token } => {
+                    let publication_target = match build_publication_target(target, &self.config) {
+                        Ok(target) => target,
+                        Err(error) => {
+                            let error = error.to_string();
+                            self.status_persistence
+                                .fail_publish_claim(
+                                    msg.run_id(),
+                                    &target_fingerprint,
+                                    &owner_token,
+                                    &error,
+                                )
+                                .await?;
+                            self.persist_publish_failure(msg.run_id(), &error).await?;
+                            record_publication_failure(
+                                &mut result_payload,
+                                target,
+                                Some(&selected),
+                                &error,
+                            )?;
+                            status = "failed".to_string();
+                            return self
+                                .handoff_to_results(ResultsHandoff {
+                                    msg,
+                                    sink,
+                                    cancellation,
+                                    next_queue: next_stage.queue.as_str(),
+                                    raw_payload: &raw_payload,
+                                    workflow_id: typed.workflow_id.as_str(),
+                                    operation: typed.operation.as_deref(),
+                                    status: status.as_str(),
+                                    result_payload,
+                                })
+                                .await;
+                        }
+                    };
                     let upload_started = Instant::now();
                     let upload_result = upload_selected_artifact_with_claim_renewal(
                         Arc::clone(&self.status_persistence),
@@ -2421,17 +2429,23 @@ mod tests {
 
     struct RecordingStatusPersistence {
         updates: Mutex<Vec<PublishStatusUpdate>>,
+        failed_claims: AtomicUsize,
     }
 
     impl RecordingStatusPersistence {
         fn new() -> Self {
             Self {
                 updates: Mutex::new(Vec::new()),
+                failed_claims: AtomicUsize::new(0),
             }
         }
 
         fn updates(&self) -> Vec<PublishStatusUpdate> {
             self.updates.lock().expect("status lock poisoned").clone()
+        }
+
+        fn failed_claim_count(&self) -> usize {
+            self.failed_claims.load(Ordering::SeqCst)
         }
     }
 
@@ -2442,6 +2456,19 @@ mod tests {
                     .lock()
                     .expect("status lock poisoned")
                     .push(update);
+                Ok(())
+            })
+        }
+
+        fn fail_publish_claim<'a>(
+            &'a self,
+            _run_id: &'a str,
+            _target_fingerprint: &'a str,
+            _owner_token: &'a str,
+            _error: &'a str,
+        ) -> BoxFuture<'a, Result<()>> {
+            Box::pin(async move {
+                self.failed_claims.fetch_add(1, Ordering::SeqCst);
                 Ok(())
             })
         }
@@ -3615,6 +3642,11 @@ mod tests {
             updates[1].error.as_deref(),
             Some("publish: s3 bucket is required")
         );
+        assert_eq!(
+            status_persistence.failed_claim_count(),
+            1,
+            "target construction failure must release the acquired publish claim"
+        );
 
         let writes = sink.writes();
         assert_eq!(writes.len(), 1);
@@ -3747,7 +3779,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn in_progress_publish_claim_defers_without_dlq_and_can_complete_later() {
+    async fn in_progress_and_completed_claims_skip_target_construction() {
         let _guard = test_env::env_lock().lock().await;
         let _access_key = EnvRestore::set("AWS_ACCESS_KEY_ID", Some("test"));
         let _secret_key = EnvRestore::set("AWS_SECRET_ACCESS_KEY", Some("test"));
@@ -3777,7 +3809,7 @@ mod tests {
                     "provider": "s3",
                     "storage": {
                         "type": "s3",
-                        "bucket": "bucket",
+                        "bucket": "",
                         "prefix": "runs/run-claim",
                         "region": "us-east-1",
                         "endpoint": "http://127.0.0.1:9"

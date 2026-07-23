@@ -37,6 +37,7 @@ from __future__ import annotations
 import argparse
 import atexit
 import io
+import json
 import os
 import re
 import secrets
@@ -67,6 +68,7 @@ INFERENCE_DIR = REPO_ROOT / "inference"
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "deploy"))
+sys.path.insert(0, str(INFERENCE_DIR))
 from config import load_deploy_config  # noqa: E402
 
 
@@ -84,6 +86,28 @@ MULTIGPU_ENV_NAMES = (
     "MULTIGPU_GPU_COUNT",
     "QA_MULTIGPU_WORKFLOWS",
     "MULTIGPU_WORKFLOWS",
+)
+PUBLICATION_CONTAINER_CONFIG_PATH = "/outputs/qa-publication"
+PUBLICATION_ENV_CONFIG_SENTINEL = "__physicsnemo_serve_publication_env_config__"
+DEFAULT_CONTAINER_RUNTIME_CONFIG = "/app/scripts/worker_runtime_config.json"
+DEFAULT_RUNTIME_CONFIG = REPO_ROOT.parent / "scripts" / "worker_runtime_config.json"
+DEFAULT_PUBLICATION_COMPARE_IMAGE_NAME = (
+    "your-registry.example.com/your-org/physicsnemo-serve"
+)
+DEFAULT_PUBLICATION_COMPARE_NODE_GROUP = "your-node-group"
+DEFAULT_PUBLICATION_COMPARE_PULL_SECRET = "your-pull-secret"
+PUBLICATION_CREDENTIAL_ENV_NAMES = (
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_SESSION_TOKEN",
+    "AZURE_STORAGE_ACCOUNT",
+    "AZURE_STORAGE_ACCOUNT_NAME",
+    "AZURE_STORAGE_ACCOUNT_KEY",
+    "AZURE_STORAGE_ACCESS_KEY",
+    "AZURE_STORAGE_SAS_TOKEN",
+    "AZURE_CLIENT_ID",
+    "AZURE_TENANT_ID",
+    "AZURE_CLIENT_SECRET",
 )
 
 ALL_WORKFLOW_PLUGIN_IDS = [
@@ -110,13 +134,15 @@ def determine_workflows(
     *,
     service: str,
     workflows_arg: str | None,
+    suite: str = "",
 ) -> list[str]:
     """Determine which workflow plugin IDs to iterate over.
 
     Priority:
     1. PHYSICSNEMO_SERVE_ENABLED_PLUGIN_ID env var (single workflow, legacy mode)
     2. --workflows CLI arg (comma-separated list)
-    3. For the Rust service: full list of all known plugin IDs (one deploy each)
+    3. For Rust publication QA: plugins selected by the publication requests
+    4. For the Rust service: full list of all known plugin IDs (one deploy each)
        For the Python service: single deployment running all workflows at once
     """
     env_plugin_id = os.environ.get("PHYSICSNEMO_SERVE_ENABLED_PLUGIN_ID", "").strip()
@@ -125,6 +151,18 @@ def determine_workflows(
 
     if workflows_arg:
         return [w.strip() for w in workflows_arg.split(",") if w.strip()]
+
+    if service == "rust" and suite == "publication":
+        from output_publication_helpers import load_request_payloads
+        from service_adapter import RustAdapter
+
+        adapter = RustAdapter()
+        return list(
+            dict.fromkeys(
+                adapter._resolve_workflow(workflow)
+                for workflow, _payload in load_request_payloads()
+            )
+        )
 
     if service == "python":
         return [WORKFLOW_ALL]
@@ -170,6 +208,254 @@ def env_int_any(names: tuple[str, ...], default: int) -> int:
 def multigpu_env_requested() -> bool:
     """Return whether the caller explicitly selected multi-GPU QA behavior."""
     return any(os.environ.get(name, "").strip() for name in MULTIGPU_ENV_NAMES)
+
+
+def _env_value(*names: str) -> str | None:
+    for name in names:
+        value = os.environ.get(name, "").strip()
+        if value:
+            return value
+    return None
+
+
+def _env_positive_int(*names: str) -> int | None:
+    for name in names:
+        value = os.environ.get(name, "").strip()
+        if not value:
+            continue
+        try:
+            parsed = int(value)
+        except ValueError:
+            sys.exit(f"Error: environment variable {name} must be an integer.")
+        if parsed <= 0:
+            sys.exit(f"Error: environment variable {name} must be greater than zero.")
+        return parsed
+    return None
+
+
+def build_publication_storage_config() -> dict[str, object]:
+    """Build the simplified output_publication.storage block from QA env vars."""
+    storage_type = (_env_value("QA_PUBLICATION_STORAGE_TYPE") or "").lower()
+    prefix = _env_value("QA_PUBLICATION_PREFIX") or "outputs"
+    if storage_type == "s3":
+        bucket = _env_value("QA_PUBLICATION_S3_BUCKET")
+        if not bucket:
+            sys.exit(
+                "Error: QA_PUBLICATION_S3_BUCKET is required for publication S3 QA."
+            )
+        storage: dict[str, object] = {
+            "type": "s3",
+            "bucket": bucket,
+            "prefix": prefix,
+        }
+        region = _env_value(
+            "QA_PUBLICATION_S3_REGION", "AWS_DEFAULT_REGION", "AWS_REGION"
+        )
+        if region:
+            storage["region"] = region
+        endpoint = _env_value("QA_PUBLICATION_S3_ENDPOINT", "S3_ENDPOINT_URL")
+        if endpoint:
+            storage["endpoint"] = endpoint
+        return storage
+
+    if storage_type == "azure":
+        endpoint = _env_value("QA_PUBLICATION_AZURE_ENDPOINT")
+        container = _env_value("QA_PUBLICATION_AZURE_CONTAINER")
+        if not endpoint:
+            sys.exit(
+                "Error: QA_PUBLICATION_AZURE_ENDPOINT is required for publication Azure QA."
+            )
+        if not container:
+            sys.exit(
+                "Error: QA_PUBLICATION_AZURE_CONTAINER is required for publication Azure QA."
+            )
+        return {
+            "type": "azure",
+            "endpoint": endpoint.rstrip("/"),
+            "container": container.strip("/"),
+            "prefix": prefix,
+        }
+
+    sys.exit(
+        "Error: QA_PUBLICATION_STORAGE_TYPE must be set to 's3' or 'azure' "
+        "for publication QA."
+    )
+
+
+def build_publication_publish_role_config() -> dict[str, object] | None:
+    """Build optional publish-role performance config from QA env vars."""
+    config: dict[str, object] = {}
+    scalar_fields = {
+        "max_concurrent_files": _env_positive_int(
+            "QA_PUBLICATION_UPLOAD_MAX_CONCURRENT_FILES"
+        ),
+        "multipart_threshold_bytes": _env_positive_int(
+            "QA_PUBLICATION_UPLOAD_MULTIPART_THRESHOLD_BYTES"
+        ),
+        "multipart_part_size_bytes": _env_positive_int(
+            "QA_PUBLICATION_UPLOAD_MULTIPART_PART_SIZE_BYTES"
+        ),
+        "multipart_max_concurrency": _env_positive_int(
+            "QA_PUBLICATION_UPLOAD_MULTIPART_MAX_CONCURRENCY"
+        ),
+    }
+    for key, value in scalar_fields.items():
+        if value is not None:
+            config[key] = value
+
+    client_options = {
+        "timeout_secs": _env_positive_int("QA_PUBLICATION_UPLOAD_TIMEOUT_SECS"),
+        "connect_timeout_secs": _env_positive_int(
+            "QA_PUBLICATION_UPLOAD_CONNECT_TIMEOUT_SECS"
+        ),
+        "pool_max_idle_per_host": _env_positive_int(
+            "QA_PUBLICATION_UPLOAD_POOL_MAX_IDLE_PER_HOST"
+        ),
+    }
+    client_options = {
+        key: value for key, value in client_options.items() if value is not None
+    }
+    if client_options:
+        config["client_options"] = client_options
+
+    retry = {
+        "max_retries": _env_positive_int("QA_PUBLICATION_UPLOAD_RETRY_MAX_RETRIES"),
+        "timeout_secs": _env_positive_int("QA_PUBLICATION_UPLOAD_RETRY_TIMEOUT_SECS"),
+    }
+    retry = {key: value for key, value in retry.items() if value is not None}
+    if retry:
+        config["retry"] = retry
+
+    return config or None
+
+
+def write_publication_runtime_config(
+    *, nfs_path: str, endpoint_name: str
+) -> tuple[Path, str]:
+    """Write config through an explicit local mapping of the deployed NFS path."""
+    local_mount_path = _env_value("QA_PUBLICATION_LOCAL_MOUNT_PATH")
+    if not local_mount_path:
+        return Path(PUBLICATION_ENV_CONFIG_SENTINEL), PUBLICATION_ENV_CONFIG_SENTINEL
+
+    host_dir = Path(local_mount_path) / "qa-publication" / endpoint_name
+    try:
+        host_dir.mkdir(parents=True, exist_ok=True)
+    except PermissionError:
+        return Path(PUBLICATION_ENV_CONFIG_SENTINEL), PUBLICATION_ENV_CONFIG_SENTINEL
+    host_path = host_dir / "worker_runtime_config.json"
+    container_path = f"{PUBLICATION_CONTAINER_CONFIG_PATH}/{endpoint_name}/worker_runtime_config.json"
+    config = json.loads(DEFAULT_RUNTIME_CONFIG.read_text(encoding="utf-8"))
+    config["output_publication"] = {
+        "enabled": True,
+        "storage": build_publication_storage_config(),
+    }
+    publish_config = build_publication_publish_role_config()
+    if publish_config:
+        roles = config.setdefault("roles", {})
+        publish_role = roles.setdefault("publish", {"inputs": [], "outputs": []})
+        role_config = publish_role.setdefault("config", {})
+        if not isinstance(role_config, dict):
+            sys.exit(
+                "Error: roles.publish.config in default runtime config must be an object."
+            )
+        role_config.update(publish_config)
+    host_path.write_text(
+        json.dumps(config, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    return host_path, container_path
+
+
+def publication_container_envs(config_path: str) -> list[str]:
+    """Return endpoint env vars needed for publication without logging secrets."""
+    if config_path == PUBLICATION_ENV_CONFIG_SENTINEL:
+        envs = [
+            f"PHYSICSNEMO_SERVE_RUNTIME_ENVS_CONFIG={DEFAULT_CONTAINER_RUNTIME_CONFIG}",
+            f"WORKER_RUNTIME_CONFIG={DEFAULT_CONTAINER_RUNTIME_CONFIG}",
+            "PHYSICSNEMO_SERVE_OUTPUT_PUBLICATION_CONFIG_JSON="
+            + json.dumps(
+                {
+                    "enabled": True,
+                    "storage": build_publication_storage_config(),
+                },
+                separators=(",", ":"),
+                sort_keys=True,
+            ),
+        ]
+        publish_config = build_publication_publish_role_config()
+        if publish_config:
+            envs.append(
+                "PHYSICSNEMO_SERVE_PUBLISH_ROLE_CONFIG_JSON="
+                + json.dumps(publish_config, separators=(",", ":"), sort_keys=True)
+            )
+        for name in PUBLICATION_CREDENTIAL_ENV_NAMES:
+            value = os.environ.get(name, "").strip()
+            if value:
+                envs.append(f"{name}={value}")
+        return envs
+
+    envs = [
+        f"PHYSICSNEMO_SERVE_RUNTIME_ENVS_CONFIG={config_path}",
+        f"WORKER_RUNTIME_CONFIG={config_path}",
+    ]
+    for name in PUBLICATION_CREDENTIAL_ENV_NAMES:
+        value = os.environ.get(name, "").strip()
+        if value:
+            envs.append(f"{name}={value}")
+    return envs
+
+
+def publication_compare_env(
+    *,
+    image_tag: str,
+    workspace_id: str,
+    workspace_token: str,
+    nfs_path: str,
+    deploy_config: dict[str, str],
+) -> dict[str, str]:
+    """Build compare-job env using QA, Lepton, deploy config, then defaults."""
+    compare_image = _env_value("QA_PUBLICATION_COMPARE_IMAGE")
+    if not compare_image:
+        if ":" in image_tag.rsplit("/", 1)[-1]:
+            compare_image = image_tag
+        else:
+            registry = (
+                deploy_config.get("docker_registry", "").strip()
+                or DEFAULT_PUBLICATION_COMPARE_IMAGE_NAME.rsplit("/", 1)[0]
+            ).rstrip("/")
+            image_name = (
+                deploy_config.get("image_name", "").strip()
+                or DEFAULT_PUBLICATION_COMPARE_IMAGE_NAME.rsplit("/", 1)[1]
+            ).lstrip("/")
+            compare_image = f"{registry}/{image_name}:{image_tag}"
+
+    return {
+        "LEPTON_WORKSPACE_ID": workspace_id,
+        "LEPTON_WORKSPACE_TOKEN": workspace_token,
+        "QA_PUBLICATION_NFS_PATH": nfs_path,
+        "QA_PUBLICATION_MOUNT_TARGET": _env_value("QA_PUBLICATION_MOUNT_TARGET")
+        or "/outputs",
+        "QA_PUBLICATION_COMPARE_IMAGE": compare_image,
+        "QA_PUBLICATION_NODE_GROUP": _env_value(
+            "QA_PUBLICATION_NODE_GROUP", "LEPTON_NODE_GROUP"
+        )
+        or deploy_config.get("lepton_node_group", "").strip()
+        or DEFAULT_PUBLICATION_COMPARE_NODE_GROUP,
+        "QA_PUBLICATION_RESOURCE_SHAPE": _env_value(
+            "QA_PUBLICATION_RESOURCE_SHAPE",
+            "QA_PUBLICATION_COMPARE_RESOURCE_SHAPE",
+        )
+        or "cpu.large",
+        "QA_PUBLICATION_PULL_SECRET": _env_value(
+            "QA_PUBLICATION_PULL_SECRET", "LEPTON_PULL_SECRET"
+        )
+        or deploy_config.get("pull_secret", "").strip()
+        or DEFAULT_PUBLICATION_COMPARE_PULL_SECRET,
+        "QA_PUBLICATION_LUSTRE_STORAGE": _env_value(
+            "QA_PUBLICATION_LUSTRE_STORAGE", "LEPTON_LUSTRE_STORAGE"
+        )
+        or deploy_config.get("lustre_storage", "").strip()
+        or "lustre",
+    }
 
 
 def post_health_wait_applies(
@@ -288,6 +574,30 @@ def output_delta(previous: str, current: str) -> str:
     if not new_lines:
         return ""
     return "\n".join(new_lines) + "\n"
+
+
+def strip_ansi_codes(text: str) -> str:
+    return re.sub(r"\x1b\[[0-9;]*m", "", text)
+
+
+def capture_endpoint_logs_text(
+    endpoint_name: str,
+    *,
+    timeout: int = ENDPOINT_LOG_COMMAND_TIMEOUT,
+) -> str:
+    try:
+        result = subprocess.run(
+            ["lep", "endpoint", "log", "-n", endpoint_name],
+            env=os.environ.copy(),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+        return result.stdout or ""
+    except subprocess.TimeoutExpired as err:
+        return command_output_text(err.output)
 
 
 def capture_endpoint_logs_once(
@@ -553,6 +863,7 @@ def run_pytest(
     num_proc: int,
     test_filter: str | None = None,
     artifact_dir: Path | None = None,
+    extra_env: dict[str, str] | None = None,
 ) -> int:
     """Run pytest with the appropriate marker and return the exit code."""
     urls = endpoint_url
@@ -594,6 +905,8 @@ def run_pytest(
         "LEPTON_ENDPOINT_TOKEN": endpoint_token,
         "PYTHONUNBUFFERED": "1",
     }
+    if extra_env:
+        env.update(extra_env)
     result = subprocess.run(cmd, cwd=str(INFERENCE_DIR), env=env)
     return result.returncode
 
@@ -620,6 +933,8 @@ def run_one_workflow(
     artifact_dir: Path,
     post_health_wait_secs: int,
     endpoint_name_override: str | None = None,
+    container_envs: list[str] | None = None,
+    deploy_config: dict[str, str] | None = None,
 ) -> int:
     """Deploy, test, and teardown a single workflow. Returns pytest exit code."""
     display_name = workflow_id if workflow_id != WORKFLOW_ALL else "ALL (single deploy)"
@@ -629,11 +944,11 @@ def run_one_workflow(
     )
 
     is_single_deploy = workflow_id == WORKFLOW_ALL
-    container_envs = (
-        []
-        if is_single_deploy
-        else [f"PHYSICSNEMO_SERVE_ENABLED_PLUGIN_ID={workflow_id}"]
-    )
+    deploy_container_envs = list(container_envs or [])
+    if not is_single_deploy:
+        deploy_container_envs.append(
+            f"PHYSICSNEMO_SERVE_ENABLED_PLUGIN_ID={workflow_id}"
+        )
     endpoint_name = endpoint_name_override or default_endpoint_name(source)
     endpoint_log_artifact = artifact_dir / "endpoint-logs" / f"{endpoint_name}.log"
 
@@ -667,7 +982,7 @@ def run_one_workflow(
                 endpoint_token=endpoint_token,
                 endpoint_name=endpoint_name,
                 nfs_path=nfs_path,
-                container_envs=container_envs,
+                container_envs=deploy_container_envs,
             )
         except SystemExit:
             print(
@@ -706,6 +1021,23 @@ def run_one_workflow(
             if is_single_deploy
             else {"PHYSICSNEMO_SERVE_ENABLED_PLUGIN_ID": workflow_id}
         )
+        pytest_extra_env = {}
+        if suite == "publication":
+            if not _env_value("QA_PUBLICATION_WORKFLOWS", "QA_PUBLICATION_WORKFLOW"):
+                from service_adapter import RustAdapter
+
+                pytest_extra_env["QA_PUBLICATION_WORKFLOW"] = (
+                    RustAdapter()._reverse_workflow(workflow_id)
+                )
+            pytest_extra_env.update(
+                publication_compare_env(
+                    image_tag=image_tag,
+                    workspace_id=workspace_id,
+                    workspace_token=workspace_token,
+                    nfs_path=nfs_path,
+                    deploy_config=deploy_config or {},
+                )
+            )
         old_env = os.environ.copy()
         os.environ.update(pytest_env_override)
         exit_code = 1
@@ -718,6 +1050,7 @@ def run_one_workflow(
                 num_proc=num_proc,
                 test_filter=test_filter,
                 artifact_dir=artifact_dir,
+                extra_env=pytest_extra_env,
             )
         finally:
             os.environ.clear()
@@ -750,7 +1083,7 @@ def main():
     )
     parser.add_argument(
         "--suite",
-        choices=["smoke", "cicd", "basic", "negative", "stress", "full"],
+        choices=["smoke", "cicd", "basic", "negative", "stress", "publication", "full"],
         default="smoke",
         help="Test suite to run (pytest marker). 'full' runs without marker filter.",
     )
@@ -859,6 +1192,33 @@ def main():
     source = "physicsnemo-serve" if args.service == "rust" else "earth2studio"
     nfs_path = f"{_deploy_cfg.get('nfs_mount_base', '/mnt/shared')}/{args.lustre_dir}"
 
+    container_envs = []
+    enabled_plugin_id = os.environ.get(
+        "PHYSICSNEMO_SERVE_ENABLED_PLUGIN_ID", ""
+    ).strip()
+    endpoint_name = args.endpoint_name or default_endpoint_name(source)
+    if args.suite == "publication":
+        if args.service != "rust":
+            sys.exit("Error: --suite publication only supports --service rust.")
+        host_config_path, container_config_path = write_publication_runtime_config(
+            nfs_path=nfs_path,
+            endpoint_name=endpoint_name,
+        )
+        container_envs.extend(publication_container_envs(container_config_path))
+        print(
+            f"==> Publication runtime config: {host_config_path} -> {container_config_path}",
+            flush=True,
+        )
+    if enabled_plugin_id and args.service == "rust":
+        print(
+            f"==> Single-plugin mode: PHYSICSNEMO_SERVE_ENABLED_PLUGIN_ID={enabled_plugin_id}",
+            flush=True,
+        )
+    elif enabled_plugin_id:
+        print(
+            "==> Ignoring PHYSICSNEMO_SERVE_ENABLED_PLUGIN_ID because --service is not rust",
+            flush=True,
+        )
     artifact_dir = Path(args.artifact_dir)
     if not artifact_dir.is_absolute():
         artifact_dir = Path.cwd() / artifact_dir
@@ -866,6 +1226,7 @@ def main():
     workflows = determine_workflows(
         service=args.service,
         workflows_arg=args.workflows,
+        suite=args.suite,
     )
 
     endpoint_name_override = None
@@ -940,6 +1301,8 @@ def main():
             artifact_dir=artifact_dir,
             post_health_wait_secs=args.post_health_wait_secs,
             endpoint_name_override=endpoint_name_override,
+            container_envs=container_envs,
+            deploy_config=_deploy_cfg,
         )
         results.append((workflow_id, exit_code))
 

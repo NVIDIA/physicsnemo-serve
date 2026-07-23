@@ -41,6 +41,8 @@ set -euo pipefail
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/deploy/config.sh"
 
+USER="${USER:-$(id -un)}"
+
 # ---------------------------------------------------------------------------
 # Defaults (env vars override)
 
@@ -469,11 +471,29 @@ if ((${#LEPTON_CONTAINER_ENVS[@]} > 0)); then
         deploy_args+=(--env "$env_pair")
     done
 fi
-# Don't pipe through run(); --tokens carries the endpoint bearer token.
+# Don't pipe through run(); --tokens carries the endpoint bearer token and
+# --env may carry provider credentials.
 preview_args=()
+redact_next_env=0
 for arg in "${deploy_args[@]}"; do
+    if [[ "$redact_next_env" -eq 1 ]]; then
+        key="${arg%%=*}"
+        case "$key" in
+            *[Tt][Oo][Kk][Ee][Nn]*|*[Ss][Ee][Cc][Rr][Ee][Tt]*|*[Kk][Ee][Yy]*|*[Pp][Aa][Ss][Ss][Ww][Oo][Rr][Dd]*|*[Cc][Rr][Ee][Dd][Ee][Nn][Tt][Ii][Aa][Ll]*)
+                preview_args+=("${key}=<redacted>")
+                ;;
+            *)
+                preview_args+=("$arg")
+                ;;
+        esac
+        redact_next_env=0
+        continue
+    fi
     if [[ "$arg" == "$LEPTON_ENDPOINT_TOKEN" ]]; then
         preview_args+=("<redacted>")
+    elif [[ "$arg" == "--env" ]]; then
+        preview_args+=("$arg")
+        redact_next_env=1
     else
         preview_args+=("$arg")
     fi

@@ -241,6 +241,29 @@ WORKFLOW = DemoWorkflow()
     return plugin_root
 
 
+def test_runtime_roles_include_manifest_declared_publish_without_global_publication(
+    tmp_path,
+):
+    plugin_dev = load_plugin_dev_module()
+    plugin_root = create_class_based_json_plugin(tmp_path)
+    manifest = yaml.safe_load((plugin_root / "plugin.yaml").read_text(encoding="utf-8"))
+    manifest["pipeline"]["stages"].insert(
+        -1,
+        {
+            "id": "publish",
+            "phase": "publish",
+            "handler": "publish_outputs",
+            "queue": "publish",
+            "next": "results",
+        },
+    )
+    stages = manifest["pipeline"]["stages"]
+
+    roles = plugin_dev._runtime_roles_for_pipeline(stages, include_publish=False)
+
+    assert "publish" in roles
+
+
 def create_cleanup_tracking_json_plugin(
     root: Path, plugin_id: str = "demo-json-unload"
 ) -> Path:
@@ -2074,6 +2097,296 @@ def test_inference_worker_supports_class_based_run_batch_hook(
     ]
 
 
+def test_inference_worker_routes_batch_item_completion_from_execute_stage():
+    module = load_inference_worker_module()
+    item_payload = {
+        "run_id": "batch-run-1:item:0",
+        "workflow_id": "demo-batch",
+        "operation": "run",
+        "parameters": {"value": 2},
+        "output_publication": {"enabled": True},
+        "stage_context": {
+            "current_stage_id": "batch",
+            "current_phase": "batch",
+            "pipeline": [
+                {"id": "batch", "phase": "batch", "queue": "batch", "next": "schedule"},
+                {
+                    "id": "schedule",
+                    "phase": "schedule",
+                    "queue": "schedule",
+                    "next": "execute",
+                },
+                {
+                    "id": "execute",
+                    "phase": "execute",
+                    "queue": "execute.demo",
+                    "next": "publish",
+                },
+                {
+                    "id": "publish",
+                    "phase": "publish",
+                    "queue": "publish",
+                    "next": "results",
+                },
+                {"id": "results", "phase": "results", "queue": "results", "next": None},
+            ],
+        },
+    }
+    batch_payload = {
+        "batch_id": "batch-run-1",
+        "batch_info": {"batch_id": "batch-run-1", "batch_size": 1},
+        "output_publication": {"enabled": True},
+        "stage_context": {
+            **item_payload["stage_context"],
+            "current_stage_id": "execute",
+            "current_phase": "execute",
+        },
+    }
+    batch_result = {
+        "run_id": "batch-run-1",
+        "status": "succeeded",
+        "batch_results": [
+            {
+                "run_id": "batch-run-1:item:0",
+                "payload": item_payload,
+                "result": {
+                    "run_id": "batch-run-1:item:0",
+                    "status": "succeeded",
+                    "artifacts": [
+                        {
+                            "name": "forecast_dataset",
+                            "media_type": "application/x-zarr",
+                            "storage_path": "/outputs/batch-run-1/item-0/forecast.zarr",
+                            "primary": True,
+                        }
+                    ],
+                    "output_path": "/outputs/batch-run-1/item-0/forecast.zarr",
+                    "batch_info": {"batch_id": "batch-run-1", "batch_size": 1},
+                },
+            }
+        ],
+    }
+
+    outputs = module._build_batch_primary_outputs(
+        "execute.demo", batch_payload, batch_result
+    )
+
+    assert len(outputs) == 1
+    stream_name, payload, stage, run_id = outputs[0]
+    assert stream_name == "publish"
+    assert stage == "publish"
+    assert run_id == "batch-run-1:item:0"
+    assert payload["stage_context"]["current_stage_id"] == "publish"
+    assert payload["stage_context"]["current_phase"] == "publish"
+    assert payload["result"]["run_id"] == "batch-run-1:item:0"
+    assert not module._should_persist_run_status_after_execute(
+        module._batch_item_completion_payload(batch_payload, item_payload),
+        batch_result["batch_results"][0]["result"],
+    )
+
+
+def test_inference_worker_routes_batch_item_through_declared_intermediate_stage():
+    module = load_inference_worker_module()
+    item_payload = {
+        "run_id": "batch-run-1:item:0",
+        "workflow_id": "demo-batch",
+        "operation": "run",
+        "parameters": {"value": 2},
+        "output_publication": {"enabled": True},
+        "stage_context": {
+            "current_stage_id": "batch",
+            "current_phase": "batch",
+            "pipeline": [
+                {"id": "batch", "phase": "batch", "queue": "batch", "next": "schedule"},
+                {
+                    "id": "schedule",
+                    "phase": "schedule",
+                    "queue": "schedule",
+                    "next": "execute",
+                },
+                {
+                    "id": "execute",
+                    "phase": "execute",
+                    "queue": "execute.demo",
+                    "next": "postprocess",
+                },
+                {
+                    "id": "postprocess",
+                    "phase": "postprocess",
+                    "queue": "postprocess",
+                    "next": "publish",
+                },
+                {
+                    "id": "publish",
+                    "phase": "publish",
+                    "queue": "publish",
+                    "next": "results",
+                },
+                {"id": "results", "phase": "results", "queue": "results", "next": None},
+            ],
+        },
+    }
+    batch_payload = {
+        "batch_id": "batch-run-1",
+        "batch_info": {"batch_id": "batch-run-1", "batch_size": 1},
+        "output_publication": {"enabled": True},
+        "stage_context": {
+            **item_payload["stage_context"],
+            "current_stage_id": "execute",
+            "current_phase": "execute",
+        },
+    }
+    batch_result = {
+        "run_id": "batch-run-1",
+        "status": "succeeded",
+        "batch_results": [
+            {
+                "run_id": "batch-run-1:item:0",
+                "payload": item_payload,
+                "result": {
+                    "run_id": "batch-run-1:item:0",
+                    "status": "succeeded",
+                    "artifacts": [
+                        {
+                            "name": "forecast_dataset",
+                            "media_type": "application/x-zarr",
+                            "storage_path": "/outputs/batch-run-1/item-0/forecast.zarr",
+                            "primary": True,
+                        }
+                    ],
+                    "output_path": "/outputs/batch-run-1/item-0/forecast.zarr",
+                    "batch_info": {"batch_id": "batch-run-1", "batch_size": 1},
+                },
+            }
+        ],
+    }
+
+    outputs = module._build_batch_primary_outputs(
+        "execute.demo", batch_payload, batch_result
+    )
+
+    assert len(outputs) == 1
+    stream_name, payload, stage, run_id = outputs[0]
+    assert stream_name == "postprocess"
+    assert stage == "postprocess"
+    assert run_id == "batch-run-1:item:0"
+    assert payload["stage_context"]["current_stage_id"] == "postprocess"
+    assert payload["stage_context"]["current_phase"] == "postprocess"
+    publish_stages = [
+        pipeline_stage
+        for pipeline_stage in payload["stage_context"]["pipeline"]
+        if pipeline_stage.get("phase") == "publish"
+    ]
+    assert len(publish_stages) == 1, "no duplicate publish stage may be inserted"
+    assert publish_stages[0]["next"] == "results"
+    postprocess_stage = next(
+        pipeline_stage
+        for pipeline_stage in payload["stage_context"]["pipeline"]
+        if pipeline_stage["id"] == "postprocess"
+    )
+    assert postprocess_stage["next"] == "publish"
+
+
+def test_inference_worker_synthesizes_publish_stage_for_batch_publication(monkeypatch):
+    module = load_inference_worker_module()
+    monkeypatch.setenv(
+        "PHYSICSNEMO_SERVE_OUTPUT_PUBLICATION_CONFIG_JSON",
+        json.dumps(
+            {
+                "enabled": True,
+                "storage": {
+                    "type": "s3",
+                    "bucket": "bucket",
+                    "prefix": "runs",
+                    "region": "us-east-1",
+                },
+            }
+        ),
+    )
+    item_payload = {
+        "run_id": "batch-run-1:item:0",
+        "workflow_id": "demo-batch",
+        "operation": "run",
+        "parameters": {"value": 2},
+        "stage_context": {
+            "current_stage_id": "batch",
+            "current_phase": "batch",
+            "pipeline": [
+                {"id": "batch", "phase": "batch", "queue": "batch", "next": "schedule"},
+                {
+                    "id": "schedule",
+                    "phase": "schedule",
+                    "queue": "schedule",
+                    "next": "execute",
+                },
+                {
+                    "id": "execute",
+                    "phase": "execute",
+                    "queue": "execute.demo",
+                    "next": "results",
+                },
+                {"id": "results", "phase": "results", "queue": "results", "next": None},
+            ],
+        },
+    }
+    batch_payload = {
+        "batch_id": "batch-run-1",
+        "batch_info": {"batch_id": "batch-run-1", "batch_size": 1},
+        "stage_context": {
+            **item_payload["stage_context"],
+            "current_stage_id": "execute",
+            "current_phase": "execute",
+        },
+    }
+    batch_result = {
+        "run_id": "batch-run-1",
+        "status": "succeeded",
+        "batch_results": [
+            {
+                "run_id": "batch-run-1:item:0",
+                "payload": item_payload,
+                "result": {
+                    "run_id": "batch-run-1:item:0",
+                    "status": "succeeded",
+                    "artifacts": [
+                        {
+                            "name": "forecast_dataset",
+                            "media_type": "application/x-zarr",
+                            "storage_path": "/outputs/batch-run-1/item-0/forecast.zarr",
+                            "primary": True,
+                        }
+                    ],
+                    "output_path": "/outputs/batch-run-1/item-0/forecast.zarr",
+                },
+            }
+        ],
+    }
+
+    outputs = module._build_batch_primary_outputs(
+        "execute.demo", batch_payload, batch_result
+    )
+
+    assert len(outputs) == 1
+    stream_name, payload, stage, _run_id = outputs[0]
+    assert stream_name == "publish"
+    assert stage == "publish"
+    publish_stage = next(
+        stage
+        for stage in payload["stage_context"]["pipeline"]
+        if stage["id"] == "publish"
+    )
+    execute_stage = next(
+        stage
+        for stage in payload["stage_context"]["pipeline"]
+        if stage["id"] == "execute"
+    )
+    assert execute_stage["next"] == "publish"
+    assert publish_stage["next"] == "results"
+    assert payload["output_publication"]["target"]["storage"]["prefix"] == (
+        "runs/demo-batch/batch-run-1:item:0"
+    )
+
+
 def test_inference_worker_uses_run_batch_for_single_item_execution(
     tmp_path: Path, monkeypatch
 ):
@@ -2251,6 +2564,128 @@ def test_inference_worker_handoffs_successful_execute_to_generic_next_stage_with
     assert forwarded["stage_context"]["current_phase"] == "fanout"
 
 
+def test_inference_worker_handoffs_success_alias_to_publish_stage():
+    module = load_inference_worker_module()
+    payload = {
+        "run_id": "run-publish",
+        "workflow_id": "demo-publish",
+        "operation": "run",
+        "parameters": {"value": 3},
+        "stage_context": {
+            "current_stage_id": "execute",
+            "current_phase": "execute",
+            "pipeline": [
+                {
+                    "id": "execute",
+                    "phase": "execute",
+                    "queue": "execute.python.test",
+                    "next": "publish",
+                },
+                {
+                    "id": "publish",
+                    "phase": "publish",
+                    "queue": "publish",
+                    "next": "results",
+                },
+                {
+                    "id": "results",
+                    "phase": "results",
+                    "queue": "results",
+                    "next": None,
+                },
+            ],
+        },
+    }
+
+    stream_name, forwarded, stage = module._build_primary_completion(
+        "execute.python.test",
+        payload,
+        {
+            "run_id": "run-publish",
+            "status": "success",
+            "output_path": "/tmp/run-publish/result.json",
+        },
+    )
+
+    assert stream_name == "publish"
+    assert stage == "publish"
+    assert forwarded["result"] == {
+        "run_id": "run-publish",
+        "status": "success",
+        "output_path": "/tmp/run-publish/result.json",
+    }
+    assert forwarded["stage_context"]["current_stage_id"] == "publish"
+    assert forwarded["stage_context"]["current_phase"] == "publish"
+
+
+def test_inference_worker_handoffs_failed_execute_to_publish_stage():
+    module = load_inference_worker_module()
+    payload = {
+        "run_id": "run-publish-failed",
+        "workflow_id": "demo-publish",
+        "operation": "run",
+        "parameters": {"value": 3},
+        "output_publication": {
+            "target": {
+                "artifact": "primary",
+                "provider": "s3",
+                "storage": {
+                    "type": "s3",
+                    "bucket": "bucket",
+                    "prefix": "outputs/demo-publish/run-publish-failed",
+                },
+            }
+        },
+        "stage_context": {
+            "current_stage_id": "execute",
+            "current_phase": "execute",
+            "pipeline": [
+                {
+                    "id": "execute",
+                    "phase": "execute",
+                    "queue": "execute.python.test",
+                    "next": "publish",
+                },
+                {
+                    "id": "publish",
+                    "phase": "publish",
+                    "queue": "publish",
+                    "next": "results",
+                },
+                {
+                    "id": "results",
+                    "phase": "results",
+                    "queue": "results",
+                    "next": None,
+                },
+            ],
+        },
+    }
+
+    stream_name, forwarded, stage = module._build_primary_completion(
+        "execute.python.test",
+        payload,
+        {
+            "run_id": "run-publish-failed",
+            "status": "failed",
+            "output_path": None,
+            "error": "model failed before producing an artifact",
+        },
+    )
+
+    assert stream_name == "publish"
+    assert stage == "publish"
+    assert forwarded["result"] == {
+        "run_id": "run-publish-failed",
+        "status": "failed",
+        "output_path": None,
+        "error": "model failed before producing an artifact",
+    }
+    assert forwarded["output_publication"]["target"]["artifact"] == "primary"
+    assert forwarded["stage_context"]["current_stage_id"] == "publish"
+    assert forwarded["stage_context"]["current_phase"] == "publish"
+
+
 def test_inference_worker_process_job_does_not_persist_successful_intermediate_handoff():
     module = load_inference_worker_module()
     redis_client = DummyRedis()
@@ -2406,6 +2841,81 @@ def test_inference_worker_process_job_does_not_persist_successful_postprocess_ha
     assert redis_client.setex_calls == []
 
 
+def test_inference_worker_process_job_does_not_persist_successful_publish_handoff():
+    module = load_inference_worker_module()
+    redis_client = DummyRedis()
+    redis_client.hset_calls = []
+    redis_client.setex_calls = []
+
+    def record_hset(*args, **kwargs):
+        redis_client.hset_calls.append((args, kwargs))
+        return None
+
+    def record_setex(*args, **kwargs):
+        redis_client.setex_calls.append((args, kwargs))
+        return None
+
+    redis_client.hset = record_hset
+    redis_client.setex = record_setex
+
+    class FakeExecutor:
+        def __init__(self):
+            self.redis_client = redis_client
+
+        def execute(self, workflow_name, run_id, parameters, payload=None):
+            assert workflow_name == "demo-publish"
+            assert run_id == "run-publish"
+            assert parameters == {"value": 3}
+            assert payload is not None
+            return {
+                "run_id": run_id,
+                "status": "succeeded",
+                "output_path": "/tmp/output.json",
+            }
+
+    job = {
+        "run_id": "run-publish",
+        "payload": json.dumps(
+            {
+                "run_id": "run-publish",
+                "workflow_id": "demo-publish",
+                "operation": "run",
+                "parameters": {"value": 3},
+                "stage_context": {
+                    "current_stage_id": "execute",
+                    "current_phase": "execute",
+                    "pipeline": [
+                        {
+                            "id": "execute",
+                            "phase": "execute",
+                            "queue": "execute.python.test",
+                            "next": "publish",
+                        },
+                        {
+                            "id": "publish",
+                            "phase": "publish",
+                            "queue": "publish",
+                            "next": "results",
+                        },
+                        {
+                            "id": "results",
+                            "phase": "results",
+                            "queue": "results",
+                            "next": None,
+                        },
+                    ],
+                },
+            }
+        ),
+    }
+
+    result = module.process_job(FakeExecutor(), job)
+
+    assert result["status"] == "succeeded"
+    assert redis_client.hset_calls == []
+    assert redis_client.setex_calls == []
+
+
 def test_inference_worker_process_job_persists_successful_execute_collect_handoff():
     module = load_inference_worker_module()
     redis_client = DummyRedis()
@@ -2536,6 +3046,112 @@ def test_inference_worker_failed_execute_without_collect_next_stage_goes_to_resu
     assert forwarded["payload"] == {}
 
 
+def test_inference_worker_failed_execute_to_postprocess_marks_publication_skipped():
+    module = load_inference_worker_module()
+    redis_client = DummyRedis()
+    redis_client.hset_calls = []
+    redis_client.hdel_calls = []
+    redis_client.setex_calls = []
+
+    def record_hset(*args, **kwargs):
+        redis_client.hset_calls.append((args, kwargs))
+        return None
+
+    def record_hdel(*args, **kwargs):
+        redis_client.hdel_calls.append((args, kwargs))
+        return None
+
+    def record_setex(*args, **kwargs):
+        redis_client.setex_calls.append((args, kwargs))
+        return None
+
+    redis_client.hset = record_hset
+    redis_client.hdel = record_hdel
+    redis_client.setex = record_setex
+
+    class FakeExecutor:
+        def __init__(self):
+            self.redis_client = redis_client
+
+        def execute(self, workflow_name, run_id, parameters, payload=None):
+            assert workflow_name == "demo-postprocess-publish"
+            assert run_id == "run-postprocess-publish-failed"
+            assert parameters == {"value": 3}
+            assert payload is not None
+            return {
+                "run_id": run_id,
+                "status": "failed",
+                "error": "execute failed",
+            }
+
+    job = {
+        "run_id": "run-postprocess-publish-failed",
+        "payload": json.dumps(
+            {
+                "run_id": "run-postprocess-publish-failed",
+                "workflow_id": "demo-postprocess-publish",
+                "operation": "run",
+                "parameters": {"value": 3},
+                "output_publication": {
+                    "target": {
+                        "artifact": "primary",
+                        "provider": "s3",
+                        "storage": {
+                            "type": "s3",
+                            "bucket": "bucket",
+                            "prefix": "outputs/demo/run-postprocess-publish-failed",
+                        },
+                    }
+                },
+                "stage_context": {
+                    "current_stage_id": "execute",
+                    "current_phase": "execute",
+                    "pipeline": [
+                        {
+                            "id": "execute",
+                            "phase": "execute",
+                            "queue": "execute.python.test",
+                            "next": "postprocess",
+                        },
+                        {
+                            "id": "postprocess",
+                            "phase": "postprocess",
+                            "queue": "postprocess",
+                            "next": "publish",
+                        },
+                        {
+                            "id": "publish",
+                            "phase": "publish",
+                            "queue": "publish",
+                            "next": "results",
+                        },
+                        {
+                            "id": "results",
+                            "phase": "results",
+                            "queue": "results",
+                            "next": None,
+                        },
+                    ],
+                },
+            }
+        ),
+    }
+
+    result = module.process_job(FakeExecutor(), job)
+
+    assert result["status"] == "failed"
+    assert len(redis_client.hset_calls) == 1
+    (run_key,) = redis_client.hset_calls[0][0]
+    mapping = redis_client.hset_calls[0][1]["mapping"]
+    assert run_key == "run:run-postprocess-publish-failed"
+    assert mapping["output_publication_status"] == "skipped"
+    assert mapping["published_artifact_count"] == "0"
+    assert mapping["publish_completed_at"] == mapping["updated_at"]
+    assert redis_client.hdel_calls == [
+        (("run:run-postprocess-publish-failed", "publish_error"), {})
+    ]
+
+
 def test_inference_worker_builds_structured_results_envelope_for_batch_item_completion():
     module = load_inference_worker_module()
     item_payload = {
@@ -2570,6 +3186,7 @@ def test_inference_worker_builds_structured_results_envelope_for_batch_item_comp
 
     outputs = module._build_batch_primary_outputs(
         "execute.python.test",
+        item_payload,
         {
             "batch_results": [
                 {
@@ -2606,7 +3223,8 @@ def test_inference_worker_builds_structured_results_envelope_for_batch_item_comp
     assert forwarded["request"]["parameters"] == {"value": 5}
     assert forwarded["execution"]["run_id"] == "batch-item-1"
     assert forwarded["execution"]["status"] == "succeeded"
-    assert forwarded["execution"]["batch_info"]["batch_id"] == "batch-1"
+    assert "batch_info" not in forwarded["execution"]
+    assert "batch_info" not in forwarded["payload"]
     assert forwarded["execution"]["output_path"] == "/tmp/batch-item-1/result.json"
     assert forwarded["payload"] == {"value": 5}
 
@@ -4091,6 +4709,7 @@ def test_plugin_dev_init_creates_postprocess_scaffold_with_postprocess_hook(
         in workflow_content
     )
     assert "PostprocessOutcome" in workflow_content
+    assert "output_model = ScaffoldOutput" in workflow_content
     assert "result.payload" in workflow_content
 
     module = load_plugin_dev_module()
@@ -5516,6 +6135,228 @@ def test_plugin_dev_run_local_dry_run_sets_enabled_plugin_id(tmp_path: Path):
         inference_server["env"]["PHYSICSNEMO_SERVE_ENABLED_PLUGIN_ID"]
         == "run-local-demo"
     )
+
+
+def test_plugin_dev_run_local_dry_run_includes_publish_when_output_publication_configured(
+    tmp_path: Path, monkeypatch
+):
+    module = load_plugin_dev_module()
+    plugin_root = create_class_based_json_plugin(
+        tmp_path, plugin_id="run-local-publish-demo"
+    )
+    workspace = tmp_path / "run-local-publish-workspace"
+    publication_config = tmp_path / "output_publication.json"
+    publication_config.write_text(
+        json.dumps(
+            {
+                "output_publication": {
+                    "enabled": True,
+                    "storage": {
+                        "type": "s3",
+                        "bucket": "bucket",
+                        "prefix": "outputs",
+                    },
+                },
+                "roles": {
+                    "publish": {
+                        "config": {
+                            "max_concurrent_files": 12,
+                            "multipart_max_concurrency": 3,
+                        }
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("PHYSICSNEMO_SERVE_RUNTIME_ENVS_CONFIG", str(publication_config))
+
+    plan = module.build_run_local_plan(
+        plugin_root,
+        workspace=workspace,
+        port=0,
+        redis_port=0,
+    )
+
+    runtime_config = json.loads(
+        Path(plan["runtime_config_path"]).read_text(encoding="utf-8")
+    )
+    assert "publish" in runtime_config["streams"]
+    assert runtime_config["roles"]["publish"]["inputs"][0]["stream"] == "publish"
+    assert runtime_config["roles"]["publish"]["config"] == {
+        "max_concurrent_files": 12,
+        "multipart_max_concurrency": 3,
+    }
+    assert runtime_config["output_publication"]["enabled"] is True
+    assert runtime_config["output_publication"]["storage"]["bucket"] == "bucket"
+    process_names = [process["name"] for process in plan["processes"]]
+    assert "publish" in process_names
+
+    inference_server = next(
+        process
+        for process in plan["processes"]
+        if process["name"] == "inference_server"
+    )
+    assert inference_server["env"]["PHYSICSNEMO_SERVE_RUNTIME_ENVS_CONFIG"] == str(
+        plan["runtime_config_path"]
+    )
+
+
+def test_plugin_dev_run_local_includes_publish_for_output_publication_json_override(
+    tmp_path: Path, monkeypatch
+):
+    module = load_plugin_dev_module()
+    plugin_root = create_class_based_json_plugin(
+        tmp_path, plugin_id="run-local-publish-json-demo"
+    )
+    workspace = tmp_path / "run-local-publish-json-workspace"
+    monkeypatch.delenv("PHYSICSNEMO_SERVE_RUNTIME_ENVS_CONFIG", raising=False)
+    monkeypatch.setenv(
+        "PHYSICSNEMO_SERVE_OUTPUT_PUBLICATION_CONFIG_JSON",
+        json.dumps(
+            {
+                "enabled": True,
+                "storage": {
+                    "type": "s3",
+                    "bucket": "bucket",
+                    "prefix": "outputs",
+                },
+            }
+        ),
+    )
+
+    plan = module.build_run_local_plan(
+        plugin_root,
+        workspace=workspace,
+        port=0,
+        redis_port=0,
+    )
+
+    runtime_config = json.loads(
+        Path(plan["runtime_config_path"]).read_text(encoding="utf-8")
+    )
+    assert "publish" in runtime_config["streams"]
+    assert runtime_config["roles"]["publish"]["inputs"][0]["stream"] == "publish"
+    assert runtime_config["output_publication"]["enabled"] is True
+    assert runtime_config["output_publication"]["storage"]["bucket"] == "bucket"
+    process_names = [process["name"] for process in plan["processes"]]
+    assert "publish" in process_names
+
+
+def test_plugin_dev_run_local_uses_manifest_publish_queue_for_output_publication(
+    tmp_path: Path, monkeypatch
+):
+    module = load_plugin_dev_module()
+    plugin_root = create_class_based_json_plugin(
+        tmp_path, plugin_id="run-local-custom-publish-demo"
+    )
+    workspace = tmp_path / "run-local-custom-publish-workspace"
+    publication_config = tmp_path / "output_publication.json"
+    publication_config.write_text(
+        json.dumps(
+            {
+                "output_publication": {
+                    "enabled": True,
+                    "storage": {
+                        "type": "s3",
+                        "bucket": "bucket",
+                        "prefix": "outputs",
+                    },
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("PHYSICSNEMO_SERVE_RUNTIME_ENVS_CONFIG", str(publication_config))
+
+    def add_custom_publish_stage(manifest: dict) -> None:
+        stages = manifest["pipeline"]["stages"]
+        stages[1]["next"] = "publish"
+        stages.insert(
+            2,
+            {
+                "id": "publish",
+                "phase": "publish",
+                "handler": "plugin_phase",
+                "queue": "publish.custom",
+                "next": "results",
+            },
+        )
+
+    update_manifest(plugin_root, add_custom_publish_stage)
+
+    plan = module.build_run_local_plan(
+        plugin_root,
+        workspace=workspace,
+        port=0,
+        redis_port=0,
+    )
+
+    runtime_config = json.loads(
+        Path(plan["runtime_config_path"]).read_text(encoding="utf-8")
+    )
+    assert "publish.custom" in runtime_config["streams"]
+    assert "publish" not in runtime_config["streams"]
+    assert runtime_config["roles"]["publish"]["inputs"][0]["stream"] == "publish.custom"
+    process_names = [process["name"] for process in plan["processes"]]
+    assert "publish" in process_names
+
+
+def test_plugin_dev_run_local_synthesizes_results_after_manifest_publish(
+    tmp_path: Path, monkeypatch
+):
+    module = load_plugin_dev_module()
+    plugin_root = create_class_based_json_plugin(
+        tmp_path, plugin_id="run-local-publish-no-results-demo"
+    )
+    workspace = tmp_path / "run-local-publish-no-results-workspace"
+    monkeypatch.delenv("PHYSICSNEMO_SERVE_RUNTIME_ENVS_CONFIG", raising=False)
+    monkeypatch.setenv(
+        "PHYSICSNEMO_SERVE_OUTPUT_PUBLICATION_CONFIG_JSON",
+        json.dumps(
+            {
+                "enabled": True,
+                "storage": {
+                    "type": "s3",
+                    "bucket": "bucket",
+                    "prefix": "outputs",
+                },
+            }
+        ),
+    )
+
+    def end_pipeline_with_publish(manifest: dict) -> None:
+        stages = manifest["pipeline"]["stages"]
+        stages.pop()
+        stages[-1]["next"] = "publish"
+        stages.append(
+            {
+                "id": "publish",
+                "phase": "publish",
+                "handler": "publish_outputs",
+                "queue": "publish",
+                "next": None,
+            }
+        )
+
+    update_manifest(plugin_root, end_pipeline_with_publish)
+
+    plan = module.build_run_local_plan(
+        plugin_root,
+        workspace=workspace,
+        port=0,
+        redis_port=0,
+    )
+
+    runtime_config = json.loads(
+        Path(plan["runtime_config_path"]).read_text(encoding="utf-8")
+    )
+    assert runtime_config["streams"][-2:] == ["publish", "results"]
+    assert list(runtime_config["roles"])[-2:] == ["publish", "results"]
+    process_names = [process["name"] for process in plan["processes"]]
+    assert process_names.count("publish") == 1
+    assert process_names.count("results") == 1
+    assert process_names.index("publish") < process_names.index("results")
 
 
 def test_plugin_dev_run_local_dry_run_includes_scheduler_when_pipeline_declares_schedule(

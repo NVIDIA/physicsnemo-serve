@@ -68,6 +68,8 @@ INIT_RUNTIME_PROFILES = (
     "custom",
 )
 INIT_PHASE_NAMES = ("prepare", "postprocess", "readiness")
+ENV_RUNTIME_CONFIG = "PHYSICSNEMO_SERVE_RUNTIME_ENVS_CONFIG"
+ENV_OUTPUT_PUBLICATION_CONFIG_JSON = "PHYSICSNEMO_SERVE_OUTPUT_PUBLICATION_CONFIG_JSON"
 
 
 def main() -> int:
@@ -858,6 +860,90 @@ def build_example_payload(
     return payload
 
 
+def _load_output_publication_override_from_env() -> dict[str, Any] | None:
+    raw = str(os.environ.get(ENV_OUTPUT_PUBLICATION_CONFIG_JSON, "")).strip()
+    if not raw:
+        return None
+    try:
+        config = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            f"failed to parse {ENV_OUTPUT_PUBLICATION_CONFIG_JSON} as output_publication JSON: {exc}"
+        ) from exc
+    if not isinstance(config, dict):
+        raise ValueError(
+            f"{ENV_OUTPUT_PUBLICATION_CONFIG_JSON} must contain a JSON object"
+        )
+    return config
+
+
+def _load_runtime_output_publication_from_env() -> dict[str, Any] | None:
+    output_publication_override = _load_output_publication_override_from_env()
+    config_path = str(os.environ.get(ENV_RUNTIME_CONFIG, "")).strip()
+    if not config_path:
+        return output_publication_override
+    path = Path(config_path)
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except OSError as exc:
+        raise ValueError(
+            f"failed to read {ENV_RUNTIME_CONFIG} file '{path}': {exc}"
+        ) from exc
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            f"failed to parse {ENV_RUNTIME_CONFIG} file '{path}': {exc}"
+        ) from exc
+    if not isinstance(data, dict):
+        raise ValueError(
+            f"{ENV_RUNTIME_CONFIG} file '{path}' must contain a JSON object"
+        )
+    output_publication = data.get("output_publication")
+    if output_publication_override is not None:
+        return output_publication_override
+    if output_publication is None:
+        return None
+    if not isinstance(output_publication, dict):
+        raise ValueError(
+            f"{ENV_RUNTIME_CONFIG} file '{path}' field output_publication must be an object"
+        )
+    return output_publication
+
+
+def _load_runtime_publish_role_config_from_env() -> dict[str, Any] | None:
+    config_path = str(os.environ.get(ENV_RUNTIME_CONFIG, "")).strip()
+    if not config_path:
+        return None
+    path = Path(config_path)
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except OSError as exc:
+        raise ValueError(
+            f"failed to read {ENV_RUNTIME_CONFIG} file '{path}': {exc}"
+        ) from exc
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            f"failed to parse {ENV_RUNTIME_CONFIG} file '{path}': {exc}"
+        ) from exc
+    if not isinstance(data, dict):
+        raise ValueError(
+            f"{ENV_RUNTIME_CONFIG} file '{path}' must contain a JSON object"
+        )
+    roles = data.get("roles")
+    if not isinstance(roles, dict):
+        return None
+    publish = roles.get("publish")
+    if not isinstance(publish, dict):
+        return None
+    config = publish.get("config")
+    if config is None:
+        return None
+    if not isinstance(config, dict):
+        raise ValueError(
+            f"{ENV_RUNTIME_CONFIG} file '{path}' field roles.publish.config must be an object"
+        )
+    return copy.deepcopy(config)
+
+
 def build_run_local_plan(
     plugin_root: Path,
     *,
@@ -886,6 +972,9 @@ def build_run_local_plan(
     if runtime_plugin_root != plugin_root:
         manifest, workflow_id, _module = _load_plugin_contract(runtime_plugin_root)
     stages = _pipeline_stages(manifest)
+    output_publication = _load_runtime_output_publication_from_env()
+    include_publish = bool(output_publication and output_publication.get("enabled"))
+    publish_role_config = _load_runtime_publish_role_config_from_env()
 
     selected_port = _pick_free_port(18080) if port in (None, 0) else port
     selected_redis_port = (
@@ -899,6 +988,9 @@ def build_run_local_plan(
     runtime_config = _build_runtime_config(
         stages,
         python_runtime_envs=python_runtime_envs,
+        include_publish=include_publish,
+        output_publication=output_publication,
+        publish_role_config=publish_role_config,
     )
     runtime_config_path = workspace_root / "runtime_config.json"
     runtime_config_path.write_text(
@@ -918,7 +1010,7 @@ def build_run_local_plan(
     shared_env = {
         "PYTHONUNBUFFERED": "1",
         "PHYSICSNEMO_SERVE_PYTHON_EXECUTABLE": sys.executable,
-        "PHYSICSNEMO_SERVE_RUNTIME_ENVS_CONFIG": str(runtime_config_path),
+        ENV_RUNTIME_CONFIG: str(runtime_config_path),
         "PORT": str(selected_port),
         "REDIS_URL": redis_url,
         "POD_NAMESPACE": "local",
@@ -957,7 +1049,9 @@ def build_run_local_plan(
         },
     ]
 
-    for role_name in _runtime_roles_for_pipeline(stages):
+    for role_name in _runtime_roles_for_pipeline(
+        stages, include_publish=include_publish
+    ):
         processes.append(
             {
                 "name": role_name,
@@ -1608,6 +1702,9 @@ def _build_runtime_config(
     stages: list[dict[str, Any]],
     *,
     python_runtime_envs: dict[str, Any] | None = None,
+    include_publish: bool = False,
+    output_publication: dict[str, Any] | None = None,
+    publish_role_config: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     streams: list[str] = []
     roles: dict[str, Any] = {}
@@ -1684,10 +1781,40 @@ def _build_runtime_config(
                 "outputs": [],
             }
 
-    if "results" not in roles:
-        raise ValueError("Plugin pipeline must include a results stage for local runs")
+    manifest_declares_publish = any(
+        str(stage.get("phase") or "").strip() == "publish" for stage in stages
+    )
+    if include_publish or manifest_declares_publish:
+        publish_queue = "publish"
+        for stage in stages:
+            if str(stage.get("phase") or "").strip() == "publish":
+                publish_queue = str(stage.get("queue") or "").strip()
+                break
+        try:
+            results_index = streams.index("results")
+        except ValueError:
+            results_index = len(streams)
+        if publish_queue not in streams:
+            streams.insert(results_index, publish_queue)
+        roles["publish"] = {
+            "inputs": [_input_stream_spec(publish_queue)],
+            "outputs": [],
+        }
+        if publish_role_config is not None:
+            roles["publish"]["config"] = copy.deepcopy(publish_role_config)
 
-    return {
+    if "results" not in roles:
+        if not (include_publish or manifest_declares_publish):
+            raise ValueError(
+                "Plugin pipeline must include a results stage for local runs"
+            )
+        add_stream("results")
+        roles["results"] = {
+            "inputs": [_input_stream_spec("results", max_dequeue_items=8)],
+            "outputs": [],
+        }
+
+    config = {
         "stream_prefix": "",
         "max_retries": 5,
         "shared_dlq_stream": "dlq",
@@ -1695,10 +1822,18 @@ def _build_runtime_config(
         "streams": streams,
         "roles": roles,
     }
+    if output_publication is not None:
+        config["output_publication"] = output_publication
+    return config
 
 
-def _runtime_roles_for_pipeline(stages: list[dict[str, Any]]) -> list[str]:
+def _runtime_roles_for_pipeline(
+    stages: list[dict[str, Any]], *, include_publish: bool = False
+) -> list[str]:
     roles: list[str] = []
+    manifest_declares_publish = any(
+        str(stage.get("phase") or "").strip() == "publish" for stage in stages
+    )
     for candidate in (
         "prepare",
         "fanout",
@@ -1707,8 +1842,13 @@ def _runtime_roles_for_pipeline(stages: list[dict[str, Any]]) -> list[str]:
         "scheduler",
         "collect",
         "postprocess",
+        "publish",
         "results",
     ):
+        if candidate == "publish":
+            if include_publish or manifest_declares_publish:
+                roles.append(candidate)
+            continue
         if candidate == "scheduler":
             if any(
                 str(stage.get("phase")) == "schedule"
@@ -1718,10 +1858,14 @@ def _runtime_roles_for_pipeline(stages: list[dict[str, Any]]) -> list[str]:
                 roles.append(candidate)
             continue
         if candidate == "results":
-            if any(
-                str(stage.get("phase")) == "results"
-                and str(stage.get("handler")) == "persist_results"
-                for stage in stages
+            if (
+                include_publish
+                or manifest_declares_publish
+                or any(
+                    str(stage.get("phase")) == "results"
+                    and str(stage.get("handler")) == "persist_results"
+                    for stage in stages
+                )
             ):
                 roles.append(candidate)
             continue
@@ -2974,6 +3118,8 @@ WORKFLOW = ScaffoldWorkflow
 
 def _json_explicit_workflow_template(pipeline_profile: str) -> str:
     prepare_extras = ""
+    output_model = ""
+    output_model_assignment = ""
     extra_result_fields = ""
     extra_postprocess = ""
     extra_batch_hook = ""
@@ -2996,6 +3142,15 @@ def _json_explicit_workflow_template(pipeline_profile: str) -> str:
     if pipeline_profile in {"default", "prefetch"}:
         prepare_extras = "\n            prefetch_plan=[],"
     elif pipeline_profile == "postprocess":
+        output_model = """
+
+@dataclass
+class ScaffoldOutput:
+    value: int
+    doubled: int
+    postprocessed: bool = False
+"""
+        output_model_assignment = "\n    output_model = ScaffoldOutput"
         extra_postprocess = """
 
     # Optional finalization hook.
@@ -3080,10 +3235,10 @@ class ScaffoldInput:
     value: int
     doubled: int
     item_index: int | None = None
-
+%s
 
 class ScaffoldWorkflow(PluginWorkflow):
-    input_model = ScaffoldInput
+    input_model = ScaffoldInput%s
 
     # Prepare hook. Normalize inputs and declare framework-managed work.
     def prepare(self, request, ctx) -> PrepareResult:
@@ -3100,6 +3255,8 @@ class ScaffoldWorkflow(PluginWorkflow):
 WORKFLOW = ScaffoldWorkflow
 """ % (
         sdk_imports,
+        output_model,
+        output_model_assignment,
         prepare_extras,
         main_hook % extra_result_fields if main_hook else "",
         extra_batch_hook,

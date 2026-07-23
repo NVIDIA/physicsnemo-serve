@@ -234,9 +234,9 @@ impl PostprocessRole {
     ) -> Result<()> {
         let (typed, raw_payload) = decode_postprocess_payload(msg.payload())?;
         let next_stage = typed.stage_context.next_stage("postprocess")?;
-        if next_stage.phase != "results" {
+        if !matches!(next_stage.phase.as_str(), "publish" | "results") {
             return Err(anyhow!(
-                "postprocess: next stage must be 'results', got '{}'",
+                "postprocess: next stage must be 'publish' or 'results', got '{}'",
                 next_stage.phase
             ));
         }
@@ -250,6 +250,23 @@ impl PostprocessRole {
             .or_else(|| typed.result.get("status").and_then(JsonValue::as_str))
             .unwrap_or("succeeded")
             .to_string();
+        if next_stage.phase == "publish" {
+            let mut handoff_payload = raw_payload.clone();
+            let handoff_map = handoff_payload
+                .as_object_mut()
+                .ok_or_else(|| anyhow!("postprocess: payload must remain a JSON object"))?;
+            merge_prior_output_fields_into_publish_result(&typed.result, &mut result_payload)?;
+            ensure_result_status(&mut result_payload, status.as_str())?;
+            handoff_map.insert("result".to_string(), result_payload);
+            crate::roles::stage::update_stage_context(handoff_map, &next_stage, "postprocess")?;
+            let encoded = serde_json::to_string(&handoff_payload)
+                .context("postprocess: encode publish payload")?;
+            sink.handoff(msg, &next_stage.queue, &encoded, &next_stage.phase)
+                .await
+                .context("postprocess: failed to hand off to publish")?;
+            return Ok(());
+        }
+
         let completed_at = Utc::now().to_rfc3339();
         let (execution, payload) = build_execution_and_payload(
             msg.run_id(),
@@ -545,6 +562,60 @@ fn copy_execution_field(
     {
         execution.insert(target_key.to_string(), value.clone());
     }
+}
+
+fn copy_result_field_if_missing(
+    source: &JsonMap<String, JsonValue>,
+    result: &mut JsonMap<String, JsonValue>,
+    key: &str,
+) {
+    if !result.contains_key(key)
+        && let Some(value) = source.get(key)
+    {
+        result.insert(key.to_string(), value.clone());
+    }
+}
+
+fn merge_prior_output_fields_into_publish_result(
+    prior_result: &JsonValue,
+    result_payload: &mut JsonValue,
+) -> Result<()> {
+    let result = result_payload
+        .as_object_mut()
+        .ok_or_else(|| anyhow!("postprocess: result payload must be a JSON object"))?;
+    let Some(prior) = prior_result.as_object() else {
+        return Ok(());
+    };
+    for key in [
+        "outputs",
+        "artifacts",
+        "published_outputs",
+        "published_artifacts",
+        "batch_info",
+        "output_path",
+        "output_archive",
+        "error",
+        "execution_time_seconds",
+    ] {
+        copy_result_field_if_missing(prior, result, key);
+    }
+    if !result.contains_key("output_path") {
+        let outputs = result.get("outputs").or_else(|| result.get("artifacts"));
+        if let Some(path) = derive_primary_output_path(outputs) {
+            result.insert("output_path".to_string(), JsonValue::String(path));
+        }
+    }
+    Ok(())
+}
+
+fn ensure_result_status(result_payload: &mut JsonValue, status: &str) -> Result<()> {
+    let result = result_payload
+        .as_object_mut()
+        .ok_or_else(|| anyhow!("postprocess: result payload must be a JSON object"))?;
+    if !result.get("status").is_some_and(JsonValue::is_string) {
+        result.insert("status".to_string(), JsonValue::String(status.to_string()));
+    }
+    Ok(())
 }
 
 fn derive_primary_output_path(outputs: Option<&JsonValue>) -> Option<String> {
@@ -930,7 +1001,10 @@ mod tests {
     use crate::test_env;
     use crate::traits::{BoxFuture, MessageSink, RoleEnv, WorkerRole};
 
-    use super::{ObjectStoreRoots, PostprocessRole, resolve_object_store_destination};
+    use super::{
+        ObjectStoreRoots, PostprocessRole, ensure_result_status,
+        merge_prior_output_fields_into_publish_result, resolve_object_store_destination,
+    };
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
 
@@ -1353,6 +1427,284 @@ ds.to_zarr(path, mode="w")
             forwarded["execution"]["outputs"][0]["name"],
             "pressure_field"
         );
+    }
+
+    #[tokio::test]
+    async fn postprocess_role_handoffs_result_payload_to_publish_when_publish_is_next() {
+        let _guard = test_env::env_lock().lock().await;
+        let tmp = tempfile::tempdir().expect("temp dir should be created");
+        let plugin_root = write_plugin(&tmp);
+        let plugin_parent = plugin_root
+            .parent()
+            .expect("plugin root should have a parent")
+            .to_string_lossy()
+            .to_string();
+        let _plugin_dir = EnvRestore::set("PLUGIN_DIR", Some(plugin_parent.as_str()));
+
+        let role = PostprocessRole::from_env(&postprocess_env(&runner_path()))
+            .expect("postprocess role should build");
+        let sink = RecordingSink::new();
+        let msg = scicomp_rq::Message::new(
+            "1-0",
+            "test:postprocess",
+            "postprocess:grp",
+            "run-plugin",
+            json!({
+                "run_id": "run-plugin",
+                "workflow_id": "demo-plugin",
+                "operation": "both",
+                "parameters": { "batch_size": 128000 },
+                "request": {
+                    "content_type": "application/json",
+                    "raw_fields": { "batch_size": 128000 },
+                    "input_artifacts": []
+                },
+                "result": {
+                    "status": "succeeded",
+                    "output_path": "/tmp/run-plugin.npz"
+                },
+                "output_publication": {
+                    "target": {
+                        "artifact": "primary",
+                        "provider": "s3",
+                        "storage": {
+                            "type": "s3",
+                            "bucket": "bucket",
+                            "prefix": "outputs/demo-plugin/run-plugin"
+                        }
+                    }
+                },
+                "stage_context": {
+                    "current_stage_id": "postprocess",
+                    "current_phase": "postprocess",
+                    "pipeline": [
+                        {
+                            "id": "execute",
+                            "phase": "execute",
+                            "queue": "execute",
+                            "next": "postprocess"
+                        },
+                        {
+                            "id": "postprocess",
+                            "phase": "postprocess",
+                            "queue": "postprocess",
+                            "next": "publish"
+                        },
+                        {
+                            "id": "publish",
+                            "phase": "publish",
+                            "queue": "publish",
+                            "next": "results"
+                        },
+                        {
+                            "id": "results",
+                            "phase": "results",
+                            "queue": "results",
+                            "next": null
+                        }
+                    ]
+                },
+                "runtime": {
+                    "kind": "python",
+                    "entrypoint": "plugin.py",
+                    "executor_class": "python.gpu.physicsnemo"
+                }
+            })
+            .to_string(),
+            "postprocess",
+        );
+
+        role.handle(&msg, "postprocess", &sink).await.unwrap();
+
+        let writes = sink.writes();
+        assert_eq!(writes.len(), 1);
+        assert_eq!(writes[0].dest_stream, "publish");
+        assert_eq!(writes[0].stage, "publish");
+
+        let forwarded: Value =
+            serde_json::from_str(&writes[0].payload).expect("payload should remain valid JSON");
+        assert_eq!(forwarded["stage_context"]["current_stage_id"], "publish");
+        assert_eq!(forwarded["stage_context"]["current_phase"], "publish");
+        assert_eq!(forwarded["result"]["status"], "succeeded");
+        assert_eq!(forwarded["result"]["echo_operation"], "both");
+        assert!(forwarded.get("execution").is_none());
+    }
+
+    #[test]
+    fn postprocess_publish_result_preserves_failed_prior_status_when_hook_omits_status() {
+        let prior = json!({
+            "status": "failed",
+            "error": "execute failed before output"
+        });
+        let mut result = json!({
+            "phase_source": "payload_only"
+        });
+        let status = result
+            .get("status")
+            .and_then(Value::as_str)
+            .or_else(|| prior.get("status").and_then(Value::as_str))
+            .unwrap_or("succeeded")
+            .to_string();
+
+        merge_prior_output_fields_into_publish_result(&prior, &mut result)
+            .expect("prior fields should merge");
+        ensure_result_status(&mut result, status.as_str()).expect("status should be inserted");
+
+        assert_eq!(result["status"], "failed");
+        assert_eq!(result["error"], "execute failed before output");
+        assert_eq!(result["phase_source"], "payload_only");
+    }
+
+    #[test]
+    fn postprocess_publish_result_preserves_failed_prior_status_when_hook_status_is_null() {
+        let prior = json!({
+            "status": "failed",
+            "error": "execute failed before output"
+        });
+        let mut result = json!({
+            "status": null,
+            "phase_source": "payload_only"
+        });
+        let status = result
+            .get("status")
+            .and_then(Value::as_str)
+            .or_else(|| prior.get("status").and_then(Value::as_str))
+            .unwrap_or("succeeded")
+            .to_string();
+
+        merge_prior_output_fields_into_publish_result(&prior, &mut result)
+            .expect("prior fields should merge");
+        ensure_result_status(&mut result, status.as_str()).expect("status should be inserted");
+
+        assert_eq!(result["status"], "failed");
+        assert_eq!(result["error"], "execute failed before output");
+        assert_eq!(result["phase_source"], "payload_only");
+    }
+
+    #[tokio::test]
+    async fn postprocess_role_forwards_failed_status_to_publish_when_hook_status_is_null() {
+        let _guard = test_env::env_lock().lock().await;
+        let tmp = tempfile::tempdir().expect("temp dir should be created");
+        let plugin_root = write_plugin_with_postprocess(
+            &tmp,
+            r#"
+def postprocess(ctx):
+    return {
+        "status": None,
+        "phase_source": "payload_only"
+    }
+"#,
+        );
+        let plugin_parent = plugin_root
+            .parent()
+            .expect("plugin root should have a parent")
+            .to_string_lossy()
+            .to_string();
+        let _plugin_dir = EnvRestore::set("PLUGIN_DIR", Some(plugin_parent.as_str()));
+
+        let role = PostprocessRole::from_env(&postprocess_env(&runner_path()))
+            .expect("postprocess role should build");
+        let sink = RecordingSink::new();
+        let msg = scicomp_rq::Message::new(
+            "1-0",
+            "test:postprocess",
+            "postprocess:grp",
+            "run-plugin",
+            json!({
+                "run_id": "run-plugin",
+                "workflow_id": "demo-plugin",
+                "operation": "run",
+                "request": {
+                    "content_type": "application/json",
+                    "raw_fields": { "value": 1 },
+                    "input_artifacts": []
+                },
+                "result": {
+                    "status": "failed",
+                    "error": "execute failed after writing partial output",
+                    "output_path": "/tmp/run-plugin.npz",
+                    "artifacts": [
+                        {
+                            "name": "pressure_field",
+                            "media_type": "application/x-npz",
+                            "storage_path": "/tmp/run-plugin.npz",
+                            "primary": true
+                        }
+                    ],
+                    "execution_time_seconds": 1.25
+                },
+                "output_publication": {
+                    "target": {
+                        "artifact": "primary",
+                        "provider": "s3",
+                        "storage": {
+                            "type": "s3",
+                            "bucket": "bucket",
+                            "prefix": "outputs/demo-plugin/run-plugin"
+                        }
+                    }
+                },
+                "stage_context": {
+                    "current_stage_id": "postprocess",
+                    "current_phase": "postprocess",
+                    "pipeline": [
+                        {
+                            "id": "execute",
+                            "phase": "execute",
+                            "queue": "execute",
+                            "next": "postprocess"
+                        },
+                        {
+                            "id": "postprocess",
+                            "phase": "postprocess",
+                            "queue": "postprocess",
+                            "next": "publish"
+                        },
+                        {
+                            "id": "publish",
+                            "phase": "publish",
+                            "queue": "publish",
+                            "next": "results"
+                        },
+                        {
+                            "id": "results",
+                            "phase": "results",
+                            "queue": "results",
+                            "next": null
+                        }
+                    ]
+                },
+                "runtime": {
+                    "kind": "python",
+                    "entrypoint": "plugin.py",
+                    "executor_class": "python.gpu.physicsnemo"
+                }
+            })
+            .to_string(),
+            "postprocess",
+        );
+
+        role.handle(&msg, "postprocess", &sink).await.unwrap();
+
+        let writes = sink.writes();
+        assert_eq!(writes.len(), 1);
+        assert_eq!(writes[0].dest_stream, "publish");
+        assert_eq!(writes[0].stage, "publish");
+
+        let forwarded: Value = serde_json::from_str(&writes[0].payload).unwrap();
+        assert_eq!(forwarded["result"]["status"], "failed");
+        assert_eq!(
+            forwarded["result"]["error"],
+            "execute failed after writing partial output"
+        );
+        assert_eq!(forwarded["result"]["phase_source"], "payload_only");
+        assert_eq!(forwarded["result"]["output_path"], "/tmp/run-plugin.npz");
+        assert_eq!(
+            forwarded["result"]["artifacts"][0]["name"],
+            "pressure_field"
+        );
+        assert_eq!(forwarded["result"]["execution_time_seconds"], json!(1.25));
+        assert!(forwarded.get("execution").is_none());
     }
 
     #[tokio::test]

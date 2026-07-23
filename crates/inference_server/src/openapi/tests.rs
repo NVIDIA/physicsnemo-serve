@@ -83,6 +83,7 @@ fn create_mock_state_with_options(
         stream_prefix: String::new(),
         swagger_cdn_url: None,
         python_runtime_envs: std::collections::HashMap::new(),
+        output_publication: Default::default(),
     };
 
     Arc::new(AppState::new_for_testing(config))
@@ -201,6 +202,7 @@ async fn create_mock_state_for_redis_url(redis_url: String, max_body_size: usize
         stream_prefix: String::new(),
         swagger_cdn_url: None,
         python_runtime_envs: std::collections::HashMap::new(),
+        output_publication: Default::default(),
     };
     let redis_service = RedisService::connect(&config)
         .await

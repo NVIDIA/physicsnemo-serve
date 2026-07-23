@@ -14,8 +14,8 @@ use crate::builder;
 use crate::constants::{fields, keys};
 use crate::error::{QueueError, Result};
 use crate::lua::{
-    LUA_FORWARD_MANY, LUA_HANDOFF, derive_stage_from_stream, is_noscript_error,
-    is_xautoclaim_unsupported,
+    LUA_FORWARD_MANY, LUA_HANDOFF, LUA_RENEW_MESSAGE_LEASE, derive_stage_from_stream,
+    is_noscript_error, is_xautoclaim_unsupported,
 };
 use crate::manager::QueueManager;
 use crate::redis_utils;
@@ -506,6 +506,24 @@ impl QueueManager {
         ))
     }
 
+    /// Renew a pending message lease if it is still owned by `consumer`.
+    pub async fn renew_message_lease(&self, message: &Message, consumer: &str) -> Result<bool> {
+        validate_message_context(message)?;
+        if consumer.trim().is_empty() {
+            return Err(QueueError::Config("consumer must be non-empty".into()));
+        }
+
+        let mut conn = self.conn.clone();
+        let renewed: i64 = redis::Script::new(LUA_RENEW_MESSAGE_LEASE)
+            .key(message.stream())
+            .arg(message.group())
+            .arg(consumer)
+            .arg(message.id())
+            .invoke_async(&mut conn)
+            .await?;
+        Ok(renewed == 1)
+    }
+
     /// Acknowledge a single message using its stream and group context.
     pub async fn ack_message(&self, message: &Message) -> Result<i64> {
         validate_message_context(message)?;
@@ -647,11 +665,90 @@ impl QueueManager {
 
 #[cfg(test)]
 mod tests {
+    use std::net::TcpListener;
+    use std::process::{Child, Command, Stdio};
+    use std::time::Duration;
+
     use super::{
         validate_enqueue_stream_name, validate_forward_many_outputs, validate_message_context,
         validate_payload_json,
     };
-    use crate::{LogicalStreamName, Message, Output, QueueError};
+    use crate::{LogicalStreamName, Message, Output, QueueError, QueueManager, StreamKey};
+
+    struct TestRedisServer {
+        child: Child,
+        _data_dir: tempfile::TempDir,
+    }
+
+    impl Drop for TestRedisServer {
+        fn drop(&mut self) {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
+
+    fn reserve_port(test_name: &str) -> u16 {
+        TcpListener::bind("127.0.0.1:0")
+            .unwrap_or_else(|error| {
+                panic!("failed to reserve ephemeral redis port for {test_name}: {error}")
+            })
+            .local_addr()
+            .unwrap_or_else(|error| {
+                panic!("listener should expose local addr for {test_name}: {error}")
+            })
+            .port()
+    }
+
+    async fn wait_for_tcp_listener(port: u16, test_name: &str) {
+        for _ in 0..50 {
+            if tokio::net::TcpStream::connect(("127.0.0.1", port))
+                .await
+                .is_ok()
+            {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        panic!("redis-server for {test_name} on port {port} did not become ready in time");
+    }
+
+    async fn spawn_test_queue_manager(test_name: &str) -> (TestRedisServer, QueueManager) {
+        let port = reserve_port(test_name);
+        let data_dir = tempfile::tempdir().unwrap_or_else(|error| {
+            panic!("redis data dir should be created for {test_name}: {error}")
+        });
+        let child = Command::new("redis-server")
+            .arg("--save")
+            .arg("")
+            .arg("--appendonly")
+            .arg("no")
+            .arg("--bind")
+            .arg("127.0.0.1")
+            .arg("--port")
+            .arg(port.to_string())
+            .arg("--dir")
+            .arg(data_dir.path())
+            .arg("--loglevel")
+            .arg("warning")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap_or_else(|error| {
+                panic!("failed to spawn redis-server for {test_name}: {error}")
+            });
+        wait_for_tcp_listener(port, test_name).await;
+        let server = TestRedisServer {
+            child,
+            _data_dir: data_dir,
+        };
+        let redis_url = format!("redis://127.0.0.1:{port}");
+        let qm = QueueManager::new(redis_url.as_str())
+            .await
+            .unwrap_or_else(|error| {
+                panic!("queue manager should connect to test redis for {test_name}: {error}")
+            });
+        (server, qm)
+    }
 
     #[test]
     fn validate_enqueue_stream_name_rejects_empty() {
@@ -759,6 +856,44 @@ mod tests {
         assert!(
             matches!(result, Err(QueueError::Config(_))),
             "whitespace-only run_id should be treated as empty and rejected"
+        );
+    }
+
+    #[tokio::test]
+    async fn renew_message_lease_prevents_idle_reclaim_by_another_consumer() {
+        let (_server, qm) = spawn_test_queue_manager("renew-message-lease").await;
+        let stream = StreamKey::new("stream:lease-test");
+        let group = "lease:grp";
+        let owner = "consumer-a";
+        let reclaimer = "consumer-b";
+
+        qm.create_consumer_group(&stream, group, "0", true)
+            .await
+            .expect("consumer group should be created");
+        qm.enqueue_to_stream(&stream, "run-lease", r#"{"ok":true}"#, "publish")
+            .await
+            .expect("message should enqueue");
+
+        let messages = qm
+            .read_messages(&stream, group, owner, 1, 0)
+            .await
+            .expect("owner should read message");
+        assert_eq!(messages.len(), 1);
+
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        let renewed = qm
+            .renew_message_lease(&messages[0], owner)
+            .await
+            .expect("lease renewal should succeed");
+        assert!(renewed, "owner should renew its pending message lease");
+
+        let (_cursor, reclaimed) = qm
+            .claim_idle_messages(&stream, group, reclaimer, 50, "0-0", 1)
+            .await
+            .expect("reclaim check should succeed");
+        assert!(
+            reclaimed.is_empty(),
+            "renewed message should not be reclaimable by another consumer"
         );
     }
 

@@ -6,6 +6,7 @@
     "prefetch",
     "schedule",
     "release",
+    "publish",
     "results"
   ],
   "roles": {
@@ -54,6 +55,32 @@
       "config": {
         "result_ttl_seconds": 86400
       }
+    },
+    "publish": {
+      "inputs": [
+        {
+          "stream": "publish",
+          "max_dequeue_items": 8,
+          "poll_interval_ms": 100,
+          "block_ms": 2000
+        }
+      ],
+      "outputs": [],
+      "config": {
+        "max_concurrent_files": 16,
+        "multipart_threshold_bytes": 67108864,
+        "multipart_part_size_bytes": 16777216,
+        "multipart_max_concurrency": 4,
+        "client_options": {
+          "timeout_secs": 300,
+          "connect_timeout_secs": 10,
+          "pool_max_idle_per_host": 64
+        },
+        "retry": {
+          "max_retries": 10,
+          "timeout_secs": 300
+        }
+      }
     }
   },
   "python_runtime_envs": {
@@ -67,5 +94,8 @@
         "tags": ["demo", "cpu"]
       }
     }
+  },
+  "output_publication": {
+    "enabled": false
   }
 }

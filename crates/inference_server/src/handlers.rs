@@ -819,6 +819,29 @@ async fn run_plugin_workflow(
 
     let run_id = Uuid::new_v4().to_string();
     let timestamp = get_timestamp();
+    let output_publication = match state.config.output_publication.resolve_for_workflow(
+        &plugin.manifest.metadata.id,
+        &run_id,
+        &parsed_request.raw_fields,
+    ) {
+        Ok(resolved) => resolved,
+        Err(e) => {
+            cleanup_pending_uploads(&parsed_request.pending_files).await;
+            error!(
+                error=%e,
+                workflow=%plugin.manifest.metadata.id,
+                "Failed to resolve workflow output publication"
+            );
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": "Failed to resolve workflow output publication",
+                    "details": e.to_string()
+                })),
+            );
+        }
+    };
+    let output_publication_configured = output_publication.is_some();
 
     let input_artifacts = match stage_pending_artifacts(
         state.config.artifact_dir.clone(),
@@ -842,7 +865,7 @@ async fn run_plugin_workflow(
         }
     };
 
-    let envelope = match RunEnvelope::for_plugin(
+    let envelope = match RunEnvelope::for_plugin_with_publication(
         &plugin,
         run_id.clone(),
         parsed_request.operation.clone(),
@@ -853,6 +876,7 @@ async fn run_plugin_workflow(
         },
         parsed_request.parameters,
         state.config.use_prefetch,
+        output_publication,
     ) {
         Ok(envelope) => envelope,
         Err(e) => {
@@ -920,6 +944,7 @@ async fn run_plugin_workflow(
             &first_stage.phase,
             &timestamp,
             &timestamp,
+            output_publication_configured,
         )
         .await
     {
@@ -955,9 +980,7 @@ async fn run_plugin_workflow(
                 stage=%first_stage.phase,
                 "Enqueued plugin workflow"
             );
-            state.runs.write().await.insert(
-                run_id.clone(),
-                json!({
+            let mut run_record = json!({
                     "workflow": workflow_id.clone(),
                     "version": workflow_version.clone(),
                     "operation": operation.clone(),
@@ -966,8 +989,15 @@ async fn run_plugin_workflow(
                     "updated_at": timestamp.clone(),
                     "api_received_at": timestamp.clone(),
                     "api_enqueued_at": timestamp.clone()
-                }),
-            );
+            });
+            if let Some(obj) = run_record.as_object_mut() {
+                if output_publication_configured {
+                    obj.insert("output_location".to_string(), json!("local_and_cloud"));
+                } else {
+                    obj.insert("output_location".to_string(), json!("local"));
+                }
+            }
+            state.runs.write().await.insert(run_id.clone(), run_record);
 
             (
                 StatusCode::ACCEPTED,

@@ -6,7 +6,7 @@
 //! Server configuration
 
 use crate::plugin_registry::PythonRuntimeEnvConfig;
-use anyhow::Context;
+use anyhow::{Context, anyhow};
 use std::collections::HashMap;
 use std::env;
 use std::net::SocketAddr;
@@ -14,6 +14,246 @@ use std::path::PathBuf;
 
 /// Default server port
 pub const DEFAULT_PORT: &str = "8080";
+const ENV_RUNTIME_CONFIG: &str = "PHYSICSNEMO_SERVE_RUNTIME_ENVS_CONFIG";
+const ENV_OUTPUT_PUBLICATION_CONFIG_JSON: &str = "PHYSICSNEMO_SERVE_OUTPUT_PUBLICATION_CONFIG_JSON";
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OutputPublicationProvider {
+    S3,
+    Azure,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum OutputPublicationStorageConfig {
+    S3 {
+        bucket: String,
+        #[serde(default = "default_publication_prefix")]
+        prefix: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        region: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        endpoint: Option<String>,
+    },
+    Azure {
+        container: String,
+        #[serde(default = "default_publication_prefix")]
+        prefix: String,
+        endpoint: String,
+    },
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct OutputPublicationConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub storage: Option<OutputPublicationStorageConfig>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ResolvedOutputPublicationStorage {
+    S3 {
+        bucket: String,
+        prefix: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        region: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        endpoint: Option<String>,
+    },
+    Azure {
+        container: String,
+        prefix: String,
+        endpoint: String,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ResolvedOutputPublicationTarget {
+    pub artifact: String,
+    pub provider: OutputPublicationProvider,
+    pub storage: ResolvedOutputPublicationStorage,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ResolvedOutputPublication {
+    pub target: ResolvedOutputPublicationTarget,
+}
+
+fn default_publication_prefix() -> String {
+    "outputs".to_string()
+}
+
+fn publication_prefix(prefix: &str, workflow_id: &str, run_id: &str) -> String {
+    [prefix.trim_matches('/'), workflow_id.trim(), run_id.trim()]
+        .into_iter()
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+impl OutputPublicationConfig {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        if !self.enabled {
+            return Ok(());
+        }
+
+        let storage = self
+            .storage
+            .as_ref()
+            .ok_or_else(|| anyhow!("output_publication.enabled=true requires a storage config"))?;
+        match storage {
+            OutputPublicationStorageConfig::S3 {
+                bucket,
+                prefix,
+                region,
+                endpoint,
+            } => {
+                if bucket.trim().is_empty() {
+                    return Err(anyhow!(
+                        "output_publication.storage.bucket must be non-empty"
+                    ));
+                }
+                if prefix.trim_matches('/').trim().is_empty() {
+                    return Err(anyhow!(
+                        "output_publication.storage.prefix must be non-empty"
+                    ));
+                }
+                if region
+                    .as_deref()
+                    .is_some_and(|value| value.trim().is_empty())
+                {
+                    return Err(anyhow!(
+                        "output_publication.storage.region must be non-empty"
+                    ));
+                }
+                if let Some(endpoint) = endpoint.as_deref() {
+                    let endpoint = endpoint.trim();
+                    if endpoint.is_empty() {
+                        return Err(anyhow!(
+                            "output_publication.storage.endpoint must be non-empty"
+                        ));
+                    }
+                    let endpoint_url = reqwest::Url::parse(endpoint).map_err(|_| {
+                        anyhow!("output_publication.storage.endpoint for s3 must be a valid URL")
+                    })?;
+                    if !matches!(endpoint_url.scheme(), "http" | "https") {
+                        return Err(anyhow!(
+                            "output_publication.storage.endpoint for s3 must start with http:// or https://"
+                        ));
+                    }
+                }
+            }
+            OutputPublicationStorageConfig::Azure {
+                container,
+                prefix,
+                endpoint,
+            } => {
+                if container.trim().is_empty() {
+                    return Err(anyhow!(
+                        "output_publication.storage.container must be non-empty"
+                    ));
+                }
+                if container.trim() != container {
+                    return Err(anyhow!(
+                        "output_publication.storage.container must not contain surrounding whitespace"
+                    ));
+                }
+                if container.contains('/') || container.contains('\\') {
+                    return Err(anyhow!(
+                        "output_publication.storage.container must not contain path separators"
+                    ));
+                }
+                if prefix.trim_matches('/').trim().is_empty() {
+                    return Err(anyhow!(
+                        "output_publication.storage.prefix must be non-empty"
+                    ));
+                }
+                let endpoint = endpoint.trim();
+                if endpoint.is_empty() {
+                    return Err(anyhow!(
+                        "output_publication.storage.endpoint must be non-empty"
+                    ));
+                }
+                let endpoint_url = reqwest::Url::parse(endpoint).map_err(|_| {
+                    anyhow!("output_publication.storage.endpoint for azure must be a valid URL")
+                })?;
+                if endpoint_url.scheme() != "https" {
+                    return Err(anyhow!(
+                        "output_publication.storage.endpoint for azure must start with https://"
+                    ));
+                }
+                if endpoint_url.path() != "/"
+                    || endpoint_url.query().is_some()
+                    || endpoint_url.fragment().is_some()
+                {
+                    return Err(anyhow!(
+                        "output_publication.storage.endpoint for azure must be an account-root URL without a path, query, or fragment"
+                    ));
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    pub fn resolve_for_workflow(
+        &self,
+        workflow_id: &str,
+        run_id: &str,
+        _request_fields: &serde_json::Value,
+    ) -> anyhow::Result<Option<ResolvedOutputPublication>> {
+        if !self.enabled {
+            return Ok(None);
+        };
+        self.validate()?;
+        let storage = self
+            .storage
+            .as_ref()
+            .expect("validated enabled config has storage");
+        let target = match storage {
+            OutputPublicationStorageConfig::S3 {
+                bucket,
+                prefix,
+                region,
+                endpoint,
+            } => ResolvedOutputPublicationTarget {
+                artifact: "primary".to_string(),
+                provider: OutputPublicationProvider::S3,
+                storage: ResolvedOutputPublicationStorage::S3 {
+                    bucket: bucket.trim().to_string(),
+                    prefix: publication_prefix(prefix, workflow_id, run_id),
+                    region: region
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                        .map(str::to_string),
+                    endpoint: endpoint
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                        .map(str::to_string),
+                },
+            },
+            OutputPublicationStorageConfig::Azure {
+                container,
+                prefix,
+                endpoint,
+            } => ResolvedOutputPublicationTarget {
+                artifact: "primary".to_string(),
+                provider: OutputPublicationProvider::Azure,
+                storage: ResolvedOutputPublicationStorage::Azure {
+                    container: container.trim_matches('/').to_string(),
+                    prefix: publication_prefix(prefix, workflow_id, run_id),
+                    endpoint: endpoint.trim_end_matches('/').to_string(),
+                },
+            },
+        };
+        Ok(Some(ResolvedOutputPublication { target }))
+    }
+}
 
 /// Server configuration
 #[derive(Clone, Debug)]
@@ -53,6 +293,7 @@ pub struct ServerConfig {
     pub swagger_cdn_url: Option<String>,
     /// Runtime-env registry keyed by executor_class for readiness probing.
     pub python_runtime_envs: HashMap<String, PythonRuntimeEnvConfig>,
+    pub output_publication: OutputPublicationConfig,
 }
 
 impl ServerConfig {
@@ -161,7 +402,8 @@ impl ServerConfig {
             .unwrap_or(DEFAULT_MAX_BODY);
 
         let swagger_cdn_url = env_provider("SWAGGER_CDN_URL");
-        let python_runtime_envs = resolve_python_runtime_envs(env_provider)?;
+        let (python_runtime_envs, output_publication) =
+            resolve_server_runtime_config(env_provider)?;
         let stream_prefix = env_provider("REDIS_STREAM_PREFIX").unwrap_or_default();
 
         Ok(Self {
@@ -181,14 +423,17 @@ impl ServerConfig {
             stream_prefix,
             swagger_cdn_url,
             python_runtime_envs,
+            output_publication,
         })
     }
 }
 
 #[derive(Debug, serde::Deserialize)]
-struct PythonRuntimeEnvFile {
+struct ServerRuntimeConfigFile {
     #[serde(default)]
     python_runtime_envs: HashMap<String, PythonRuntimeEnvConfig>,
+    #[serde(default)]
+    output_publication: OutputPublicationConfig,
 }
 
 /// Redact the password from a Redis URL.
@@ -205,30 +450,64 @@ fn redact_redis_url(url: &str) -> String {
     url.to_string()
 }
 
-fn resolve_python_runtime_envs<F>(
+fn resolve_server_runtime_config<F>(
     env_provider: &F,
-) -> anyhow::Result<HashMap<String, PythonRuntimeEnvConfig>>
+) -> anyhow::Result<(
+    HashMap<String, PythonRuntimeEnvConfig>,
+    OutputPublicationConfig,
+)>
 where
     F: Fn(&str) -> Option<String>,
 {
-    let Some(path) = env_provider("PHYSICSNEMO_SERVE_RUNTIME_ENVS_CONFIG").map(PathBuf::from)
-    else {
-        return Ok(HashMap::new());
+    let output_publication_override = resolve_output_publication_config_override(env_provider)?;
+    let Some(path) = env_provider(ENV_RUNTIME_CONFIG).map(PathBuf::from) else {
+        return Ok((
+            HashMap::new(),
+            output_publication_override.unwrap_or_default(),
+        ));
     };
 
     let contents = std::fs::read_to_string(&path).with_context(|| {
         format!(
-            "failed to read PHYSICSNEMO_SERVE_RUNTIME_ENVS_CONFIG file '{}'",
+            "failed to read {ENV_RUNTIME_CONFIG} file '{}'",
             path.display()
         )
     })?;
-    let parsed: PythonRuntimeEnvFile = serde_json::from_str(&contents).with_context(|| {
+    let parsed: ServerRuntimeConfigFile = serde_json::from_str(&contents).with_context(|| {
         format!(
-            "failed to parse PHYSICSNEMO_SERVE_RUNTIME_ENVS_CONFIG file '{}'",
+            "failed to parse {ENV_RUNTIME_CONFIG} file '{}'",
             path.display()
         )
     })?;
-    Ok(parsed.python_runtime_envs)
+    let output_publication = output_publication_override.unwrap_or(parsed.output_publication);
+    output_publication.validate().with_context(|| {
+        format!(
+            "invalid output_publication config in {ENV_RUNTIME_CONFIG} file '{}'",
+            path.display()
+        )
+    })?;
+    Ok((parsed.python_runtime_envs, output_publication))
+}
+
+fn resolve_output_publication_config_override<F>(
+    env_provider: &F,
+) -> anyhow::Result<Option<OutputPublicationConfig>>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let Some(raw) = env_provider(ENV_OUTPUT_PUBLICATION_CONFIG_JSON) else {
+        return Ok(None);
+    };
+    if raw.trim().is_empty() {
+        return Ok(None);
+    }
+    let config: OutputPublicationConfig = serde_json::from_str(&raw).with_context(|| {
+        format!("failed to parse {ENV_OUTPUT_PUBLICATION_CONFIG_JSON} as output_publication JSON")
+    })?;
+    config
+        .validate()
+        .with_context(|| format!("invalid {ENV_OUTPUT_PUBLICATION_CONFIG_JSON}"))?;
+    Ok(Some(config))
 }
 
 #[cfg(test)]
@@ -327,6 +606,286 @@ mod tests {
         assert!(config.cors_allowed_origins.is_empty());
         assert_eq!(config.max_body_size, 256 * 1024 * 1024);
         assert!(config.python_runtime_envs.is_empty());
+        assert_eq!(
+            config.output_publication,
+            OutputPublicationConfig::default()
+        );
+    }
+
+    #[test]
+    fn test_output_publication_config_loaded_from_runtime_config() {
+        let temp_path = std::env::temp_dir().join(format!(
+            "physicsnemo-serve-runtime-publication-{}.json",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::write(
+            &temp_path,
+            r#"{
+  "output_publication": {
+    "enabled": true,
+    "storage": {
+      "type": "s3",
+      "bucket": "forecast-bucket",
+      "prefix": "outputs",
+      "region": "us-east-1",
+      "endpoint": "https://s3.us-east-1.amazonaws.com"
+    }
+  }
+}"#,
+        )
+        .unwrap();
+
+        let temp_path_string = temp_path.to_string_lossy().to_string();
+        let env_provider = create_test_env(vec![(
+            "PHYSICSNEMO_SERVE_RUNTIME_ENVS_CONFIG",
+            temp_path_string.as_str(),
+        )]);
+        let config = ServerConfig::from_env_vars(&env_provider).unwrap();
+        let resolved = config
+            .output_publication
+            .resolve_for_workflow("earth2-deterministic", "run-123", &serde_json::json!({}))
+            .unwrap()
+            .expect("profile should resolve");
+
+        assert_eq!(resolved.target.artifact, "primary");
+        assert_eq!(resolved.target.provider, OutputPublicationProvider::S3);
+        assert_eq!(
+            resolved.target.storage,
+            ResolvedOutputPublicationStorage::S3 {
+                bucket: "forecast-bucket".to_string(),
+                prefix: "outputs/earth2-deterministic/run-123".to_string(),
+                region: Some("us-east-1".to_string()),
+                endpoint: Some("https://s3.us-east-1.amazonaws.com".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn test_output_publication_azure_config_loaded_from_runtime_config() {
+        let temp_path = std::env::temp_dir().join(format!(
+            "physicsnemo-serve-runtime-azure-publication-{}.json",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::write(
+            &temp_path,
+            r#"{
+  "output_publication": {
+    "enabled": true,
+    "storage": {
+      "type": "azure",
+      "container": "forecast-results",
+      "prefix": "outputs",
+      "endpoint": "https://example.blob.core.windows.net"
+    }
+  }
+}"#,
+        )
+        .unwrap();
+
+        let temp_path_string = temp_path.to_string_lossy().to_string();
+        let env_provider = create_test_env(vec![(
+            "PHYSICSNEMO_SERVE_RUNTIME_ENVS_CONFIG",
+            temp_path_string.as_str(),
+        )]);
+        let config = ServerConfig::from_env_vars(&env_provider).unwrap();
+
+        let resolved = config
+            .output_publication
+            .resolve_for_workflow("earth2-deterministic", "run-abc", &serde_json::json!({}))
+            .unwrap()
+            .expect("azure target should resolve");
+
+        assert_eq!(resolved.target.artifact, "primary");
+        assert_eq!(resolved.target.provider, OutputPublicationProvider::Azure);
+        assert_eq!(
+            resolved.target.storage,
+            ResolvedOutputPublicationStorage::Azure {
+                container: "forecast-results".to_string(),
+                prefix: "outputs/earth2-deterministic/run-abc".to_string(),
+                endpoint: "https://example.blob.core.windows.net".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn test_output_publication_azure_rejects_container_path_separators() {
+        for container in [
+            "forecast-results/nested",
+            "forecast-results\\nested",
+            "/forecast-results",
+            "forecast-results/",
+        ] {
+            let config = OutputPublicationConfig {
+                enabled: true,
+                storage: Some(OutputPublicationStorageConfig::Azure {
+                    container: container.to_string(),
+                    prefix: "outputs".to_string(),
+                    endpoint: "https://example.blob.core.windows.net".to_string(),
+                }),
+            };
+
+            assert!(config.validate().is_err(), "container {container:?}");
+        }
+    }
+
+    #[test]
+    fn test_output_publication_azure_rejects_container_surrounding_whitespace() {
+        for container in [
+            " forecast-results",
+            "forecast-results ",
+            "\tforecast-results\n",
+        ] {
+            let config = OutputPublicationConfig {
+                enabled: true,
+                storage: Some(OutputPublicationStorageConfig::Azure {
+                    container: container.to_string(),
+                    prefix: "outputs".to_string(),
+                    endpoint: "https://example.blob.core.windows.net".to_string(),
+                }),
+            };
+
+            assert!(config.validate().is_err(), "container {container:?}");
+        }
+    }
+
+    #[test]
+    fn test_output_publication_azure_requires_account_root_endpoint() {
+        for endpoint in [
+            "https://example.blob.core.windows.net/container",
+            "https://example.blob.core.windows.net?sig=secret",
+            "https://example.blob.core.windows.net/#fragment",
+        ] {
+            let config = OutputPublicationConfig {
+                enabled: true,
+                storage: Some(OutputPublicationStorageConfig::Azure {
+                    container: "forecast-results".to_string(),
+                    prefix: "outputs".to_string(),
+                    endpoint: endpoint.to_string(),
+                }),
+            };
+
+            assert!(config.validate().is_err(), "endpoint {endpoint:?}");
+        }
+    }
+
+    #[test]
+    fn test_output_publication_azure_accepts_account_root_endpoint_with_optional_slash() {
+        for endpoint in [
+            "https://example.blob.core.windows.net",
+            "https://example.blob.core.windows.net/",
+        ] {
+            let config = OutputPublicationConfig {
+                enabled: true,
+                storage: Some(OutputPublicationStorageConfig::Azure {
+                    container: "forecast-results".to_string(),
+                    prefix: "outputs".to_string(),
+                    endpoint: endpoint.to_string(),
+                }),
+            };
+
+            config
+                .validate()
+                .expect("account-root endpoint should pass");
+        }
+    }
+
+    #[test]
+    fn test_output_publication_s3_rejects_malformed_endpoint() {
+        for endpoint in ["minio:9000", "://missing-scheme", "ftp://host:9000", "   "] {
+            let config = OutputPublicationConfig {
+                enabled: true,
+                storage: Some(OutputPublicationStorageConfig::S3 {
+                    bucket: "forecast-results".to_string(),
+                    prefix: "outputs".to_string(),
+                    region: None,
+                    endpoint: Some(endpoint.to_string()),
+                }),
+            };
+
+            assert!(config.validate().is_err(), "endpoint {endpoint:?}");
+        }
+    }
+
+    #[test]
+    fn test_output_publication_s3_accepts_http_and_https_endpoint() {
+        for endpoint in ["http://minio:9000", "https://s3.example.com"] {
+            let config = OutputPublicationConfig {
+                enabled: true,
+                storage: Some(OutputPublicationStorageConfig::S3 {
+                    bucket: "forecast-results".to_string(),
+                    prefix: "outputs".to_string(),
+                    region: None,
+                    endpoint: Some(endpoint.to_string()),
+                }),
+            };
+
+            config.validate().expect("http(s) endpoint should pass");
+        }
+    }
+
+    #[test]
+    fn test_output_publication_invalid_runtime_config_reports_path() {
+        let temp_path = std::env::temp_dir().join(format!(
+            "physicsnemo-serve-runtime-invalid-publication-{}.json",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::write(
+            &temp_path,
+            r#"{
+  "output_publication": {
+    "enabled": true,
+    "storage": {
+      "type": "s3",
+      "bucket": "",
+      "prefix": "outputs"
+    }
+  }
+}"#,
+        )
+        .unwrap();
+
+        let temp_path_string = temp_path.to_string_lossy().to_string();
+        let env_provider = create_test_env(vec![(
+            "PHYSICSNEMO_SERVE_RUNTIME_ENVS_CONFIG",
+            temp_path_string.as_str(),
+        )]);
+        let err = ServerConfig::from_env_vars(&env_provider).unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("invalid output_publication config"));
+        assert!(message.contains(temp_path.to_string_lossy().as_ref()));
+    }
+
+    #[test]
+    fn test_output_publication_config_loaded_from_json_env_override() {
+        let env_provider = create_test_env(vec![(
+            "PHYSICSNEMO_SERVE_OUTPUT_PUBLICATION_CONFIG_JSON",
+            r#"{
+                "enabled": true,
+                "storage": {
+                    "type": "s3",
+                    "bucket": "env-bucket",
+                    "prefix": "env-prefix",
+                    "region": "region-1",
+                    "endpoint": "https://object.example"
+                }
+            }"#,
+        )]);
+        let config = ServerConfig::from_env_vars(&env_provider).unwrap();
+        let resolved = config
+            .output_publication
+            .resolve_for_workflow("workflow-a", "run-b", &serde_json::json!({}))
+            .unwrap()
+            .expect("env config should resolve");
+
+        assert_eq!(
+            resolved.target.storage,
+            ResolvedOutputPublicationStorage::S3 {
+                bucket: "env-bucket".to_string(),
+                prefix: "env-prefix/workflow-a/run-b".to_string(),
+                region: Some("region-1".to_string()),
+                endpoint: Some("https://object.example".to_string()),
+            }
+        );
     }
 
     #[test]

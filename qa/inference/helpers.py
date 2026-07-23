@@ -6,7 +6,6 @@ import os
 import pathlib
 import time
 import enum
-import xarray
 import logging
 import zipfile
 
@@ -145,6 +144,8 @@ def validate_metadata_file(local_file, test_params):
 
 
 def validate_zarr_file(local_file, test_params):
+    import xarray
+
     dataset = xarray.load_dataset(local_file)
     # assert len(dataset["tp"].coords["time"]) == len(test_params["forecast_times"])
     if "forecast_times" in test_params:

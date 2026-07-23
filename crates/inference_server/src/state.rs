@@ -339,6 +339,7 @@ outputs:
             stream_prefix: String::new(),
             swagger_cdn_url: None,
             python_runtime_envs: HashMap::new(),
+            output_publication: Default::default(),
         };
 
         let state = AppState::new_for_testing(config);
@@ -414,6 +415,7 @@ outputs:
             stream_prefix: String::new(),
             swagger_cdn_url: None,
             python_runtime_envs: HashMap::new(),
+            output_publication: Default::default(),
         };
 
         let state = AppState::new_for_testing(config);
@@ -466,6 +468,7 @@ outputs:
             stream_prefix: String::new(),
             swagger_cdn_url: None,
             python_runtime_envs: HashMap::new(),
+            output_publication: Default::default(),
         };
 
         let state = AppState::new_for_testing(config);
@@ -519,6 +522,7 @@ outputs:
             stream_prefix: String::new(),
             swagger_cdn_url: None,
             python_runtime_envs: HashMap::new(),
+            output_publication: Default::default(),
         };
 
         let state = AppState::new_for_testing(config);
@@ -566,6 +570,7 @@ outputs:
             stream_prefix: String::new(),
             swagger_cdn_url: None,
             python_runtime_envs: HashMap::new(),
+            output_publication: Default::default(),
         };
 
         let state = AppState::new_for_testing(config);
@@ -612,6 +617,7 @@ outputs:
             stream_prefix: String::new(),
             swagger_cdn_url: None,
             python_runtime_envs: HashMap::new(),
+            output_publication: Default::default(),
         };
 
         let state = AppState::new_for_testing(config);
@@ -658,6 +664,7 @@ outputs:
             stream_prefix: String::new(),
             swagger_cdn_url: None,
             python_runtime_envs: HashMap::new(),
+            output_publication: Default::default(),
         };
 
         let state = AppState::new_for_testing(config);

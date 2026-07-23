@@ -35,6 +35,10 @@ qa = [
 [tool.pytest.ini_options]
 norecursedirs = ["scicomp-rq", ".uv-cache", ".venv", "qa"]
 pythonpath = [".", "scripts", "python", "python/e2s_tools"]
+markers = [
+    "publication: tests that require live object-storage publication",
+    "rust_only: tests that require the Rust service",
+]
 
 [tool.uv]
 package = false

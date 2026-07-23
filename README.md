@@ -52,3 +52,93 @@ This project is currently not accepting contributions.
 
 PhysicsNeMo-Serve is provided under the Apache License 2.0, refer to the [LICENSE file](LICENSE) for full license text.
 
+## Docs
+
+- [onboarding.md](docs/onboarding.md)
+- [plugin-authoring-guide.md](docs/plugin-authoring-guide.md)
+- [inference-service-user-guide.md](docs/inference-service-user-guide.md)
+
+## Cloud Output Publication
+
+PhysicsNeMo-Serve can publish a workflow's primary output artifact to S3-compatible
+object storage or Azure Blob Storage. Publication is disabled by default and is
+enabled from the runtime config referenced by
+`PHYSICSNEMO_SERVE_RUNTIME_ENVS_CONFIG`. The container entrypoint defaults that
+variable from `WORKER_RUNTIME_CONFIG`; a caller-only `WORKER_RUNTIME_CONFIG`
+override also replaces the image's baked-in default server config path. An
+explicit non-default `PHYSICSNEMO_SERVE_RUNTIME_ENVS_CONFIG` remains the
+server-specific override.
+
+S3 or S3-compatible storage:
+
+```json
+{
+  "output_publication": {
+    "enabled": true,
+    "storage": {
+      "type": "s3",
+      "bucket": "forecast-bucket",
+      "prefix": "outputs",
+      "region": "us-east-1",
+      "endpoint": "https://s3.us-east-1.amazonaws.com"
+    }
+  }
+}
+```
+
+Azure Blob Storage:
+
+```json
+{
+  "output_publication": {
+    "enabled": true,
+    "storage": {
+      "type": "azure",
+      "container": "forecast-results",
+      "prefix": "outputs",
+      "endpoint": "https://account.blob.core.windows.net"
+    }
+  }
+}
+```
+
+Keep credentials out of config files. Provide them through deployment
+environment variables or secret managers:
+
+- S3: `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, optional
+  `AWS_SESSION_TOKEN`, and optional `AWS_REGION`/`AWS_DEFAULT_REGION`.
+- S3-compatible endpoints may also use `S3_ENDPOINT_URL` if `endpoint` is not
+  set in config.
+- Azure: `AZURE_STORAGE_ACCOUNT` or `AZURE_STORAGE_ACCOUNT_NAME`, plus
+  `AZURE_STORAGE_ACCOUNT_KEY` or `AZURE_STORAGE_ACCESS_KEY`. SAS tokens and
+  default Azure credentials are also supported where available.
+
+Upload performance is configured separately on the `publish` role:
+
+```json
+{
+  "roles": {
+    "publish": {
+      "config": {
+        "max_concurrent_files": 96,
+        "multipart_threshold_bytes": 67108864,
+        "multipart_part_size_bytes": 16777216,
+        "multipart_max_concurrency": 4,
+        "client_options": {
+          "timeout_secs": 300,
+          "connect_timeout_secs": 10,
+          "pool_max_idle_per_host": 192
+        },
+        "retry": {
+          "max_retries": 10,
+          "timeout_secs": 300
+        }
+      }
+    }
+  }
+}
+```
+
+`max_concurrent_files` controls parallel uploads for directory artifacts such as
+Zarr stores. The multipart settings apply to large single-file artifacts such as
+NetCDF or HDF5.

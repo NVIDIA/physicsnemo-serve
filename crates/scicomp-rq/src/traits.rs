@@ -86,6 +86,9 @@ pub trait RecoveryOps {
         start_id: &str,
         count: usize,
     ) -> Result<(String, Vec<Message>)>;
+
+    /// Renew a pending message lease when the caller still owns it.
+    async fn renew_message_lease(&self, message: &Message, consumer: &str) -> Result<bool>;
 }
 
 /// Consumer group management operations.
@@ -200,6 +203,10 @@ impl RecoveryOps for QueueManager {
             count,
         )
         .await
+    }
+
+    async fn renew_message_lease(&self, message: &Message, consumer: &str) -> Result<bool> {
+        QueueManager::renew_message_lease(self, message, consumer).await
     }
 }
 

@@ -57,7 +57,7 @@ ENV CARGO_BUILD_JOBS=16 \
     CARGO_INCREMENTAL=0 \
     RUSTFLAGS="-C target-cpu=x86-64-v3"
 
-# Install build dependencies: python3-dev (for PyO3), sccache, maturin
+# Install build dependencies: python3-dev (for PyO3), cmake (for aws-lc-sys), sccache, maturin
 RUN apt-get clean \
  && rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/* \
  && find /etc/apt -type f \( -name '*.list' -o -name '*.sources' \) -print0 | xargs -0 sed -i \
@@ -67,7 +67,7 @@ RUN apt-get clean \
     -e 's|http://security.ubuntu.com|https://security.ubuntu.com|g' \
  && apt-get update -o Acquire::Retries=3 \
  && apt-get install -y --no-install-recommends \
-    python3-dev curl ca-certificates \
+    python3-dev cmake curl ca-certificates \
  && rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/* \
  && curl -L https://github.com/mozilla/sccache/releases/download/v0.8.2/sccache-v0.8.2-x86_64-unknown-linux-musl.tar.gz | tar xz -C /tmp \
  && mv /tmp/sccache-v0.8.2-x86_64-unknown-linux-musl/sccache /usr/local/bin/ \
@@ -175,6 +175,9 @@ FROM --platform=linux/amd64 ${PHYSICSNEMO_SERVE_RUNTIME_BASE_IMAGE} AS runtime
 WORKDIR /app
 
 ARG E2G_HASH=11dcf1b0787a7eb6a8497a3a5a5e1fdcc31232d3
+
+# The runtime base image owns the Python venv contract.
+RUN test -x "$PHYSICSNEMO_SERVE_PYTHON_EXECUTABLE"
 
 # Install third-party runtime dependencies before copying the repo-local wheel
 # so Rust/Python binding changes do not invalidate this heavy layer.

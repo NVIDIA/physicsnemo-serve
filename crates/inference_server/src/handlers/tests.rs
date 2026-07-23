@@ -41,6 +41,7 @@ fn create_mock_state_with_swagger_cdn(swagger_cdn_url: Option<&str>) -> Arc<AppS
         stream_prefix: String::new(),
         swagger_cdn_url: swagger_cdn_url.map(ToString::to_string),
         python_runtime_envs: std::collections::HashMap::new(),
+        output_publication: Default::default(),
     };
     Arc::new(AppState::new_for_testing(config))
 }

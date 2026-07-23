@@ -99,6 +99,32 @@ end
 return next_id
 "#;
 
+/// Lua script for renewing a pending message lease without stealing ownership.
+///
+/// # Keys
+/// - `KEYS[1]`: source stream
+///
+/// # Arguments
+/// - `ARGV[1]`: source group
+/// - `ARGV[2]`: current consumer
+/// - `ARGV[3]`: source message id
+pub const LUA_RENEW_MESSAGE_LEASE: &str = r#"
+-- KEYS[1]=source_stream
+-- ARGV[1]=source_group, ARGV[2]=consumer, ARGV[3]=source_msg_id
+local pending = redis.call('XPENDING', KEYS[1], ARGV[1], ARGV[3], ARGV[3], 1)
+if #pending == 0 or pending[1][1] ~= ARGV[3] then
+  return 0
+end
+if pending[1][2] ~= ARGV[2] then
+  return 0
+end
+local renewed = redis.call('XCLAIM', KEYS[1], ARGV[1], ARGV[2], 0, ARGV[3], 'IDLE', 0, 'JUSTID')
+if #renewed == 0 then
+  return 0
+end
+return 1
+"#;
+
 /// Lua script for atomic forward_many fan-out.
 ///
 /// # Keys

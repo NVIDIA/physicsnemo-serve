@@ -80,7 +80,10 @@ fn init_tracing() {
 }
 
 fn role_requires_queue_manager(role_name: &str) -> bool {
-    matches!(role_name, "batch" | "collect" | "fanout" | "scheduler")
+    matches!(
+        role_name,
+        "batch" | "collect" | "fanout" | "publish" | "scheduler"
+    )
 }
 
 #[tokio::main]

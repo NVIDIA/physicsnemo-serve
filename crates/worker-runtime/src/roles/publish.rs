@@ -1585,6 +1585,12 @@ fn build_publication_target(
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
             {
+                if endpoint
+                    .split_once("://")
+                    .is_some_and(|(scheme, _)| scheme.eq_ignore_ascii_case("http"))
+                {
+                    builder = builder.with_allow_http(true);
+                }
                 builder = builder.with_config(AmazonS3ConfigKey::S3Endpoint, endpoint);
             } else if let Ok(endpoint) = std::env::var("S3_ENDPOINT_URL")
                 && !endpoint.trim().is_empty()
@@ -3083,12 +3089,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn s3_client_config_preserves_ambient_allow_http() {
+    async fn s3_http_endpoint_enables_http_without_ambient_config() {
         let _guard = test_env::env_lock().lock().await;
         let _access_key = EnvRestore::set("AWS_ACCESS_KEY_ID", Some("test"));
         let _secret_key = EnvRestore::set("AWS_SECRET_ACCESS_KEY", Some("test"));
         let _region = EnvRestore::set("AWS_DEFAULT_REGION", Some("us-east-1"));
-        let _allow_http = EnvRestore::set("AWS_ALLOW_HTTP", Some("true"));
+        let _allow_http = EnvRestore::set("AWS_ALLOW_HTTP", None);
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("mock S3 listener should bind");
@@ -3126,7 +3132,7 @@ mod tests {
         };
 
         let target = build_publication_target(&resolved, &config)
-            .expect("configured timeout must preserve ambient HTTP allowance");
+            .expect("explicit HTTP endpoint should enable HTTP");
         let upload = target
             .store
             .put(&ObjectPath::from("artifact.bin"), b"data".as_slice().into())
@@ -3134,7 +3140,7 @@ mod tests {
         server.abort();
 
         assert_eq!(target.destination_uri, "s3://bucket");
-        upload.expect("configured timeout must preserve a valid HTTP upload");
+        upload.expect("explicit HTTP endpoint should allow a valid upload");
     }
 
     #[tokio::test]

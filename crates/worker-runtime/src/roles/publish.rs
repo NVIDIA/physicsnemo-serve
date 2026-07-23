@@ -1595,6 +1595,13 @@ fn build_publication_target(
             } else if let Ok(endpoint) = std::env::var("S3_ENDPOINT_URL")
                 && !endpoint.trim().is_empty()
             {
+                let endpoint = endpoint.trim();
+                if endpoint
+                    .split_once("://")
+                    .is_some_and(|(scheme, _)| scheme.eq_ignore_ascii_case("http"))
+                {
+                    builder = builder.with_allow_http(true);
+                }
                 builder = builder.with_config(AmazonS3ConfigKey::Endpoint, endpoint);
             }
             let store =
@@ -1786,7 +1793,6 @@ async fn upload_selected_artifact(
                 Err(error) if first_error.is_none() => {
                     first_error = Some(error);
                     cancellation.cancel();
-                    break;
                 }
                 Err(_) => {}
             }
@@ -2601,6 +2607,7 @@ mod tests {
     #[derive(Debug)]
     struct BlockingMultipartStore {
         state: Arc<BlockingMultipartState>,
+        fail_multipart_path: Option<ObjectPath>,
     }
 
     impl fmt::Display for BlockingMultipartStore {
@@ -2652,9 +2659,16 @@ mod tests {
 
         async fn put_multipart_opts(
             &self,
-            _location: &ObjectPath,
+            location: &ObjectPath,
             _opts: PutMultipartOptions,
         ) -> object_store::Result<Box<dyn MultipartUpload>> {
+            if self.fail_multipart_path.as_ref() == Some(location) {
+                self.state.upload_and_renewal_started.wait().await;
+                return Err(object_store::Error::Generic {
+                    store: "multipart-test",
+                    source: Box::new(std::io::Error::other("sibling upload failed")),
+                });
+            }
             Ok(Box::new(BlockingMultipartUpload {
                 state: Arc::clone(&self.state),
             }))
@@ -3089,58 +3103,71 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn s3_http_endpoint_enables_http_without_ambient_config() {
+    async fn s3_http_endpoint_sources_enable_http_without_ambient_config() {
         let _guard = test_env::env_lock().lock().await;
         let _access_key = EnvRestore::set("AWS_ACCESS_KEY_ID", Some("test"));
         let _secret_key = EnvRestore::set("AWS_SECRET_ACCESS_KEY", Some("test"));
         let _region = EnvRestore::set("AWS_DEFAULT_REGION", Some("us-east-1"));
         let _allow_http = EnvRestore::set("AWS_ALLOW_HTTP", None);
-        let listener = TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("mock S3 listener should bind");
-        let endpoint = format!(
-            "http://{}",
-            listener
-                .local_addr()
-                .expect("mock S3 listener should have an address")
-        );
-        let server = tokio::spawn(async move {
-            let (mut stream, _) = listener.accept().await.expect("S3 request should arrive");
-            let mut request = vec![0; 4096];
-            let _ = stream
-                .read(&mut request)
+        for explicit_endpoint in [true, false] {
+            let endpoint_source = if explicit_endpoint {
+                "explicit"
+            } else {
+                "S3_ENDPOINT_URL fallback"
+            };
+            let listener = TcpListener::bind("127.0.0.1:0")
                 .await
-                .expect("S3 request should be readable");
-            stream
-                .write_all(
-                    b"HTTP/1.1 200 OK\r\nETag: \"test\"\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-                )
-                .await
-                .expect("mock S3 response should be written");
-        });
-        let mut config = PublishRoleConfig::default();
-        config.client_options.timeout_secs = Some(15);
-        let resolved = ResolvedOutputPublicationTarget {
-            artifact: "primary".to_string(),
-            provider: OutputPublicationProvider::S3,
-            storage: ResolvedOutputPublicationStorage::S3 {
-                bucket: "bucket".to_string(),
-                prefix: "runs/run-1".to_string(),
-                region: Some("us-east-1".to_string()),
-                endpoint: Some(endpoint),
-            },
-        };
+                .expect("mock S3 listener should bind");
+            let endpoint = format!(
+                "http://{}",
+                listener
+                    .local_addr()
+                    .expect("mock S3 listener should have an address")
+            );
+            let server = tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await.expect("S3 request should arrive");
+                let mut request = vec![0; 4096];
+                let _ = stream
+                    .read(&mut request)
+                    .await
+                    .expect("S3 request should be readable");
+                stream
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\nETag: \"test\"\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                    )
+                    .await
+                    .expect("mock S3 response should be written");
+            });
+            let _endpoint_env = EnvRestore::set(
+                "S3_ENDPOINT_URL",
+                (!explicit_endpoint).then_some(endpoint.as_str()),
+            );
+            let mut config = PublishRoleConfig::default();
+            config.client_options.timeout_secs = Some(15);
+            let resolved = ResolvedOutputPublicationTarget {
+                artifact: "primary".to_string(),
+                provider: OutputPublicationProvider::S3,
+                storage: ResolvedOutputPublicationStorage::S3 {
+                    bucket: "bucket".to_string(),
+                    prefix: "runs/run-1".to_string(),
+                    region: Some("us-east-1".to_string()),
+                    endpoint: explicit_endpoint.then_some(endpoint),
+                },
+            };
 
-        let target = build_publication_target(&resolved, &config)
-            .expect("explicit HTTP endpoint should enable HTTP");
-        let upload = target
-            .store
-            .put(&ObjectPath::from("artifact.bin"), b"data".as_slice().into())
-            .await;
-        server.abort();
+            let target = build_publication_target(&resolved, &config)
+                .unwrap_or_else(|error| panic!("{endpoint_source} HTTP endpoint: {error:#}"));
+            let upload = target
+                .store
+                .put(&ObjectPath::from("artifact.bin"), b"data".as_slice().into())
+                .await;
+            server.abort();
 
-        assert_eq!(target.destination_uri, "s3://bucket");
-        upload.expect("explicit HTTP endpoint should allow a valid upload");
+            assert_eq!(target.destination_uri, "s3://bucket");
+            upload.unwrap_or_else(|error| {
+                panic!("{endpoint_source} HTTP endpoint should allow an upload: {error:#}")
+            });
+        }
     }
 
     #[tokio::test]
@@ -3252,6 +3279,7 @@ mod tests {
         let target = PublicationTarget {
             store: Arc::new(BlockingMultipartStore {
                 state: Arc::clone(&state),
+                fail_multipart_path: None,
             }),
             prefix: ObjectPath::from("runs/run-renewal"),
             destination_uri: "s3://bucket".to_string(),
@@ -3324,6 +3352,7 @@ mod tests {
             target: PublicationTarget {
                 store: Arc::new(BlockingMultipartStore {
                     state: Arc::clone(&state),
+                    fail_multipart_path: None,
                 }),
                 prefix: ObjectPath::from("runs/run-engine"),
                 destination_uri: "s3://bucket".to_string(),
@@ -4372,6 +4401,69 @@ mod tests {
             store.put_attempts.load(Ordering::SeqCst) < 50,
             "directory upload must stop launching remaining files after the first failure"
         );
+    }
+
+    #[tokio::test]
+    async fn directory_upload_drains_cancelled_multipart_uploads() {
+        let tmp = tempfile::tempdir().expect("temp dir should be created");
+        let source_dir = tmp.path().join("dataset.zarr");
+        std::fs::create_dir_all(&source_dir).expect("source directory should exist");
+        std::fs::write(source_dir.join("a-blocked"), b"multipart")
+            .expect("blocking file should be written");
+        std::fs::write(source_dir.join("b-failing"), b"multipart")
+            .expect("failing file should be written");
+
+        let state = Arc::new(BlockingMultipartState {
+            upload_and_renewal_started: Barrier::new(2),
+            aborts: AtomicUsize::new(0),
+            completes: AtomicUsize::new(0),
+        });
+        let store = Arc::new(BlockingMultipartStore {
+            state: Arc::clone(&state),
+            fail_multipart_path: Some(ObjectPath::from("runs/run-drain/dataset.zarr/b-failing")),
+        });
+        let cancellation = UploadCancellation::new();
+        let config = PublishRoleConfig {
+            max_concurrent_files: 2,
+            multipart_threshold_bytes: 1,
+            multipart_part_size_bytes: 8,
+            multipart_max_concurrency: 1,
+            ..Default::default()
+        };
+
+        let error = tokio::time::timeout(
+            Duration::from_secs(5),
+            upload_selected_artifact(
+                &SelectedArtifact {
+                    name: "primary".to_string(),
+                    storage_path: source_dir,
+                    filename: "dataset.zarr".to_string(),
+                },
+                &PublicationTarget {
+                    store,
+                    prefix: ObjectPath::from("runs/run-drain"),
+                    destination_uri: "s3://bucket".to_string(),
+                },
+                true,
+                false,
+                &config,
+                &cancellation,
+            ),
+        )
+        .await
+        .expect("directory upload should not hang")
+        .expect_err("sibling multipart failure should fail the directory upload");
+
+        assert!(
+            format!("{error:#}").contains("sibling upload failed"),
+            "the original sibling error must be preserved: {error:#}"
+        );
+        assert_eq!(
+            state.aborts.load(Ordering::SeqCst),
+            1,
+            "the active multipart upload must finish its cancellation abort"
+        );
+        assert_eq!(state.completes.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]

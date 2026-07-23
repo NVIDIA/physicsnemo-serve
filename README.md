@@ -4,7 +4,7 @@ PhysicsNeMo-Serve is a Rust-based serving package for MLOps engineers that turns
 
 It implements a manifest-driven inference service for Python plugins, with Rust handling orchestration, scheduling, artifact serving, and result persistence.
 
-It reduces the friction between trained model checkpoints and production inference by giving teams a structured path for export, backend selection, and deployment, especially in NVIDIA GPU environments. 
+It reduces the friction between trained model checkpoints and production inference by giving teams a structured path for export, backend selection, and deployment, especially in NVIDIA GPU environments.
 
 ## Core Functionality
 
@@ -39,10 +39,38 @@ Then choose your path:
   - Rust-backed Zarr IO backend for Earth2Studio
 - `crates/scicomp-rq`
   - Redis Streams–based distributed task queue for scientific computing pipelines
+- `crates/physicsnemo-serve-cmd`
+  - Optional one-shot workflow runner with bounded local queues and in-memory results
 - `scripts/inference_worker.py`
   - Python execute worker for plugin hooks
 - `scripts/plugin_dev.py`
   - scaffold, validate, local check, and local stack tooling for plugins
+
+## Standalone direct inference
+
+The `physicsnemo-serve` command runs one compatible external manifest plugin
+without Redis, the REST inference server, worker processes, or a scheduler. Its
+packaged form appends a locked CPython runtime to the executable and extracts
+that runtime into a content-addressed cache on first use.
+
+```bash
+./dist/physicsnemo-serve infer \
+  --plugin /path/to/plugin \
+  --request request.json \
+  --output-dir outputs \
+  --device 0
+```
+
+The direct runner supports JSON plugins using `simple`,
+`prefetch`/`default`, `postprocess`, and single-item `batch` profiles.
+Fanout/collect, publication, multipart ingress, and custom framework stages are
+rejected explicitly. See
+[`crates/physicsnemo-serve-cmd/README.md`](crates/physicsnemo-serve-cmd/README.md)
+for runtime assembly and packaging instructions.
+
+The existing `inference_server`, distributed `worker-runtime`, Redis
+configuration, Dockerfiles, and Python inference worker remain supported for
+the full service deployment.
 
 ## Contributors
 

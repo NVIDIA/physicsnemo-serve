@@ -6,6 +6,7 @@ members = [
     "crates/e2s_zarr_io",
     "crates/scicomp-rq",
     "crates/inference_server",
+    "crates/physicsnemo-serve-cmd",
     "crates/worker-runtime",
 ]
 resolver = "2"

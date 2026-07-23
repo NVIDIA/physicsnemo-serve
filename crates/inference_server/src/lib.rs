@@ -10,15 +10,22 @@
 //! REST API for discovering manifest-driven plugins, validating schemas,
 //! and enqueueing inference runs via Redis streams.
 
-pub mod artifact_store;
 pub mod config;
-pub mod handlers;
-pub mod metrics;
-pub mod openapi;
 pub mod plugin_registry;
-pub mod redis_ops;
 pub mod run_envelope;
+
+#[cfg(feature = "rest")]
+pub mod artifact_store;
+#[cfg(feature = "rest")]
+pub mod handlers;
+#[cfg(feature = "rest")]
+pub mod metrics;
+#[cfg(feature = "rest")]
+pub mod openapi;
+#[cfg(feature = "rest")]
+pub mod redis_ops;
+#[cfg(feature = "rest")]
 pub mod state;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "rest"))]
 mod docs_examples_tests;

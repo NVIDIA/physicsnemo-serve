@@ -1,0 +1,138 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+use std::env;
+use std::fs;
+use std::io;
+use std::path::{Path, PathBuf};
+use std::process::ExitCode;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use anyhow::{Context, Result, anyhow};
+use physicsnemo_serve_cmd::bundle::{extract_runtime, package_executable};
+use physicsnemo_serve_cmd::prefetch::materialize_direct_plan;
+use physicsnemo_serve_cmd::{CliCommand, InferArgs, PackageArgs, PrefetchArgs, parse_args};
+use serde_json::Value;
+use tokio::process::Command;
+
+const RUNTIME_OVERRIDE_ENV: &str = "PHYSICSNEMO_SERVE_RUNTIME_DIR";
+const CACHE_OVERRIDE_ENV: &str = "PHYSICSNEMO_SERVE_CLI_CACHE_DIR";
+
+#[tokio::main]
+async fn main() -> ExitCode {
+    match run().await {
+        Ok(code) => ExitCode::from(code),
+        Err(error) => {
+            eprintln!("{error:#}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+async fn run() -> Result<u8> {
+    let command = parse_args(env::args().skip(1))?;
+    match command {
+        CliCommand::Infer(args) => run_inference(args).await,
+        CliCommand::Package(args) => {
+            package_runtime(args)?;
+            Ok(0)
+        }
+        CliCommand::Prefetch(args) => {
+            run_prefetch(args).await?;
+            Ok(0)
+        }
+    }
+}
+
+async fn run_inference(args: InferArgs) -> Result<u8> {
+    let executable = env::current_exe().context("failed to resolve the CLI executable")?;
+    let runtime_root = resolve_runtime(&executable)?;
+    let python = runtime_root.join("bin/python");
+    let runner = runtime_root.join("scripts/plugin_direct_runner.py");
+    validate_runtime(&runtime_root)?;
+    fs::create_dir_all(&args.output_dir).with_context(|| {
+        format!(
+            "failed to create output directory: {}",
+            args.output_dir.display()
+        )
+    })?;
+    let run_id = args.run_id.unwrap_or_else(default_run_id);
+
+    let mut command = Command::new(&python);
+    command
+        .arg(&runner)
+        .arg("--plugin-root")
+        .arg(&args.plugin_root)
+        .arg("--request")
+        .arg(&args.request)
+        .arg("--output-dir")
+        .arg(&args.output_dir)
+        .arg("--run-id")
+        .arg(&run_id)
+        .env("PHYSICSNEMO_SERVE_PREFETCH_HELPER", &executable)
+        .env("PYTHONNOUSERSITE", "1");
+    if let Some(device) = args.device {
+        command.env("CUDA_VISIBLE_DEVICES", device);
+    }
+
+    let status = command
+        .status()
+        .await
+        .with_context(|| format!("failed to start bundled Python: {}", python.display()))?;
+    Ok(status.code().unwrap_or(1).clamp(0, u8::MAX as i32) as u8)
+}
+
+fn package_runtime(args: PackageArgs) -> Result<()> {
+    let executable = env::current_exe().context("failed to resolve the CLI executable")?;
+    package_executable(&executable, &args.runtime_dir, &args.output)?;
+    Ok(())
+}
+
+async fn run_prefetch(args: PrefetchArgs) -> Result<()> {
+    let plan: Value =
+        serde_json::from_reader(io::stdin().lock()).context("prefetch plan must be valid JSON")?;
+    let result = materialize_direct_plan(plan, &args.cache_dir, &args.run_id).await?;
+    serde_json::to_writer(io::stdout().lock(), &result)?;
+    println!();
+    Ok(())
+}
+
+fn resolve_runtime(executable: &Path) -> Result<PathBuf> {
+    if let Some(runtime_dir) = env::var_os(RUNTIME_OVERRIDE_ENV) {
+        let runtime_root = PathBuf::from(runtime_dir);
+        validate_runtime(&runtime_root)?;
+        return Ok(runtime_root);
+    }
+    let cache_root = if let Some(cache_dir) = env::var_os(CACHE_OVERRIDE_ENV) {
+        PathBuf::from(cache_dir)
+    } else {
+        dirs::cache_dir()
+            .ok_or_else(|| anyhow!("could not determine the runtime cache directory"))?
+            .join("physicsnemo-serve/inference-cli")
+    };
+    extract_runtime(executable, &cache_root)
+}
+
+fn validate_runtime(runtime_root: &Path) -> Result<()> {
+    for relative_path in ["bin/python", "scripts/plugin_direct_runner.py"] {
+        let path = runtime_root.join(relative_path);
+        if !path.is_file() {
+            return Err(anyhow!(
+                "bundled runtime is missing '{}': {}",
+                relative_path,
+                path.display()
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn default_run_id() -> String {
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    format!("direct-{timestamp}-{}", std::process::id())
+}

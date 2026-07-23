@@ -18,7 +18,7 @@ anyhow.workspace = true
 chrono.workspace = true
 dirs = "5"
 futures = "0.3"
-reqwest = { version = "0.12", features = ["json", "stream"] }
+reqwest = { version = "0.12", features = ["http2", "json", "rustls-tls"], "stream", default-features = false }
 scicomp-rq = { path = "../scicomp-rq" }
 serde.workspace = true
 serde_json.workspace = true

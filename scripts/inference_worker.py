@@ -586,9 +586,15 @@ class WorkflowExecutor:
         self,
         redis_client: "redis_lib.Redis",
         registry_publisher: WorkerRegistryPublisher | None = None,
+        worker_shutdown_event: threading.Event | None = None,
     ):
         self.redis_client = redis_client
         self.registry_publisher = registry_publisher
+        self.worker_shutdown_event = (
+            worker_shutdown_event
+            if worker_shutdown_event is not None
+            else threading.Event()
+        )
         self._plugin_modules: dict[str, Any] = {}
         self._workflow_cache: dict[str, Any] = {}
         self._workflow_cache_entries: dict[str, dict[str, Any]] = {}
@@ -706,6 +712,7 @@ class WorkflowExecutor:
             if not isinstance(service_objects, dict):
                 service_objects = {}
             service_objects.setdefault("redis_client", self.redis_client)
+            service_objects["worker_shutdown_event"] = self.worker_shutdown_event
 
             payload_for_context.update(
                 {
@@ -874,6 +881,7 @@ class WorkflowExecutor:
         if not isinstance(service_objects, dict):
             service_objects = {}
         service_objects.setdefault("redis_client", self.redis_client)
+        service_objects["worker_shutdown_event"] = self.worker_shutdown_event
 
         batch_payload_for_context = dict(payload)
         batch_payload_for_context.update(
@@ -1401,7 +1409,10 @@ class WorkflowExecutor:
             "redis_url": os.environ.get("REDIS_URL"),
             "default_output_dir": os.environ.get("DEFAULT_OUTPUT_DIR"),
         }
-        service_objects = {"redis_client": self.redis_client}
+        service_objects = {
+            "redis_client": self.redis_client,
+            "worker_shutdown_event": self.worker_shutdown_event,
+        }
         return {
             "workflow_id": workflow_id,
             "runtime": runtime,
@@ -3021,13 +3032,18 @@ def main() -> None:
     # Register stream
     register_stream(r, stream_name, metadata, registry_field=registry_field)
 
+    worker_shutdown_event = threading.Event()
     registry_publisher = WorkerRegistryPublisher(
         r,
         stream_name=stream_name,
         registry_field=registry_field,
         metadata=metadata,
     )
-    executor = WorkflowExecutor(r, registry_publisher=registry_publisher)
+    executor = WorkflowExecutor(
+        r,
+        registry_publisher=registry_publisher,
+        worker_shutdown_event=worker_shutdown_event,
+    )
     executor.warm_enabled_workflow()
 
     # Start background reclaimer
@@ -3053,6 +3069,7 @@ def main() -> None:
         nonlocal shutdown
         logger.info(f"Received signal {signum}, shutting down...")
         shutdown = True
+        worker_shutdown_event.set()
 
     signal.signal(signal.SIGTERM, handle_signal)
     signal.signal(signal.SIGINT, handle_signal)
@@ -3121,29 +3138,32 @@ except ImportError:
 
 def _register_async_shutdown_handlers(
     shutdown_event: asyncio.Event,
-) -> tuple[asyncio.AbstractEventLoop, list[int]]:
-    """Register signal handlers that trigger async worker shutdown."""
+    worker_shutdown_event: threading.Event,
+) -> list[tuple[int, Any]]:
+    """Register immediate signal handlers that trigger async worker shutdown."""
     loop = asyncio.get_running_loop()
-    registered_signals: list[int] = []
+    registered_handlers: list[tuple[int, Any]] = []
 
-    def request_shutdown(signum: int) -> None:
+    def request_shutdown(signum: int, _frame: Any) -> None:
         signal_name = signal.Signals(signum).name
-        if shutdown_event.is_set():
+        if worker_shutdown_event.is_set():
             logger.info(
                 "Received %s while shutdown is already in progress", signal_name
             )
             return
         logger.info("Received %s, shutting down...", signal_name)
-        shutdown_event.set()
+        worker_shutdown_event.set()
+        loop.call_soon_threadsafe(shutdown_event.set)
 
     for signum in (signal.SIGTERM, signal.SIGINT):
         try:
-            loop.add_signal_handler(signum, request_shutdown, signum)
-        except (NotImplementedError, RuntimeError, ValueError):
+            previous_handler = signal.getsignal(signum)
+            signal.signal(signum, request_shutdown)
+        except (OSError, RuntimeError, ValueError):
             continue
-        registered_signals.append(signum)
+        registered_handlers.append((signum, previous_handler))
 
-    return loop, registered_signals
+    return registered_handlers
 
 
 async def _cancel_task(task: asyncio.Future[Any]) -> None:
@@ -3261,12 +3281,19 @@ async def main_async() -> None:
         registry_field=registry_field,
         metadata=metadata,
     )
-    executor = WorkflowExecutor(redis_client, registry_publisher=registry_publisher)
+    worker_shutdown_event = threading.Event()
+    executor = WorkflowExecutor(
+        redis_client,
+        registry_publisher=registry_publisher,
+        worker_shutdown_event=worker_shutdown_event,
+    )
     executor.warm_enabled_workflow()
 
     consumer_name = f"{stream_name}-{worker_pid}"
     shutdown_event = asyncio.Event()
-    loop, registered_signals = _register_async_shutdown_handlers(shutdown_event)
+    registered_handlers = _register_async_shutdown_handlers(
+        shutdown_event, worker_shutdown_event
+    )
 
     async def reclaim_loop() -> None:
         while not shutdown_event.is_set():
@@ -3326,6 +3353,7 @@ async def main_async() -> None:
     except asyncio.CancelledError:
         logger.info("Shutdown requested...")
     finally:
+        worker_shutdown_event.set()
         shutdown_event.set()
         await _cancel_task(reclaimer_task)
         try:
@@ -3337,10 +3365,10 @@ async def main_async() -> None:
             )
         finally:
             await _close_redis_client(redis_client)
-            for signum in registered_signals:
+            for signum, previous_handler in registered_handlers:
                 try:
-                    loop.remove_signal_handler(signum)
-                except (NotImplementedError, RuntimeError, ValueError):
+                    signal.signal(signum, previous_handler)
+                except (OSError, RuntimeError, ValueError):
                     continue
         logger.info("Shutdown complete")
 

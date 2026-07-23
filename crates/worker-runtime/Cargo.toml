@@ -31,6 +31,7 @@ uuid.workspace = true
 nvml-wrapper.workspace = true
 prometheus-client.workspace = true
 object_store = { workspace = true, features = ["aws", "azure"] }
+fs2 = "0.4.3"
 
 [dev-dependencies]
 async-trait = "0.1"

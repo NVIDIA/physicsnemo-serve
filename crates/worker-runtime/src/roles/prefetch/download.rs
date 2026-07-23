@@ -10,6 +10,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Context, Result, anyhow};
+use fs2::FileExt;
 use futures::{StreamExt, future::join_all};
 use reqwest::{Client, Url, redirect};
 use serde::{Deserialize, Serialize};
@@ -64,6 +65,7 @@ pub struct DownloadStats {
     pub cached: usize,
     pub errors: usize,
     pub required_errors: usize,
+    pub required_verified_errors: usize,
     pub optional_errors: usize,
     pub total_time_secs: f64,
     pub throughput_mbps: f64,
@@ -181,7 +183,7 @@ impl RequestBudget {
 #[derive(Debug, Clone)]
 enum RequestOutcome {
     Success(RequestSuccess),
-    Failure { required: bool },
+    Failure,
 }
 
 pub struct HttpDownloader {
@@ -273,6 +275,7 @@ impl HttpDownloader {
         let mut cached = 0usize;
         let mut errors = 0usize;
         let mut required_errors = 0usize;
+        let mut required_verified_errors = 0usize;
         let mut optional_errors = 0usize;
         let mut total_bytes = 0u64;
 
@@ -280,6 +283,12 @@ impl HttpDownloader {
             let (cache_key, outcome) = joined_task
                 .context("prefetch: request worker join failed")?
                 .context("prefetch: request worker failed")?;
+            let request = requests.get(&cache_key).ok_or_else(|| {
+                anyhow!(
+                    "prefetch: download request missing for cache key '{}'",
+                    cache_key
+                )
+            })?;
 
             match &outcome {
                 RequestOutcome::Success(success) => {
@@ -290,10 +299,13 @@ impl HttpDownloader {
                         cached += 1;
                     }
                 }
-                RequestOutcome::Failure { required } => {
+                RequestOutcome::Failure => {
                     errors += 1;
-                    if *required {
+                    if request.required {
                         required_errors += 1;
+                        if request.is_verified() {
+                            required_verified_errors += 1;
+                        }
                     } else {
                         optional_errors += 1;
                     }
@@ -339,6 +351,7 @@ impl HttpDownloader {
             cached,
             errors,
             required_errors,
+            required_verified_errors,
             optional_errors,
             total_mb = format!("{total_mb:.2}"),
             throughput_mbps = format!("{throughput_mbps:.2}"),
@@ -351,6 +364,7 @@ impl HttpDownloader {
                 cached,
                 errors,
                 required_errors,
+                required_verified_errors,
                 optional_errors,
                 total_time_secs: total_time,
                 throughput_mbps,
@@ -654,10 +668,38 @@ fn cache_metadata_path(path: &Path) -> PathBuf {
     PathBuf::from(metadata_path)
 }
 
+fn cache_lock_path(path: &Path) -> PathBuf {
+    let mut lock_path = path.as_os_str().to_os_string();
+    lock_path.push(".lock");
+    PathBuf::from(lock_path)
+}
+
 fn unique_temporary_path(path: &Path, suffix: &str) -> PathBuf {
     let mut temporary = path.as_os_str().to_os_string();
     temporary.push(format!(".{suffix}-{}", uuid::Uuid::new_v4()));
     PathBuf::from(temporary)
+}
+
+struct CacheEntryLock {
+    _file: std::fs::File,
+}
+
+async fn acquire_verified_cache_lock(request: &DownloadRequest) -> Result<CacheEntryLock> {
+    let lock_path = cache_lock_path(&request.local_path);
+    tokio::task::spawn_blocking(move || {
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+            .with_context(|| format!("failed to open cache lock '{}'", lock_path.display()))?;
+        file.lock_exclusive()
+            .with_context(|| format!("failed to acquire cache lock '{}'", lock_path.display()))?;
+        Ok(CacheEntryLock { _file: file })
+    })
+    .await
+    .context("prefetch: cache lock worker failed")?
 }
 
 async fn remove_file_if_present(path: &Path) -> Result<()> {
@@ -836,6 +878,28 @@ async fn materialize_request(
     client: Result<&Client>,
     request_budget: &RequestBudget,
 ) -> RequestOutcome {
+    let _cache_lock = if request.is_verified() {
+        if let Some(parent) = request.local_path.parent()
+            && let Err(error) = fs::create_dir_all(parent).await
+        {
+            error!(path = ?request.local_path, error = %error, "prefetch failed to create cache dir");
+            return RequestOutcome::Failure;
+        }
+        match acquire_verified_cache_lock(request).await {
+            Ok(lock) => Some(lock),
+            Err(error) => {
+                error!(
+                    path = ?request.local_path,
+                    error = %error,
+                    "prefetch failed to lock verified cache path"
+                );
+                return RequestOutcome::Failure;
+            }
+        }
+    } else {
+        None
+    };
+
     match cached_request_success(request, config, request_budget).await {
         Ok(Some(success)) => return RequestOutcome::Success(success),
         Ok(None) => {}
@@ -845,9 +909,7 @@ async fn materialize_request(
                 error = %error,
                 "prefetch failed to validate cache path"
             );
-            return RequestOutcome::Failure {
-                required: request.required,
-            };
+            return RequestOutcome::Failure;
         }
     }
 
@@ -855,9 +917,7 @@ async fn materialize_request(
         && let Err(error) = fs::create_dir_all(parent).await
     {
         error!(path = ?request.local_path, error = %error, "prefetch failed to create cache dir");
-        return RequestOutcome::Failure {
-            required: request.required,
-        };
+        return RequestOutcome::Failure;
     }
 
     match materialize_request_by_kind(request, config, client, request_budget).await {
@@ -873,9 +933,7 @@ async fn materialize_request(
                 error = %error,
                 "prefetch download failed"
             );
-            RequestOutcome::Failure {
-                required: request.required,
-            }
+            RequestOutcome::Failure
         }
     }
 }
@@ -1927,6 +1985,76 @@ mod tests {
         assert!(cached.is_none());
         assert!(!request.local_path.exists());
         assert!(!cache_metadata_path(&request.local_path).exists());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn verified_materialization_does_not_invalidate_concurrent_publication() {
+        let dir = tempdir().unwrap();
+        let contents = b"good";
+        let item = verified_item("https://assets.example.com/mesh.vtp", contents);
+        let config = verified_config("assets.example.com");
+        let request = only_request(&item, dir.path(), &config);
+        fs::create_dir_all(request.local_path.parent().unwrap())
+            .await
+            .unwrap();
+        fs::write(&request.local_path, b"evil").await.unwrap();
+
+        let publisher_lock = acquire_verified_cache_lock(&request).await.unwrap();
+        let cache_root = dir.path().to_path_buf();
+        let materialized_item = item.clone();
+        let materialized_config = config.clone();
+        let mut materialization = tokio::spawn(async move {
+            HttpDownloader::with_config(materialized_config)
+                .materialize_plan(&[materialized_item], &cache_root, "run-concurrent-cache")
+                .await
+        });
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), &mut materialization)
+                .await
+                .is_err(),
+            "cache validation must wait for the digest lock"
+        );
+
+        let temporary_path = unique_temporary_path(&request.local_path, "test-publish");
+        fs::write(&temporary_path, contents).await.unwrap();
+        publish_cache_file(
+            &request,
+            &temporary_path,
+            contents.len() as u64,
+            item.expected_sha256.as_deref(),
+        )
+        .await
+        .unwrap();
+        drop(publisher_lock);
+
+        let result = tokio::time::timeout(Duration::from_secs(2), materialization)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(result.stats.cached, 1);
+        assert_eq!(result.stats.downloaded, 0);
+        assert_eq!(fs::read(&request.local_path).await.unwrap(), contents);
+        assert!(cache_metadata_path(&request.local_path).exists());
+    }
+
+    #[tokio::test]
+    async fn required_verified_failures_are_tracked_separately() {
+        let dir = tempdir().unwrap();
+        let item = verified_item("https://assets.example.com/mesh.vtp", b"good");
+        let config = verified_config("assets.example.com");
+        let request = only_request(&item, dir.path(), &config);
+        fs::create_dir_all(&request.local_path).await.unwrap();
+
+        let result = HttpDownloader::with_config(config)
+            .materialize_plan(&[item], dir.path(), "run-verified-failure")
+            .await
+            .unwrap();
+
+        assert_eq!(result.stats.errors, 1);
+        assert_eq!(result.stats.required_errors, 1);
+        assert_eq!(result.stats.required_verified_errors, 1);
     }
 
     #[test]

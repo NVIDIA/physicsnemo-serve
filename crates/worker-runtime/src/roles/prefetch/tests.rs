@@ -315,6 +315,7 @@ async fn happy_path_materializes_explicit_plan_and_preserves_payload_fields() {
             cached: 1,
             errors: 0,
             required_errors: 0,
+            required_verified_errors: 0,
             optional_errors: 0,
             total_time_secs: 0.25,
             throughput_mbps: 42.0,
@@ -423,6 +424,7 @@ async fn fail_open_mode_handoffs_with_degraded_marker_for_optional_failures() {
             cached: 0,
             errors: 1,
             required_errors: 0,
+            required_verified_errors: 0,
             optional_errors: 1,
             total_time_secs: 0.1,
             throughput_mbps: 0.0,
@@ -463,6 +465,7 @@ async fn fail_open_mode_returns_error_on_required_checksum_verified_failure() {
             cached: 0,
             errors: 1,
             required_errors: 1,
+            required_verified_errors: 1,
             optional_errors: 0,
             total_time_secs: 0.1,
             throughput_mbps: 0.0,
@@ -502,6 +505,7 @@ async fn fail_open_mode_returns_error_on_required_size_verified_failure() {
             cached: 0,
             errors: 1,
             required_errors: 1,
+            required_verified_errors: 1,
             optional_errors: 0,
             total_time_secs: 0.1,
             throughput_mbps: 0.0,
@@ -541,6 +545,7 @@ async fn fail_open_mode_preserves_legacy_required_failure_handoff() {
             cached: 0,
             errors: 1,
             required_errors: 1,
+            required_verified_errors: 0,
             optional_errors: 0,
             total_time_secs: 0.1,
             throughput_mbps: 0.0,
@@ -574,6 +579,64 @@ async fn fail_open_mode_preserves_legacy_required_failure_handoff() {
 }
 
 #[tokio::test]
+async fn fail_open_mode_preserves_legacy_failure_in_mixed_verified_plan() {
+    let expected_sha256 = "abcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd";
+    let mat = Arc::new(RecordingMaterializer::with_result(MaterializationResult {
+        stats: DownloadStats {
+            downloaded: 1,
+            cached: 0,
+            errors: 1,
+            required_errors: 1,
+            required_verified_errors: 0,
+            optional_errors: 0,
+            total_time_secs: 0.1,
+            throughput_mbps: 0.0,
+            total_mb: 0.0,
+        },
+        artifacts: vec![MaterializedArtifact {
+            name: "mesh".to_string(),
+            source_uri: "https://assets.example.com/mesh.vtp".to_string(),
+            storage_path: "/tmp/cache/mesh.vtp".to_string(),
+            size_bytes: 4,
+            media_type: None,
+            sha256: Some(expected_sha256.to_string()),
+        }],
+    }));
+    let role = PrefetchRole::from_env(&env_with_fail_closed(false), Some(mat))
+        .expect("prefetch role should build");
+    let sink = RecordingSink::new();
+
+    role.handle(
+        &msg(
+            "run-1",
+            &plugin_payload(json!([
+                {
+                    "source_uri": "https://assets.example.com/mesh.vtp",
+                    "target_artifact_name": "mesh",
+                    "expected_sha256": expected_sha256,
+                    "expected_size_bytes": 4
+                },
+                {
+                    "source_uri": "s3://bucket/path/input.bin",
+                    "target_artifact_name": "legacy-input"
+                }
+            ])),
+        ),
+        "prefetch",
+        &sink,
+    )
+    .await
+    .unwrap();
+
+    let handoffs = sink.handoffs();
+    assert_eq!(handoffs.len(), 1);
+    let out: JsonValue = serde_json::from_str(&handoffs[0].1).unwrap();
+    assert_eq!(out["prefetch_degraded"], true);
+    assert_eq!(out["prefetch_required_errors"], 1);
+    assert_eq!(out["prefetch_artifacts"][0]["name"], "mesh");
+}
+
+#[tokio::test]
 async fn fail_open_mode_preserves_optional_verified_failure_handoff() {
     let mat = Arc::new(RecordingMaterializer::with_result(MaterializationResult {
         stats: DownloadStats {
@@ -581,6 +644,7 @@ async fn fail_open_mode_preserves_optional_verified_failure_handoff() {
             cached: 0,
             errors: 1,
             required_errors: 0,
+            required_verified_errors: 0,
             optional_errors: 1,
             total_time_secs: 0.1,
             throughput_mbps: 0.0,
@@ -625,6 +689,7 @@ async fn fail_closed_mode_returns_error_on_required_download_failures() {
             cached: 0,
             errors: 1,
             required_errors: 1,
+            required_verified_errors: 0,
             optional_errors: 0,
             total_time_secs: 0.1,
             throughput_mbps: 0.0,

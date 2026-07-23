@@ -3,13 +3,16 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#[cfg(test)]
 use std::collections::HashMap;
 #[cfg(test)]
 use std::sync::Arc;
 
 use anyhow::{Result, anyhow};
 use redis::Script;
-use scicomp_rq::{QueueManager, hash_ops};
+use scicomp_rq::QueueManager;
+#[cfg(test)]
+use scicomp_rq::hash_ops;
 #[cfg(test)]
 use tokio::sync::Mutex;
 
@@ -19,17 +22,13 @@ const RESERVED_MEMORY_HASH_KEY: &str = "scheduler:reserved_memory_mb";
 const ACTIVE_RESERVED_MEMORY_HASH_KEY: &str = "scheduler:active_reserved_memory_mb";
 
 pub(super) trait ReservedMemoryStore: Send + Sync {
+    #[cfg(test)]
     /// Returns the scheduler-accounted memory totals for the requested resources.
     ///
     /// Resources with no tracked reservation are omitted from the returned map.
     fn get_many<'a>(&'a self, resource_ids: &'a [u32]) -> BoxFuture<'a, Result<HashMap<u32, u64>>>;
 
-    /// Increases the scheduler-accounted memory for a resource and returns the updated total.
-    ///
-    /// Implementations must treat `observed_used_mb` as a floor before applying
-    /// `memory_mb`, so reservations never fall behind the latest observed usage.
-    /// The observed floor is not an active reservation and must be dropped once
-    /// all active reservations for the resource have been released.
+    /// Increases the scheduler-accounted memory and returns the updated total.
     fn reserve<'a>(
         &'a self,
         resource_id: u32,
@@ -70,6 +69,7 @@ impl RedisReservedMemoryStore {
 }
 
 impl ReservedMemoryStore for RedisReservedMemoryStore {
+    #[cfg(test)]
     fn get_many<'a>(&'a self, resource_ids: &'a [u32]) -> BoxFuture<'a, Result<HashMap<u32, u64>>> {
         Box::pin(async move {
             let fields: Vec<String> = resource_ids

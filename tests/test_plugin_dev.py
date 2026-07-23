@@ -1219,6 +1219,79 @@ def execute_batch(items, ctx):
     return plugin_root
 
 
+def create_module_execute_only_plugin(
+    root: Path, plugin_id: str = "demo-execute-only"
+) -> Path:
+    plugin_root = root / plugin_id
+    write_file(
+        plugin_root / "plugin.yaml",
+        f"""
+metadata:
+  id: {plugin_id}
+  display_name: Demo Execute Only Plugin
+  version: 1.0.0
+  description: Demo execute-only plugin for scheduler batch fallback tests
+ingress:
+  content_types: [application/json]
+  default_content_type: application/json
+  operations:
+    default: run
+    allowed: [run]
+pipeline:
+  stages:
+    - id: execute
+      phase: execute
+      handler: plugin_phase
+      queue: execute.python.test
+      next: results
+    - id: results
+      phase: results
+      handler: persist_results
+      queue: results
+      next: null
+runtime:
+  kind: python
+  entrypoint: workflow.py
+  executor_class: python.test
+resources:
+  defaults:
+    device_kind: cpu
+    gpus_required: 0
+    memory_mb: 1024
+outputs:
+  primary_artifact:
+    name: primary
+    media_type: application/json
+  retention_hours: 24
+""".strip(),
+    )
+    write_file(
+        plugin_root / "workflow.py",
+        """
+from __future__ import annotations
+
+EXECUTE_CALLS = []
+
+
+def execute(ctx):
+    EXECUTE_CALLS.append(
+        {
+            "run_id": ctx["run_id"],
+            "batch_id": ctx.get("batch_id"),
+            "batch_size": ctx.get("batch_info", {}).get("batch_size"),
+        }
+    )
+    return {
+        "status": "succeeded",
+        "output_path": None,
+        "artifacts": [],
+        "value": ctx["parameters"]["value"] + 1,
+    }
+""".strip(),
+    )
+    return plugin_root
+
+
 def create_class_based_run_batch_plugin(
     root: Path, plugin_id: str = "demo-run-batch"
 ) -> Path:
@@ -2191,294 +2264,74 @@ def test_inference_worker_supports_class_based_run_batch_hook(
     ]
 
 
-def test_inference_worker_routes_batch_item_completion_from_execute_stage():
+def test_inference_worker_falls_back_to_execute_for_scheduler_batch(
+    tmp_path: Path, monkeypatch
+):
+    plugin_root = create_module_execute_only_plugin(tmp_path)
     module = load_inference_worker_module()
-    item_payload = {
-        "run_id": "batch-run-1:item:0",
-        "workflow_id": "demo-batch",
-        "operation": "run",
-        "parameters": {"value": 2},
-        "output_publication": {"enabled": True},
-        "stage_context": {
-            "current_stage_id": "batch",
-            "current_phase": "batch",
-            "pipeline": [
-                {"id": "batch", "phase": "batch", "queue": "batch", "next": "schedule"},
+
+    monkeypatch.setenv("PLUGIN_DIR", str(plugin_root.parent))
+    monkeypatch.setenv("DEFAULT_OUTPUT_DIR", str(tmp_path / "outputs"))
+
+    executor = module.WorkflowExecutor(DummyRedis())
+    result = executor.execute(
+        plugin_root.name,
+        "batch-run-fallback",
+        {},
+        payload={
+            "workflow_id": plugin_root.name,
+            "operation": "run",
+            "batch_id": "batch-run-fallback",
+            "batch_info": {
+                "batch_id": "batch-run-fallback",
+                "batch_size": 2,
+                "flush_reason": "max_batch_size",
+            },
+            "items": [
                 {
-                    "id": "schedule",
-                    "phase": "schedule",
-                    "queue": "schedule",
-                    "next": "execute",
+                    "run_id": "batch-run-fallback:item:0",
+                    "payload": {
+                        "run_id": "batch-run-fallback:item:0",
+                        "workflow_id": plugin_root.name,
+                        "operation": "run",
+                        "parameters": {"value": 4},
+                    },
                 },
                 {
-                    "id": "execute",
-                    "phase": "execute",
-                    "queue": "execute.demo",
-                    "next": "publish",
+                    "run_id": "batch-run-fallback:item:1",
+                    "payload": {
+                        "run_id": "batch-run-fallback:item:1",
+                        "workflow_id": plugin_root.name,
+                        "operation": "run",
+                        "parameters": {"value": 7},
+                    },
                 },
-                {
-                    "id": "publish",
-                    "phase": "publish",
-                    "queue": "publish",
-                    "next": "results",
-                },
-                {"id": "results", "phase": "results", "queue": "results", "next": None},
             ],
         },
-    }
-    batch_payload = {
-        "batch_id": "batch-run-1",
-        "batch_info": {"batch_id": "batch-run-1", "batch_size": 1},
-        "output_publication": {"enabled": True},
-        "stage_context": {
-            **item_payload["stage_context"],
-            "current_stage_id": "execute",
-            "current_phase": "execute",
-        },
-    }
-    batch_result = {
-        "run_id": "batch-run-1",
-        "status": "succeeded",
-        "batch_results": [
-            {
-                "run_id": "batch-run-1:item:0",
-                "payload": item_payload,
-                "result": {
-                    "run_id": "batch-run-1:item:0",
-                    "status": "succeeded",
-                    "artifacts": [
-                        {
-                            "name": "forecast_dataset",
-                            "media_type": "application/x-zarr",
-                            "storage_path": "/outputs/batch-run-1/item-0/forecast.zarr",
-                            "primary": True,
-                        }
-                    ],
-                    "output_path": "/outputs/batch-run-1/item-0/forecast.zarr",
-                    "batch_info": {"batch_id": "batch-run-1", "batch_size": 1},
-                },
-            }
-        ],
-    }
-
-    outputs = module._build_batch_primary_outputs(
-        "execute.demo", batch_payload, batch_result
     )
 
-    assert len(outputs) == 1
-    stream_name, payload, stage, run_id = outputs[0]
-    assert stream_name == "publish"
-    assert stage == "publish"
-    assert run_id == "batch-run-1:item:0"
-    assert payload["stage_context"]["current_stage_id"] == "publish"
-    assert payload["stage_context"]["current_phase"] == "publish"
-    assert payload["result"]["run_id"] == "batch-run-1:item:0"
-    assert not module._should_persist_run_status_after_execute(
-        module._batch_item_completion_payload(batch_payload, item_payload),
-        batch_result["batch_results"][0]["result"],
-    )
-
-
-def test_inference_worker_routes_batch_item_through_declared_intermediate_stage():
-    module = load_inference_worker_module()
-    item_payload = {
-        "run_id": "batch-run-1:item:0",
-        "workflow_id": "demo-batch",
-        "operation": "run",
-        "parameters": {"value": 2},
-        "output_publication": {"enabled": True},
-        "stage_context": {
-            "current_stage_id": "batch",
-            "current_phase": "batch",
-            "pipeline": [
-                {"id": "batch", "phase": "batch", "queue": "batch", "next": "schedule"},
-                {
-                    "id": "schedule",
-                    "phase": "schedule",
-                    "queue": "schedule",
-                    "next": "execute",
-                },
-                {
-                    "id": "execute",
-                    "phase": "execute",
-                    "queue": "execute.demo",
-                    "next": "postprocess",
-                },
-                {
-                    "id": "postprocess",
-                    "phase": "postprocess",
-                    "queue": "postprocess",
-                    "next": "publish",
-                },
-                {
-                    "id": "publish",
-                    "phase": "publish",
-                    "queue": "publish",
-                    "next": "results",
-                },
-                {"id": "results", "phase": "results", "queue": "results", "next": None},
-            ],
-        },
-    }
-    batch_payload = {
-        "batch_id": "batch-run-1",
-        "batch_info": {"batch_id": "batch-run-1", "batch_size": 1},
-        "output_publication": {"enabled": True},
-        "stage_context": {
-            **item_payload["stage_context"],
-            "current_stage_id": "execute",
-            "current_phase": "execute",
-        },
-    }
-    batch_result = {
-        "run_id": "batch-run-1",
-        "status": "succeeded",
-        "batch_results": [
-            {
-                "run_id": "batch-run-1:item:0",
-                "payload": item_payload,
-                "result": {
-                    "run_id": "batch-run-1:item:0",
-                    "status": "succeeded",
-                    "artifacts": [
-                        {
-                            "name": "forecast_dataset",
-                            "media_type": "application/x-zarr",
-                            "storage_path": "/outputs/batch-run-1/item-0/forecast.zarr",
-                            "primary": True,
-                        }
-                    ],
-                    "output_path": "/outputs/batch-run-1/item-0/forecast.zarr",
-                    "batch_info": {"batch_id": "batch-run-1", "batch_size": 1},
-                },
-            }
-        ],
-    }
-
-    outputs = module._build_batch_primary_outputs(
-        "execute.demo", batch_payload, batch_result
-    )
-
-    assert len(outputs) == 1
-    stream_name, payload, stage, run_id = outputs[0]
-    assert stream_name == "postprocess"
-    assert stage == "postprocess"
-    assert run_id == "batch-run-1:item:0"
-    assert payload["stage_context"]["current_stage_id"] == "postprocess"
-    assert payload["stage_context"]["current_phase"] == "postprocess"
-    publish_stages = [
-        pipeline_stage
-        for pipeline_stage in payload["stage_context"]["pipeline"]
-        if pipeline_stage.get("phase") == "publish"
+    assert result["status"] == "succeeded"
+    assert [entry["run_id"] for entry in result["batch_results"]] == [
+        "batch-run-fallback:item:0",
+        "batch-run-fallback:item:1",
     ]
-    assert len(publish_stages) == 1, "no duplicate publish stage may be inserted"
-    assert publish_stages[0]["next"] == "results"
-    postprocess_stage = next(
-        pipeline_stage
-        for pipeline_stage in payload["stage_context"]["pipeline"]
-        if pipeline_stage["id"] == "postprocess"
+    assert result["batch_results"][0]["result"]["value"] == 5
+    assert result["batch_results"][1]["result"]["value"] == 8
+    assert result["batch_results"][0]["result"]["batch_info"]["batch_id"] == (
+        "batch-run-fallback"
     )
-    assert postprocess_stage["next"] == "publish"
-
-
-def test_inference_worker_synthesizes_publish_stage_for_batch_publication(monkeypatch):
-    module = load_inference_worker_module()
-    monkeypatch.setenv(
-        "PHYSICSNEMO_SERVE_OUTPUT_PUBLICATION_CONFIG_JSON",
-        json.dumps(
-            {
-                "enabled": True,
-                "storage": {
-                    "type": "s3",
-                    "bucket": "bucket",
-                    "prefix": "runs",
-                    "region": "us-east-1",
-                },
-            }
-        ),
-    )
-    item_payload = {
-        "run_id": "batch-run-1:item:0",
-        "workflow_id": "demo-batch",
-        "operation": "run",
-        "parameters": {"value": 2},
-        "stage_context": {
-            "current_stage_id": "batch",
-            "current_phase": "batch",
-            "pipeline": [
-                {"id": "batch", "phase": "batch", "queue": "batch", "next": "schedule"},
-                {
-                    "id": "schedule",
-                    "phase": "schedule",
-                    "queue": "schedule",
-                    "next": "execute",
-                },
-                {
-                    "id": "execute",
-                    "phase": "execute",
-                    "queue": "execute.demo",
-                    "next": "results",
-                },
-                {"id": "results", "phase": "results", "queue": "results", "next": None},
-            ],
+    assert executor._plugin_modules[plugin_root.name].EXECUTE_CALLS == [
+        {
+            "run_id": "batch-run-fallback:item:0",
+            "batch_id": "batch-run-fallback",
+            "batch_size": 2,
         },
-    }
-    batch_payload = {
-        "batch_id": "batch-run-1",
-        "batch_info": {"batch_id": "batch-run-1", "batch_size": 1},
-        "stage_context": {
-            **item_payload["stage_context"],
-            "current_stage_id": "execute",
-            "current_phase": "execute",
+        {
+            "run_id": "batch-run-fallback:item:1",
+            "batch_id": "batch-run-fallback",
+            "batch_size": 2,
         },
-    }
-    batch_result = {
-        "run_id": "batch-run-1",
-        "status": "succeeded",
-        "batch_results": [
-            {
-                "run_id": "batch-run-1:item:0",
-                "payload": item_payload,
-                "result": {
-                    "run_id": "batch-run-1:item:0",
-                    "status": "succeeded",
-                    "artifacts": [
-                        {
-                            "name": "forecast_dataset",
-                            "media_type": "application/x-zarr",
-                            "storage_path": "/outputs/batch-run-1/item-0/forecast.zarr",
-                            "primary": True,
-                        }
-                    ],
-                    "output_path": "/outputs/batch-run-1/item-0/forecast.zarr",
-                },
-            }
-        ],
-    }
-
-    outputs = module._build_batch_primary_outputs(
-        "execute.demo", batch_payload, batch_result
-    )
-
-    assert len(outputs) == 1
-    stream_name, payload, stage, _run_id = outputs[0]
-    assert stream_name == "publish"
-    assert stage == "publish"
-    publish_stage = next(
-        stage
-        for stage in payload["stage_context"]["pipeline"]
-        if stage["id"] == "publish"
-    )
-    execute_stage = next(
-        stage
-        for stage in payload["stage_context"]["pipeline"]
-        if stage["id"] == "execute"
-    )
-    assert execute_stage["next"] == "publish"
-    assert publish_stage["next"] == "results"
-    assert payload["output_publication"]["target"]["storage"]["prefix"] == (
-        "runs/demo-batch/batch-run-1:item:0"
-    )
+    ]
 
 
 def test_inference_worker_uses_run_batch_for_single_item_execution(
@@ -6597,6 +6450,9 @@ def test_plugin_dev_run_local_dry_run_includes_scheduler_when_pipeline_declares_
         runtime_config["roles"]["scheduler"]["config"]["gpu_discovery_interval_secs"]
         == 1
     )
+    assert runtime_config["roles"]["scheduler"]["config"]["batching_enabled"] is True
+    assert runtime_config["roles"]["scheduler"]["config"]["max_batch_size"] == 4
+    assert runtime_config["roles"]["scheduler"]["config"]["max_batch_wait_ms"] == 200
     assert "release" in runtime_config["streams"]
     assert (
         runtime_config["python_runtime_envs"]["python.test"]["python_executable"]
@@ -6623,53 +6479,17 @@ def test_plugin_dev_run_local_dry_run_includes_scheduler_when_pipeline_declares_
     )
 
 
-def test_plugin_dev_run_local_dry_run_includes_batch_role_when_pipeline_declares_batch(
+def test_plugin_dev_run_local_dry_run_uses_scheduler_for_batch_profile(
     tmp_path: Path,
 ):
     plugin_root = create_class_based_json_plugin(tmp_path, plugin_id="demo-batched")
     script = repo_root() / "scripts" / "plugin_dev.py"
     workspace = tmp_path / "run-local-batched"
 
-    def add_batch_pipeline(manifest: dict) -> None:
-        manifest["pipeline"]["stages"] = [
-            {
-                "id": "prepare",
-                "phase": "prepare",
-                "handler": "plugin_phase",
-                "queue": "prepare",
-                "next": "batch",
-            },
-            {
-                "id": "batch",
-                "phase": "batch",
-                "handler": "batch",
-                "queue": "batch",
-                "next": "schedule",
-            },
-            {
-                "id": "schedule",
-                "phase": "schedule",
-                "handler": "schedule",
-                "queue": "schedule",
-                "next": "execute",
-            },
-            {
-                "id": "execute",
-                "phase": "execute",
-                "handler": "plugin_phase",
-                "queue": "execute.python.test",
-                "next": "results",
-            },
-            {
-                "id": "results",
-                "phase": "results",
-                "handler": "persist_results",
-                "queue": "results",
-                "next": None,
-            },
-        ]
+    def use_batch_profile(manifest: dict) -> None:
+        manifest["pipeline"] = {"profile": "batch"}
 
-    update_manifest(plugin_root, add_batch_pipeline)
+    update_manifest(plugin_root, use_batch_profile)
 
     proc = subprocess.run(
         [
@@ -6692,12 +6512,13 @@ def test_plugin_dev_run_local_dry_run_includes_batch_role_when_pipeline_declares
     runtime_config = json.loads(
         Path(data["runtime_config_path"]).read_text(encoding="utf-8")
     )
-    assert "batch" in runtime_config["roles"]
-    assert runtime_config["roles"]["batch"]["inputs"][0]["stream"] == "batch"
-    assert "batch" in runtime_config["streams"]
+    assert "scheduler" in runtime_config["roles"]
+    assert "batch" not in runtime_config["roles"]
+    assert "batch" not in runtime_config["streams"]
 
     process_names = [process["name"] for process in data["processes"]]
-    assert "batch" in process_names
+    assert "scheduler" in process_names
+    assert "batch" not in process_names
 
 
 def test_plugin_dev_run_local_dry_run_includes_fanout_and_collect_for_ensemble_pipeline(

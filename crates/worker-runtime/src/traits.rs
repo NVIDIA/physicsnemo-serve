@@ -279,6 +279,27 @@ pub trait MessageSink: Send + Sync {
         msg: &'a Message,
         outputs: &'a [Output],
     ) -> BoxFuture<'a, Result<Vec<String>>>;
+
+    /// Atomically acknowledge multiple source messages and fan out to destinations.
+    ///
+    /// The default implementation preserves compatibility for non-durable test sinks.
+    /// Durable transports should override this method with one atomic queue operation.
+    fn forward_many_from<'a>(
+        &'a self,
+        msgs: &'a [Message],
+        outputs: &'a [Output],
+    ) -> BoxFuture<'a, Result<Vec<String>>> {
+        Box::pin(async move {
+            let (first, remaining) = msgs
+                .split_first()
+                .ok_or_else(|| anyhow::anyhow!("forward_many_from requires a source message"))?;
+            let ids = self.forward_many(first, outputs).await?;
+            for msg in remaining {
+                self.ack_message(msg).await?;
+            }
+            Ok(ids)
+        })
+    }
 }
 
 /// Business logic for a single worker role.

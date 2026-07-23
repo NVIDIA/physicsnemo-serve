@@ -29,16 +29,14 @@ But it still writes one `forecast.zarr` per original request.
 
 For this plugin, `pipeline.profile: batch` expands to:
 
-`prepare -> batch -> schedule -> execute -> results`
+`prepare -> schedule -> execute -> results`
 
 Stage ownership:
 
 - `prepare`
   - plugin hook
-- `batch`
-  - framework stage
 - `schedule`
-  - framework stage
+  - framework stage; owns request batching, GPU fit checks, and dispatch
 - `execute`
   - plugin hook
 - `results`
@@ -85,12 +83,18 @@ Meaning:
 
 ## What The Framework Does
 
-The framework `batch` stage buffers runs by:
+The scheduler buffers compatible runs by:
 
 - `workflow_id`
 - `batch_key`
 
-When the group is ready, it emits one batch payload containing:
+Every non-ensemble request that reaches `schedule` is considered for batching.
+Plugin-provided `batch_profile` values override scheduler defaults for grouping,
+wait time, maximum size, and batch memory scaling. The scheduler flushes a group
+when it reaches `max_batch_size`, exceeds `max_wait_ms`, or the next item would
+make the batch too large for a single eligible GPU.
+
+When the group is ready, the scheduler emits one batch payload containing:
 
 - `batch_id`
 - `batch_info`

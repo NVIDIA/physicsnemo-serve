@@ -145,7 +145,7 @@ def _build_pipeline_phases(profile_name: str, options: dict[str, Any]) -> list[s
     elif profile_name == "postprocess":
         phases = ["prepare", "schedule", "execute", "postprocess"]
     elif profile_name == "batch":
-        phases = ["prepare", "batch", "schedule", "execute"]
+        phases = ["prepare", "schedule", "execute"]
     elif profile_name == "ensemble":
         phases = ["prepare"]
         prefetch_scope = options.get("prefetch")

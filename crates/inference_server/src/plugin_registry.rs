@@ -696,7 +696,7 @@ fn build_pipeline_stages(
         "simple" => vec!["prepare", "execute"],
         "prefetch" => vec!["prepare", "prefetch", "schedule", "execute"],
         "postprocess" => vec!["prepare", "schedule", "execute", "postprocess"],
-        "batch" => vec!["prepare", "batch", "schedule", "execute"],
+        "batch" => vec!["prepare", "schedule", "execute"],
         "ensemble" => {
             let mut phases = vec!["prepare"];
             match options.get("prefetch") {

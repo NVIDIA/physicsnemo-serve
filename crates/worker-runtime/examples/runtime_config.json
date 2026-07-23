@@ -39,7 +39,9 @@
       "outputs": [],
       "config": {
         "gpu_registry_key": "gpu:registry",
-        "scheduling_strategy": "round_robin"
+        "batching_enabled": true,
+        "max_batch_size": 4,
+        "max_batch_wait_ms": 200
       }
     },
     "results": {

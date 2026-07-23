@@ -286,7 +286,7 @@ Common fields:
 - `prefetch_plan`
   - consumed by `prefetch`
 - `batch_profile`
-  - consumed by `batch` as a scheduler hint for grouping compatible requests
+  - consumed by `schedule` as a hint for grouping compatible requests
 - `fanout_profile`
   - consumed by `fanout`, `schedule`, and `collect`
 - `fanout_items`
@@ -295,12 +295,13 @@ Common fields:
 If `prepare()` creates temporary files, write them under `ctx.run_dir` and pass
 their paths through `inputs` or `fanout_items`.
 
-`batch_profile` is only a scheduler hint. It tells the framework when requests may
-share a worker invocation; it does not force authors to implement a special hook.
-Plugins may keep using `run(inputs, ctx)` and let the default adapter execute items
-one by one inside the batch, or implement `run_batch(items, ctx)` when shared setup
-is valuable. When a workflow only implements `run_batch(items, ctx)`, normal
-single-item execution still routes through that hook with a one-item batch.
+The scheduler considers every non-fanout request for batching. `batch_profile`
+overrides the scheduler defaults for compatible grouping, maximum size, maximum
+wait, and memory scaling. It does not force authors to implement a special hook:
+plugins may keep using `run(inputs, ctx)` and let the default adapter execute
+items one by one inside the batch, or implement `run_batch(items, ctx)` when
+shared setup is valuable. When a workflow only implements `run_batch(items, ctx)`,
+normal single-item execution still routes through that hook with a one-item batch.
 
 ## Output Registration
 

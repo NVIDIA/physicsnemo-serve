@@ -80,28 +80,27 @@ Use the same pattern for every plugin:
 2. `prefetch`
    - Rust stage
    - materializes `prefetch_plan`
-3. `batch`
-   - Rust stage
-   - groups compatible requests by `batch_profile`
-4. `fanout`
+3. `fanout`
    - Rust stage
    - expands one parent run into many child runs from `fanout_items`
-5. `schedule`
+4. `schedule`
    - Rust stage
    - matches `resource_profile` to worker capabilities
-6. `execute`
+   - considers non-fanout requests for scheduler-owned batching
+   - uses `batch_profile` as an optional override for grouping, size, wait, and memory scaling
+5. `execute`
    - Python worker
    - runs `execute(ctx)` for low-level hooks, or the typed SDK `run(inputs, ctx)` / `run_batch(items, ctx)` paths
    - older plugins may still provide `execute_batch(items, ctx)` directly
    - cacheable workflows may reuse one workflow instance per Python worker process
-7. `collect`
+6. `collect`
    - Rust stage
    - recombines child results for a parent run
-8. `postprocess`
+7. `postprocess`
    - Rust stage
    - invokes Python `postprocess(ctx)` when present
    - applies built-in `result_ops`
-9. `results`
+8. `results`
    - Rust terminal persistence stage
 
 ## Model Warmup And Cache
@@ -141,6 +140,8 @@ The scheduler is responsible for:
 - respecting `gpus_required`, memory, and tags
 - fairness and requeue behavior
 - `fanout_profile.max_in_flight` limits for child runs
+- scheduler-owned request batching for non-fanout requests, including single-GPU
+  capacity checks and per-GPU stream dispatch
 
 FIFO is only a queue-ingestion default. The scheduler should avoid letting one parent run or one workload shape monopolize capacity.
 

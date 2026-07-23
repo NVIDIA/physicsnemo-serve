@@ -821,13 +821,13 @@ mod tests {
     }
 
     #[test]
-    fn test_lua_forward_many_script_acks_once_and_rolls_back_on_ack_failure() {
+    fn test_lua_forward_many_script_acks_all_sources_and_rolls_back_on_ack_failure() {
         assert!(
             LUA_FORWARD_MANY.contains("local acked = redis.call('XACK'"),
             "forward_many script must capture XACK result"
         );
         assert!(
-            LUA_FORWARD_MANY.contains("acked ~= 1"),
+            LUA_FORWARD_MANY.contains("acked ~= source_count"),
             "forward_many script must fail closed on ack mismatch"
         );
         assert!(

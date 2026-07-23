@@ -9,7 +9,6 @@ use std::sync::Arc;
 
 use anyhow::{Result, anyhow};
 use scicomp_rq::QueueManager;
-use serde::Deserialize;
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
 
@@ -43,40 +42,6 @@ pub(crate) fn is_reservation_blocked_error(error: &anyhow::Error) -> bool {
     error.downcast_ref::<ReservationBlockedError>().is_some()
 }
 
-/// GPU scheduling strategy.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum SchedulingStrategy {
-    BestFit,
-    #[default]
-    RoundRobin,
-}
-
-impl<'de> Deserialize<'de> for SchedulingStrategy {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let raw = String::deserialize(deserializer)?;
-        SchedulingStrategy::parse(&raw).map_err(serde::de::Error::custom)
-    }
-}
-
-impl SchedulingStrategy {
-    /// Parse from a config string, rejecting unknown values.
-    ///
-    /// Valid values (case-insensitive): `best_fit`, `round_robin`, `roundrobin`.
-    pub fn parse(s: &str) -> Result<Self> {
-        match s.to_lowercase().as_str() {
-            "best_fit" | "bestfit" => Ok(Self::BestFit),
-            "round_robin" | "roundrobin" => Ok(Self::RoundRobin),
-            _ => Err(anyhow!(
-                "unknown scheduling strategy '{}'; valid options: best_fit, round_robin",
-                s
-            )),
-        }
-    }
-}
-
 /// In-memory view of discovered resource inventory.
 #[derive(Clone)]
 pub struct ResourceReservationTable {
@@ -86,48 +51,37 @@ pub struct ResourceReservationTable {
     reserved_memory: Arc<dyn ReservedMemoryStore>,
     /// Percent of each GPU's total memory that the scheduler may allocate.
     memory_utilization_percent: u64,
-    /// Placement strategy used when choosing among matching workers.
-    strategy: SchedulingStrategy,
     /// Round-robin cursor used to rotate the ordered candidate list between requests.
     rr_cursor: Arc<std::sync::Mutex<usize>>,
-    /// Serializes the full reserve/release accounting flow against the durable
-    /// counters so concurrent requests cannot admit against the same stale snapshot.
+    /// Serializes placement and durable accounting updates within this scheduler.
     reservation_flow_lock: Arc<Mutex<()>>,
 }
 
 impl ResourceReservationTable {
-    pub fn new(
-        qm: QueueManager,
-        memory_utilization_percent: u64,
-        strategy: SchedulingStrategy,
-    ) -> Self {
+    pub fn new(qm: QueueManager, memory_utilization_percent: u64) -> Self {
         Self::with_store(
             memory_utilization_percent,
-            strategy,
             Arc::new(RedisReservedMemoryStore::new(qm)),
         )
     }
 
     fn with_store(
         memory_utilization_percent: u64,
-        strategy: SchedulingStrategy,
         reserved_memory: Arc<dyn ReservedMemoryStore>,
     ) -> Self {
         Self {
             resource_map: Arc::new(Mutex::new(HashMap::new())),
             reserved_memory,
             memory_utilization_percent,
-            strategy,
             rr_cursor: Arc::new(std::sync::Mutex::new(0)),
             reservation_flow_lock: Arc::new(Mutex::new(())),
         }
     }
 
     #[cfg(test)]
-    fn new_for_tests(memory_utilization_percent: u64, strategy: SchedulingStrategy) -> Self {
+    fn new_for_tests(memory_utilization_percent: u64) -> Self {
         Self::with_store(
             memory_utilization_percent,
-            strategy,
             Arc::new(InMemoryReservedMemoryStore::default()),
         )
     }
@@ -217,35 +171,62 @@ impl ResourceReservationTable {
         self.resource_map.lock().await.len()
     }
 
-    /// Reserve GPUs for a schedule payload using the configured strategy.
-    ///
-    /// Returns selected GPU ids when enough resources are available.
-    pub async fn reserve(&self, payload: &mut SchedulePayload) -> Result<Vec<ReservedResource>> {
-        // Serialize the read-select-increment flow so two concurrent reservations
-        // do not choose from the same pre-increment reserved-memory snapshot.
-        let _reservation_flow_guard = self.reservation_flow_lock.lock().await;
-
+    async fn prepare_resource_requirements(
+        &self,
+        payload: &mut SchedulePayload,
+    ) -> Result<(usize, u64, ResourceConfigSource, Vec<ResourceInfo>)> {
         let (gpus_required, memory_mb, config_source) = resolve_resource_config(payload)?;
-        let resources = {
-            let map = self.resource_map.lock().await;
-            map.values().cloned().collect::<Vec<_>>()
-        };
-        // Known-profile fallback is only safe when all matching workers share one capability group.
-        if matches!(config_source, ResourceConfigSource::KnownProfileFallback) {
-            ensure_uniform_worker_capabilities(payload.workflow.as_str(), resources.iter())?;
-        }
 
         payload.gpus_required = gpus_required;
         payload.memory_mb = memory_mb;
 
-        let needed_gpus = payload.gpus_required;
-        let needed_memory_mb = payload.memory_mb;
+        let resources = {
+            let map = self.resource_map.lock().await;
+            map.values().cloned().collect::<Vec<_>>()
+        };
+        if matches!(config_source, ResourceConfigSource::KnownProfileFallback) {
+            ensure_uniform_worker_capabilities(payload.workflow.as_str(), resources.iter())?;
+        }
+
+        Ok((gpus_required, memory_mb, config_source, resources))
+    }
+
+    /// Check whether a scheduler-formed batch fits memory on an eligible GPU.
+    ///
+    /// This preflight uses configured GPU capacity to decide how large a batch
+    /// may be. Current reservations are enforced later during placement.
+    pub(super) async fn batch_can_fit_memory(&self, payload: &mut SchedulePayload) -> Result<bool> {
+        let (_gpus_required, _memory_mb, _config_source, resources) =
+            self.prepare_resource_requirements(payload).await?;
+
+        // Batch formation only needs to know whether an eligible GPU has enough
+        // configured capacity. Current reservations are enforced during placement.
+        Ok(resources.into_iter().any(|resource| {
+            matches!(
+                resource_eligibility_for_request(
+                    &resource,
+                    payload,
+                    self.memory_utilization_percent
+                ),
+                ResourceEligibility::Available
+            )
+        }))
+    }
+
+    /// Reserve GPUs for a schedule payload using round-robin placement.
+    ///
+    /// Returns selected GPU ids when enough resources are available.
+    pub async fn reserve(&self, payload: &mut SchedulePayload) -> Result<Vec<ReservedResource>> {
+        // Keep placement and accounting updates ordered within this scheduler.
+        let _reservation_flow_guard = self.reservation_flow_lock.lock().await;
+
+        let (needed_gpus, needed_memory_mb, config_source, resources) =
+            self.prepare_resource_requirements(payload).await?;
         let limit = self.memory_utilization_percent;
         debug!(
             run_id = %payload.run_id,
             workflow = %payload.workflow,
             config_source = ?config_source,
-            strategy = ?self.strategy,
             requested_gpus = payload.gpus_required,
             needed_workers = needed_gpus,
             requested_memory_mb = needed_memory_mb,
@@ -253,90 +234,28 @@ impl ResourceReservationTable {
             "attempting worker reservation"
         );
 
-        let candidates = select_candidate_resources(&resources, payload, limit, needed_gpus)?;
+        let mut candidates = select_candidate_resources(&resources, payload, limit, needed_gpus)?;
+        debug!(
+            run_id = %payload.run_id,
+            workflow = %payload.workflow,
+            matching_candidate_count = candidates.len(),
+            "round-robin candidate evaluation complete"
+        );
+        candidates.sort_by_key(|candidate| candidate.resource_id);
+        {
+            let mut cursor = self
+                .rr_cursor
+                .lock()
+                .map_err(|_| anyhow!("rr_cursor poisoned"))?;
+            let offset = *cursor % candidates.len();
+            candidates.rotate_left(offset);
+            *cursor = cursor.wrapping_add(needed_gpus);
+        }
 
-        let candidates: Vec<ResourceInfo> = match self.strategy {
-            SchedulingStrategy::BestFit => {
-                let resource_ids: Vec<u32> = candidates
-                    .iter()
-                    .map(|resource| resource.resource_id)
-                    .collect();
-                let reserved_memory_by_resource =
-                    self.reserved_memory.get_many(&resource_ids).await?;
-
-                let matching_candidate_count = candidates.len();
-                // Admission uses a conservative view of pressure per resource: take the
-                // higher of live discovery usage and the durable scheduler-accounted
-                // usage, then subtract that from the usable-memory budget.
-                let mut candidates: Vec<(ResourceInfo, u64)> = candidates
-                    .into_iter()
-                    .map(|resource| {
-                        let reserved_memory_mb = reserved_memory_by_resource
-                            .get(&resource.resource_id)
-                            .copied()
-                            .unwrap_or(0);
-                        let available_memory_mb =
-                            available_memory_mb(&resource, reserved_memory_mb, limit);
-                        (resource, available_memory_mb)
-                    })
-                    .collect();
-                candidates
-                    .retain(|(_, available_memory_mb)| *available_memory_mb >= needed_memory_mb);
-                debug!(
-                    run_id = %payload.run_id,
-                    workflow = %payload.workflow,
-                    matching_candidate_count,
-                    memory_candidate_count = candidates.len(),
-                    "reservation candidate evaluation complete"
-                );
-                if candidates.len() < needed_gpus {
-                    info!(
-                        run_id = %payload.run_id,
-                        workflow = %payload.workflow,
-                        matching_candidate_count,
-                        memory_candidate_count = candidates.len(),
-                        needed_workers = needed_gpus,
-                        requested_memory_mb = needed_memory_mb,
-                        "reservation blocked because matching workers did not have enough available memory"
-                    );
-                    return Err(ReservationBlockedError.into());
-                }
-
-                candidates.sort_by_key(|(resource, available_memory_mb)| {
-                    (*available_memory_mb, resource.resource_id)
-                });
-                candidates
-                    .into_iter()
-                    .map(|(resource, _available_memory_mb)| resource)
-                    .collect()
-            }
-            SchedulingStrategy::RoundRobin => {
-                let mut candidates = candidates;
-                debug!(
-                    run_id = %payload.run_id,
-                    workflow = %payload.workflow,
-                    matching_candidate_count = candidates.len(),
-                    "round-robin candidate evaluation complete without available-memory filtering"
-                );
-                candidates.sort_by_key(|candidate| candidate.resource_id);
-                let mut cursor = self
-                    .rr_cursor
-                    .lock()
-                    .map_err(|_| anyhow!("rr_cursor poisoned"))?;
-                let offset = *cursor % candidates.len();
-                candidates.rotate_left(offset);
-                *cursor = cursor.wrapping_add(needed_gpus);
-                candidates
-            }
-        };
-
-        let mut selected_gpu_ids = Vec::with_capacity(needed_gpus);
         let mut reserved_resource_ids: Vec<u32> = Vec::with_capacity(needed_gpus);
+        let mut selected_gpu_ids = Vec::with_capacity(needed_gpus);
         for candidate in &candidates[..needed_gpus] {
             let resource_id = candidate.resource_id;
-            // Commit the reservation against a floor of the currently observed
-            // used memory so newly admitted work is added on top of existing
-            // live pressure instead of being hidden by it.
             let updated_accounted_memory_mb = match self
                 .reserved_memory
                 .reserve(resource_id, candidate.used_memory_mb, needed_memory_mb)
@@ -344,10 +263,10 @@ impl ResourceReservationTable {
             {
                 Ok(updated) => updated,
                 Err(error) => {
-                    for reserved_resource_id in reserved_resource_ids {
+                    for reserved_resource_id in &reserved_resource_ids {
                         let _ = self
                             .reserved_memory
-                            .decrement(reserved_resource_id, needed_memory_mb)
+                            .decrement(*reserved_resource_id, needed_memory_mb)
                             .await;
                     }
                     return Err(error);
@@ -370,7 +289,6 @@ impl ResourceReservationTable {
                     updated_accounted_memory_mb,
                     limit,
                 ),
-                strategy = ?self.strategy,
                 "reserved worker capacity"
             );
         }
@@ -387,8 +305,7 @@ impl ResourceReservationTable {
 
     /// Release reserved memory from a resource id.
     pub(super) async fn release(&self, resource_id: u32, memory_mb: u64) -> Result<()> {
-        // Serialize the decrement with the same flow lock used by reserve() so
-        // releases and new admissions observe a consistent reserved-memory view.
+        // Serialize accounting updates with reserve().
         let _reservation_flow_guard = self.reservation_flow_lock.lock().await;
         let resource = {
             let map = self.resource_map.lock().await;
@@ -426,12 +343,12 @@ impl ResourceReservationTable {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ResourceConfigSource {
+pub(super) enum ResourceConfigSource {
     ExplicitProfile,
     KnownProfileFallback,
 }
 
-fn resolve_resource_config(
+pub(super) fn resolve_resource_config(
     payload: &mut SchedulePayload,
 ) -> Result<(usize, u64, ResourceConfigSource)> {
     if let Some(profile) = payload.resource_profile.as_ref() {
@@ -703,15 +620,7 @@ mod tests {
     use serde_json::json;
 
     fn table_with_gpus(gpus: Vec<ResourceInfo>) -> ResourceReservationTable {
-        table_with_gpus_strategy(gpus, SchedulingStrategy::BestFit)
-    }
-
-    fn table_with_gpus_strategy(
-        gpus: Vec<ResourceInfo>,
-        strategy: SchedulingStrategy,
-    ) -> ResourceReservationTable {
-        let mut table =
-            ResourceReservationTable::new_for_tests(DEFAULT_MEMORY_UTILIZATION_PERCENT, strategy);
+        let mut table = ResourceReservationTable::new_for_tests(DEFAULT_MEMORY_UTILIZATION_PERCENT);
         let resource_map = gpus
             .iter()
             .cloned()
@@ -725,8 +634,7 @@ mod tests {
         gpus: Vec<ResourceInfo>,
         percent: u64,
     ) -> ResourceReservationTable {
-        let mut table =
-            ResourceReservationTable::new_for_tests(percent, SchedulingStrategy::BestFit);
+        let mut table = ResourceReservationTable::new_for_tests(percent);
         let resource_map = gpus
             .iter()
             .cloned()
@@ -743,6 +651,7 @@ mod tests {
             workflow_id: None,
             parent_run_id: None,
             fanout_profile: None,
+            batch_profile: None,
             raw_payload: json!({ "workflow": workflow }),
             resource_profile: Some(ScheduleResourceProfile {
                 gpus_required: Some(1),
@@ -819,7 +728,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reserve_best_fit_selects_smallest_sufficient_gpu() {
+    async fn reserve_round_robin_starts_with_lowest_resource_id() {
         let table = table_with_gpus(vec![gpu(0, "gpu:0", 30_000, 0), gpu(1, "gpu:1", 50_000, 0)]);
 
         let mut msg = payload_with_resource_profile("run-1", "__unknown_workflow__", 1, 20_000);
@@ -831,7 +740,7 @@ mod tests {
                 stream_name: "gpu:0".to_string(),
                 resource_id: 0,
             }],
-            "best-fit should pick tighter GPU first"
+            "round-robin should start with the lowest resource id"
         );
         assert_eq!(msg.gpus_required, 1);
         assert_eq!(msg.memory_mb, 20_000);
@@ -840,7 +749,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reserve_best_fit_returns_error_when_all_gpus_too_small() {
+    async fn reserve_returns_error_when_all_gpus_too_small() {
         let table = table_with_gpus(vec![
             gpu(0, "gpu:0", 20_000, 0),
             gpu(1, "gpu:1", 23_000, 5_000),
@@ -866,7 +775,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reserve_adds_new_reservations_on_top_of_existing_observed_usage() {
+    async fn reserve_allows_multiple_requests_on_the_same_gpu_stream() {
         let table = table_with_gpus(vec![gpu(0, "gpu:0", 40_000, 20_000)]);
 
         let mut first = payload_with_resource_profile("run-1", "__unknown_workflow__", 1, 10_000);
@@ -879,15 +788,16 @@ mod tests {
         );
 
         let mut second = payload_with_resource_profile("run-2", "__unknown_workflow__", 1, 15_000);
-        let error = table.reserve(&mut second).await.unwrap_err();
-        assert!(
-            is_reservation_blocked_error(&error),
-            "admission should block once observed usage plus reserved memory exceeds availability"
+        table.reserve(&mut second).await.unwrap();
+        assert_eq!(
+            table.used_memory_mb(0).await,
+            Some(45_000),
+            "queued requests should accumulate active accounting"
         );
     }
 
     #[tokio::test]
-    async fn reserve_keeps_admission_blocked_when_discovery_drops_below_durable_accounted_usage() {
+    async fn reserve_preserves_accounted_usage_when_discovery_reports_less() {
         let table = table_with_gpus(vec![gpu(0, "gpu:0", 40_000, 20_000)]);
 
         let mut first = payload_with_resource_profile("run-1", "__unknown_workflow__", 1, 10_000);
@@ -908,10 +818,11 @@ mod tests {
         );
 
         let mut second = payload_with_resource_profile("run-2", "__unknown_workflow__", 1, 5_000);
-        let error = table.reserve(&mut second).await.unwrap_err();
-        assert!(
-            is_reservation_blocked_error(&error),
-            "admission should remain blocked while durable accounted usage still exceeds availability"
+        table.reserve(&mut second).await.unwrap();
+        assert_eq!(
+            table.used_memory_mb(0).await,
+            Some(35_000),
+            "new reservations should build on durable accounted usage"
         );
     }
 
@@ -1011,7 +922,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reserve_keeps_matching_worker_memory_shortage_as_blocked_error() {
+    async fn reserve_allows_queueing_on_a_busy_matching_worker() {
         let table = table_with_gpus(vec![worker(
             0,
             "execute.python.gpu.demo",
@@ -1029,10 +940,13 @@ mod tests {
             tags: Some(vec!["demo".to_string(), "gpu".to_string()]),
         });
 
-        let error = table.reserve(&mut msg).await.unwrap_err();
-        assert!(
-            is_reservation_blocked_error(&error),
-            "memory pressure on otherwise compatible workers should remain blocked"
+        let selected = table.reserve(&mut msg).await.unwrap();
+        assert_eq!(
+            selected,
+            vec![ReservedResource {
+                stream_name: "execute.python.gpu.demo".to_string(),
+                resource_id: 0,
+            }]
         );
     }
 
@@ -1493,10 +1407,7 @@ mod tests {
 
     #[tokio::test]
     async fn sync_from_discovery_update_deduplicates_by_resource_id() {
-        let table = ResourceReservationTable::new_for_tests(
-            DEFAULT_MEMORY_UTILIZATION_PERCENT,
-            SchedulingStrategy::BestFit,
-        );
+        let table = ResourceReservationTable::new_for_tests(DEFAULT_MEMORY_UTILIZATION_PERCENT);
         table
             .sync_from_discovery_update(DiscoveryUpdate::Authoritative(vec![
                 gpu(0, "gpu:pod-a:0", 32_000, 0),
@@ -1516,7 +1427,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reserve_best_fit_respects_custom_memory_limit() {
+    async fn reserve_respects_custom_memory_limit() {
         // GPU has 10000 total. With limit=40% => usable=4000, needs 5000 => should fail.
         let table = table_with_gpus_and_limit(vec![gpu(0, "gpu:0", 10_000, 0)], 40);
         let mut p1 = payload_with_resource_profile("run-1", "wf", 1, 5_000);
@@ -1536,37 +1447,6 @@ mod tests {
         );
     }
 
-    // --- PR-054: unknown strategy strings are rejected ---
-
-    #[test]
-    fn from_str_config_rejects_unknown_strategy() {
-        let result = SchedulingStrategy::parse("best_fti");
-        assert!(result.is_err(), "typo 'best_fti' should be rejected");
-        let err_msg = result.unwrap_err().to_string();
-        assert!(
-            err_msg.contains("best_fit") && err_msg.contains("round_robin"),
-            "error should list valid options, got: {err_msg}"
-        );
-    }
-
-    #[test]
-    fn from_str_config_accepts_known_strategies() {
-        assert_eq!(
-            SchedulingStrategy::parse("best_fit").unwrap(),
-            SchedulingStrategy::BestFit
-        );
-        assert_eq!(
-            SchedulingStrategy::parse("round_robin").unwrap(),
-            SchedulingStrategy::RoundRobin
-        );
-        assert_eq!(
-            SchedulingStrategy::parse("RoundRobin").unwrap(),
-            SchedulingStrategy::RoundRobin
-        );
-    }
-
-    // --- PR-004: round-robin strategy ---
-
     #[tokio::test]
     async fn round_robin_cycles_through_gpus() {
         let gpus = vec![
@@ -1574,7 +1454,7 @@ mod tests {
             gpu(1, "gpu:1", 40_000, 0),
             gpu(2, "gpu:2", 40_000, 0),
         ];
-        let table = table_with_gpus_strategy(gpus, SchedulingStrategy::RoundRobin);
+        let table = table_with_gpus(gpus);
 
         let mut p1 = payload_with_resource_profile("r1", "wf", 1, 1_000);
         let ids1 = table.reserve(&mut p1).await.unwrap();
@@ -1590,11 +1470,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn round_robin_ignores_gpu_memory_pressure() {
-        let table = table_with_gpus_strategy(
-            vec![gpu(0, "gpu:0", 40_000, 39_000)],
-            SchedulingStrategy::RoundRobin,
-        );
+    async fn round_robin_ignores_current_gpu_memory_pressure() {
+        let table = table_with_gpus(vec![
+            gpu(0, "gpu:0", 40_000, 39_000),
+            gpu(1, "gpu:1", 40_000, 0),
+        ]);
 
         let mut payload = payload_with_resource_profile("r1", "wf", 1, 20_000);
         let selected = table.reserve(&mut payload).await.unwrap();
@@ -1610,10 +1490,7 @@ mod tests {
 
     #[tokio::test]
     async fn round_robin_rejects_gpus_below_total_memory_requirement() {
-        let table = table_with_gpus_strategy(
-            vec![gpu(0, "gpu:0", 10_000, 0)],
-            SchedulingStrategy::RoundRobin,
-        );
+        let table = table_with_gpus(vec![gpu(0, "gpu:0", 10_000, 0)]);
 
         let mut payload = payload_with_resource_profile("r1", "wf", 1, 20_000);
         let error = table.reserve(&mut payload).await.unwrap_err();
@@ -1622,7 +1499,7 @@ mod tests {
             error
                 .to_string()
                 .contains("not enough workers can satisfy the requested requirements"),
-            "round-robin should still reject workers whose total usable memory is too small"
+            "round-robin should reject workers whose total usable memory is too small"
         );
     }
 }

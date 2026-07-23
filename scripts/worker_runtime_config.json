@@ -5,7 +5,6 @@
   "streams": [
     "prepare",
     "fanout",
-    "batch",
     "prefetch",
     "schedule",
     "release",
@@ -36,18 +35,6 @@
       "inputs": [
         {
           "stream": "fanout",
-          "max_dequeue_items": 4,
-          "poll_interval_ms": 100,
-          "block_ms": 1000,
-          "reclaim_idle_ms": 60000
-        }
-      ],
-      "outputs": []
-    },
-    "batch": {
-      "inputs": [
-        {
-          "stream": "batch",
           "max_dequeue_items": 4,
           "poll_interval_ms": 100,
           "block_ms": 1000,
@@ -87,9 +74,11 @@
       ],
       "outputs": [],
       "config": {
-        "scheduling_strategy": "round_robin",
         "memory_utilization_percent": 90,
-        "gpu_discovery_interval_secs": 60
+        "gpu_discovery_interval_secs": 60,
+        "batching_enabled": true,
+        "max_batch_size": 4,
+        "max_batch_wait_ms": 200
       }
     },
     "collect": {

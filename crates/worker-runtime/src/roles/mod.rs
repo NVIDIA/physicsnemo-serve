@@ -3,7 +3,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-pub mod batch;
 pub mod collect;
 pub mod fanout;
 pub mod parent_run_state;
@@ -86,13 +85,6 @@ pub fn build_role(env: &RoleEnv, providers: RoleProviders) -> Result<RoleBuildRe
             };
             Ok((Box::new(role), tasks))
         }
-        "batch" => {
-            let (role, tasks) = match providers.queue_manager {
-                Some(qm) => batch::BatchRole::from_env_with_queue_manager(env, qm)?,
-                None => batch::BatchRole::from_env(env)?,
-            };
-            Ok((Box::new(role), tasks))
-        }
         "fanout" => {
             let (role, tasks) = match providers.queue_manager {
                 Some(qm) => fanout::FanoutRole::from_env_with_queue_manager(env, qm)?,
@@ -138,7 +130,7 @@ pub fn build_role(env: &RoleEnv, providers: RoleProviders) -> Result<RoleBuildRe
             Ok((Box::new(role), vec![]))
         }
         unknown => Err(anyhow!(
-            "unknown role '{}': expected batch, collect, fanout, prepare, postprocess, prefetch, publish, scheduler, or results",
+            "unknown role '{}': expected collect, fanout, prepare, postprocess, prefetch, publish, scheduler, or results",
             unknown
         )),
     }
@@ -208,15 +200,6 @@ mod tests {
         let (role, tasks) = build_role(&env, RoleProviders::empty()).unwrap();
         assert_eq!(role.name(), "prepare");
         assert!(tasks.is_empty());
-    }
-
-    #[test]
-    fn build_role_creates_batch() {
-        let env = env_for("batch", &["schedule"]);
-        let (role, tasks) = build_role(&env, RoleProviders::empty()).unwrap();
-        assert_eq!(role.name(), "batch");
-        assert_eq!(tasks.len(), 1);
-        assert_eq!(tasks[0].name(), "batch_flush");
     }
 
     #[test]

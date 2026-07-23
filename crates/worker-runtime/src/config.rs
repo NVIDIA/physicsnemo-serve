@@ -10,7 +10,7 @@ use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
 
 use crate::roles::scheduler::{
-    DEFAULT_GPU_DISCOVERY_INTERVAL_SECS, DEFAULT_MEMORY_UTILIZATION_PERCENT, SchedulingStrategy,
+    DEFAULT_GPU_DISCOVERY_INTERVAL_SECS, DEFAULT_MEMORY_UTILIZATION_PERCENT,
 };
 use crate::traits::RoleEnv;
 
@@ -81,23 +81,25 @@ pub struct SchedulerRoleConfig {
     /// Redis key for the GPU registry hash (default: `gpu:registry`).
     #[serde(default = "default_gpu_registry_key")]
     pub gpu_registry_key: String,
-    /// Scheduling strategy (default: `round_robin`).
-    #[serde(default = "default_scheduling_strategy")]
-    pub scheduling_strategy: SchedulingStrategy,
     /// Memory utilization cap as a percentage of total GPU memory (default: 80).
     #[serde(default = "default_memory_utilization_percent")]
     pub memory_utilization_percent: u64,
     /// GPU discovery refresh interval in seconds (default: 60).
     #[serde(default = "default_resource_discovery_interval_secs")]
     pub gpu_discovery_interval_secs: u64,
+    /// When true, the scheduler considers non-fanout requests for batching.
+    #[serde(default = "default_scheduler_batching_enabled")]
+    pub batching_enabled: bool,
+    /// Maximum number of compatible requests to place in one scheduler batch.
+    #[serde(default = "default_scheduler_max_batch_size")]
+    pub max_batch_size: usize,
+    /// Maximum age of the FIFO head before a partial scheduler batch is flushed.
+    #[serde(default = "default_scheduler_max_batch_wait_ms")]
+    pub max_batch_wait_ms: u64,
 }
 
 fn default_gpu_registry_key() -> String {
     "gpu:registry".to_string()
-}
-
-fn default_scheduling_strategy() -> SchedulingStrategy {
-    SchedulingStrategy::RoundRobin
 }
 
 fn default_memory_utilization_percent() -> u64 {
@@ -108,13 +110,27 @@ fn default_resource_discovery_interval_secs() -> u64 {
     DEFAULT_GPU_DISCOVERY_INTERVAL_SECS
 }
 
+fn default_scheduler_batching_enabled() -> bool {
+    true
+}
+
+fn default_scheduler_max_batch_size() -> usize {
+    4
+}
+
+fn default_scheduler_max_batch_wait_ms() -> u64 {
+    200
+}
+
 impl Default for SchedulerRoleConfig {
     fn default() -> Self {
         Self {
             gpu_registry_key: default_gpu_registry_key(),
-            scheduling_strategy: default_scheduling_strategy(),
             memory_utilization_percent: default_memory_utilization_percent(),
             gpu_discovery_interval_secs: default_resource_discovery_interval_secs(),
+            batching_enabled: default_scheduler_batching_enabled(),
+            max_batch_size: default_scheduler_max_batch_size(),
+            max_batch_wait_ms: default_scheduler_max_batch_wait_ms(),
         }
     }
 }
@@ -830,18 +846,21 @@ mod tests {
     fn scheduler_role_config_parses_from_json_value() {
         let value = serde_json::json!({
             "gpu_registry_key": "test:gpu:registry",
-            "scheduling_strategy": "round_robin"
+            "batching_enabled": true,
+            "max_batch_size": 8,
+            "max_batch_wait_ms": 25
         });
         let cfg: SchedulerRoleConfig = parse_role_config(Some(&value)).unwrap();
         assert_eq!(cfg.gpu_registry_key, "test:gpu:registry");
-        assert_eq!(cfg.scheduling_strategy, SchedulingStrategy::RoundRobin);
+        assert!(cfg.batching_enabled);
+        assert_eq!(cfg.max_batch_size, 8);
+        assert_eq!(cfg.max_batch_wait_ms, 25);
     }
 
     #[test]
     fn scheduler_role_config_defaults_when_none() {
         let cfg: SchedulerRoleConfig = parse_role_config(None).unwrap();
         assert_eq!(cfg.gpu_registry_key, "gpu:registry");
-        assert_eq!(cfg.scheduling_strategy, SchedulingStrategy::RoundRobin);
         assert_eq!(cfg.memory_utilization_percent, 80);
         assert_eq!(
             cfg.gpu_discovery_interval_secs,
@@ -854,7 +873,6 @@ mod tests {
         let value = serde_json::json!({});
         let cfg: SchedulerRoleConfig = parse_role_config(Some(&value)).unwrap();
         assert_eq!(cfg.gpu_registry_key, "gpu:registry");
-        assert_eq!(cfg.scheduling_strategy, SchedulingStrategy::RoundRobin);
         assert_eq!(
             cfg.gpu_discovery_interval_secs,
             DEFAULT_GPU_DISCOVERY_INTERVAL_SECS
@@ -865,25 +883,10 @@ mod tests {
     fn scheduler_role_config_ignores_unknown_fields() {
         let value = serde_json::json!({
             "gpu_registry_key": "gpu:registry",
-            "scheduling_strategy": "round_robin",
             "future_field": 42
         });
         let cfg: SchedulerRoleConfig = parse_role_config(Some(&value)).unwrap();
         assert_eq!(cfg.gpu_registry_key, "gpu:registry");
-        assert_eq!(cfg.scheduling_strategy, SchedulingStrategy::RoundRobin);
-    }
-
-    #[test]
-    fn scheduler_role_config_rejects_invalid_scheduling_strategy_string() {
-        let value = serde_json::json!({
-            "gpu_registry_key": "gpu:registry",
-            "scheduling_strategy": "best_fti"
-        });
-        let err = parse_role_config::<SchedulerRoleConfig>(Some(&value)).unwrap_err();
-        assert!(
-            format!("{err:#}").contains("unknown scheduling strategy"),
-            "expected scheduling strategy parse error, got: {err:#}"
-        );
     }
 
     #[test]

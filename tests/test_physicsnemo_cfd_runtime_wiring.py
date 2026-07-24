@@ -37,6 +37,7 @@ def test_cfd_image_uses_pinned_isolated_runtime_and_packages_plugins() -> None:
     assert "ARG PHYSICSNEMO_CFD_VERSION=0.0.2" in dockerfile
     assert "ARG PHYSICSNEMO_VERSION=2.1.1" in dockerfile
     assert "ARG PHYSICSNEMO_CFD_TORCH_VERSION=2.10.0+cu130" in dockerfile
+    assert "ARG PHYSICSNEMO_CFD_TORCH_SCATTER_VERSION=2.1.2+pt210cu130" in dockerfile
     assert 'python3.12 -m venv "$PHYSICSNEMO_CFD_VENV"' in dockerfile
     assert "python3.12 -m venv --system-site-packages" not in dockerfile
     assert "base image's 2.10 alpha build" in dockerfile
@@ -55,6 +56,12 @@ def test_cfd_image_uses_pinned_isolated_runtime_and_packages_plugins() -> None:
     assert "/tmp/physicsnemo-cfd-constraints.txt" in dockerfile
     assert '"torch==${PHYSICSNEMO_CFD_TORCH_VERSION}"' in dockerfile
     assert '"torchvision==${PHYSICSNEMO_CFD_TORCHVISION_VERSION}"' in dockerfile
+    assert '"torch-scatter==${PHYSICSNEMO_CFD_TORCH_SCATTER_VERSION}"' in dockerfile
+    assert "https://data.pyg.org/whl/torch-2.10.0+cu130.html" in dockerfile
+    assert (
+        'importlib.metadata.version("torch-scatter") == expected_torch_scatter'
+        in dockerfile
+    )
     assert (
         'Version(importlib.metadata.version("cupy-cuda13x")) < Version("14.0.0")'
         in dockerfile

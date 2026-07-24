@@ -180,6 +180,7 @@ ARG PHYSICSNEMO_CFD_VERSION=0.0.2
 ARG PHYSICSNEMO_VERSION=2.1.1
 ARG PHYSICSNEMO_CFD_TORCH_VERSION=2.10.0+cu130
 ARG PHYSICSNEMO_CFD_TORCHVISION_VERSION=0.25.0+cu130
+ARG PHYSICSNEMO_CFD_TORCH_SCATTER_VERSION=2.1.2+pt210cu130
 
 ENV PHYSICSNEMO_CFD_VENV=/opt/physicsnemo-cfd-venv \
     PHYSICSNEMO_CFD_PYTHON_EXECUTABLE=/opt/physicsnemo-cfd-venv/bin/python
@@ -231,6 +232,10 @@ RUN env -u PIP_CONSTRAINT "$PHYSICSNEMO_CFD_PYTHON_EXECUTABLE" -m pip install \
         --extra-index-url https://pypi.nvidia.com \
         "nvidia-physicsnemo[cu13]==${PHYSICSNEMO_VERSION}" \
         "nvidia-physicsnemo-cfd[gpu,evaluation-hf] @ git+https://github.com/NVIDIA/physicsnemo-cfd.git@${PHYSICSNEMO_CFD_COMMIT}" \
+    && env -u PIP_CONSTRAINT "$PHYSICSNEMO_CFD_PYTHON_EXECUTABLE" -m pip install --no-cache-dir \
+        --no-index \
+        --find-links "https://data.pyg.org/whl/torch-2.10.0+cu130.html" \
+        "torch-scatter==${PHYSICSNEMO_CFD_TORCH_SCATTER_VERSION}" \
     && "$PHYSICSNEMO_CFD_PYTHON_EXECUTABLE" -m pip check
 
 # Fail the image build if the requested source revision, versions, Python ABI,
@@ -240,7 +245,8 @@ RUN "$PHYSICSNEMO_CFD_PYTHON_EXECUTABLE" - \
         "$PHYSICSNEMO_CFD_VERSION" \
         "$PHYSICSNEMO_CFD_COMMIT" \
         "$PHYSICSNEMO_CFD_TORCH_VERSION" \
-        "$PHYSICSNEMO_CFD_TORCHVISION_VERSION" <<'PY'
+        "$PHYSICSNEMO_CFD_TORCHVISION_VERSION" \
+        "$PHYSICSNEMO_CFD_TORCH_SCATTER_VERSION" <<'PY'
 import importlib.metadata
 import importlib.util
 import json
@@ -250,14 +256,24 @@ import huggingface_hub
 import physicsnemo
 import physicsnemo.cfd
 import torch
+import torch_geometric
+import torch_scatter
 from packaging.version import Version
 
-expected_physicsnemo, expected_cfd, expected_commit, expected_torch, expected_torchvision = sys.argv[1:]
+(
+    expected_physicsnemo,
+    expected_cfd,
+    expected_commit,
+    expected_torch,
+    expected_torchvision,
+    expected_torch_scatter,
+) = sys.argv[1:]
 assert sys.version_info[:2] == (3, 12), sys.version
 assert physicsnemo.__version__ == expected_physicsnemo
 assert physicsnemo.cfd.__version__ == expected_cfd
 assert torch.__version__ == expected_torch
 assert importlib.metadata.version("torchvision") == expected_torchvision
+assert importlib.metadata.version("torch-scatter") == expected_torch_scatter
 assert torch.version.cuda == "13.0"
 
 distribution = importlib.metadata.distribution("nvidia-physicsnemo-cfd")
@@ -270,6 +286,8 @@ for package, module in (
     ("cupy-cuda13x", "cupy"),
     ("cuml-cu13", "cuml"),
     ("huggingface-hub", "huggingface_hub"),
+    ("torch-geometric", "torch_geometric"),
+    ("torch-scatter", "torch_scatter"),
 ):
     assert importlib.metadata.version(package)
     assert importlib.util.find_spec(module) is not None

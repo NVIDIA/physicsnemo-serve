@@ -213,6 +213,8 @@ developer:
       - physicsnemo_cfd_runtime.artifacts
       - yaml
       - physicsnemo.cfd.evaluation.benchmarks.run
+      - torch_geometric
+      - torch_scatter
     env:
       - name: PHYSICSNEMO_CFD_MODEL_CACHE
         required: false

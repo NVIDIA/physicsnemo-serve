@@ -162,6 +162,8 @@ def test_manifest_contains_complete_pinned_surface_contract():
         "physicsnemo_cfd_runtime.artifacts",
         "yaml",
         "physicsnemo.cfd.evaluation.benchmarks.run",
+        "torch_geometric",
+        "torch_scatter",
     ]
     assert "batch_size" not in manifest["ingress"]["json_schema_inline"]["properties"]
     request_properties = manifest["ingress"]["json_schema_inline"]["properties"]

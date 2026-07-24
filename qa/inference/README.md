@@ -86,6 +86,39 @@ Evidence is written under `QA_CFD_E2E_ARTIFACT_DIR` (default
 `artifacts/cfd-e2e`). The suite requires one compatible 80 GiB-class GPU,
 writable persistent `/outputs`, and outbound Hugging Face access.
 
+### Direct-provider parity
+
+The opt-in parity orchestrator first runs `cfd_e2e` through REST and persists a
+versioned handoff containing mount-relative input and report paths plus their
+digests. After the endpoint is torn down, it starts one same-image Lepton batch
+job. The job re-verifies the staged inputs, builds the checked-in provider
+configuration independently of the plugin's resolved config, invokes
+PhysicsNeMo-CFD directly, and compares the report structures and finite metric
+values symmetrically.
+
+```bash
+python -u qa/scripts/run_lepton_cfd_parity.py \
+  --image-tag <already-pushed-tag>
+```
+
+The endpoint and batch job run sequentially, so peak allocation remains one
+H100. Local evidence is under `qa/artifacts/cfd-parity/<run-id>` and remote
+evidence is under `/outputs/cfd-parity/<run-id>`. The default profile is
+`cfd_parity_surface_run1.json`; future surface or volume coverage is added by
+supplying another profile with its REST suite, direct runner module, input
+layout, provider config, and per-metric tolerances.
+
+Use `--profile qa/inference/cfd_parity_surface_run1_full_matrix.json` for the
+full `run_1` matrix: five surface models by five metrics, producing 25 unique
+model/case/metric selections. PhysicsNeMo-CFD expands vector and force metrics
+into 55 scalar report values; parity checks both per-case and summary scopes
+for 110 scalar comparisons.
+
+Pass `--rest-evidence-dir <completed-cfd-e2e-run>` to reuse a completed REST
+run and launch only the direct comparison job. The handoff stores no tokens and
+uses only mount-relative paths; the job rechecks report and input digests before
+execution.
+
 ## Multi-GPU CI/CD Check
 
 The `cicd` suite includes a Rust-only `multigpu` test. It reads visible GPU IDs
@@ -420,7 +453,7 @@ Useful flags:
 - `--lustre-dir`: subdirectory under `<NFS_MOUNT_BASE>/`; defaults to
   `crps_tests_<YYYYMMDD>`.
 - `--candidate-resource-shape`: Lepton shape for the PhysicsNeMo Serve candidate;
-  defaults to `gpu.8xh100-sxm`.
+  defaults to `gpu.4xh100-sxm`.
 - `--candidate-materialization-modes`: comma-separated PhysicsNeMo Serve fanout modes to
   compare against the Python baseline. Defaults to `scheduled_gpu,prepare_cpu`.
   Pass one mode, such as `scheduled_gpu`, for a single candidate run.

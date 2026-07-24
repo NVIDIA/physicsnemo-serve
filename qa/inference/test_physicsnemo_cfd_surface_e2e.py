@@ -18,9 +18,11 @@ import requests
 
 WORKFLOW_ID = "physicsnemo-cfd-surface-benchmark"
 REPO_ROOT = Path(__file__).resolve().parents[2]
-REQUEST_PATH = (
+DEFAULT_REQUEST_PATH = (
     REPO_ROOT / "plugins" / WORKFLOW_ID / "examples" / "public_run_1_request.json"
 )
+L2_PRESSURE_BASELINE = 0.16348028933450415
+L2_PRESSURE_MAX_RELATIVE_REGRESSION = 0.01
 EXPECTED_PIPELINE = ["prepare", "prefetch", "schedule", "execute", "results"]
 EXPECTED_PROVIDER = {
     "repository": "https://github.com/NVIDIA/physicsnemo-cfd.git",
@@ -37,6 +39,17 @@ EXPECTED_ARTIFACTS = {
     "resolved_config.json",
     "benchmark_diagnostics.json",
     "benchmark.log",
+}
+EXPECTED_METRIC_OUTPUTS = {
+    "l2_pressure": {"l2_pressure"},
+    "l2_shear_stress": {
+        "l2_shear_stress_wall_shear_stress_true_x_l2_error",
+        "l2_shear_stress_wall_shear_stress_true_y_l2_error",
+        "l2_shear_stress_wall_shear_stress_true_z_l2_error",
+    },
+    "l2_pressure_area_weighted": {"l2_pressure_area_weighted"},
+    "drag": {"drag_error", "drag_true", "drag_pred"},
+    "lift": {"lift_error", "lift_true", "lift_pred"},
 }
 TERMINAL_STATUSES = {"succeeded", "failed", "cancelled"}
 TERMINAL_STAGES = {"completed", "failed"}
@@ -61,6 +74,14 @@ def _positive_env_int(name: str, default: int) -> int:
     return value
 
 
+def _request_path() -> Path:
+    configured = os.environ.get("QA_CFD_E2E_REQUEST_PATH", "").strip()
+    if not configured:
+        return DEFAULT_REQUEST_PATH
+    path = Path(configured)
+    return path if path.is_absolute() else REPO_ROOT / path
+
+
 def _evidence_root(run_id: str) -> Path:
     configured = os.environ.get("QA_CFD_E2E_ARTIFACT_DIR", "").strip()
     root = Path(configured) if configured else Path("artifacts") / "cfd-e2e"
@@ -75,30 +96,140 @@ def _write_json(path: Path, payload: object) -> None:
     )
 
 
-def _assert_report(report: object) -> None:
-    assert isinstance(report, list) and len(report) == 1
-    row = report[0]
-    assert isinstance(row, dict)
-    assert row.get("skipped") is not True
-    assert row.get("model") == "domino_surface"
-    assert row.get("dataset") == "drivaerml"
-    assert row.get("cases") == ["run_1"]
+def _assert_l2_pressure(value: object) -> None:
+    actual = float(value)
+    assert math.isfinite(actual)
+    maximum = L2_PRESSURE_BASELINE * (1 + L2_PRESSURE_MAX_RELATIVE_REGRESSION)
+    assert actual <= maximum, (
+        f"l2_pressure regression: {actual} exceeds baseline "
+        f"{L2_PRESSURE_BASELINE} by more than "
+        f"{L2_PRESSURE_MAX_RELATIVE_REGRESSION:.0%}"
+    )
 
-    summary_metrics = row.get("metrics")
-    assert isinstance(summary_metrics, dict)
-    assert "l2_pressure" in summary_metrics
-    assert math.isfinite(float(summary_metrics["l2_pressure"]))
 
-    per_case = row.get("per_case")
-    assert isinstance(per_case, list) and len(per_case) == 1
-    assert per_case[0].get("case_id") == "run_1"
-    case_metrics = per_case[0].get("metrics")
-    assert isinstance(case_metrics, dict)
-    assert math.isfinite(float(case_metrics["l2_pressure"]))
+def _assert_finite_metric(value: object) -> None:
+    if isinstance(value, dict):
+        assert value
+        for component in value.values():
+            _assert_finite_metric(component)
+        return
+    assert not isinstance(value, bool)
+    assert math.isfinite(float(value))
+
+
+def _assert_report(report: object, request_payload: dict[str, object]) -> None:
+    models = request_payload["models"]
+    metrics = request_payload["metrics"]
+    cases = request_payload["cases"]
+    assert isinstance(models, list)
+    assert isinstance(metrics, list)
+    assert isinstance(cases, list)
+    case_ids = [case["case_id"] for case in cases]
+    assert isinstance(report, list) and len(report) == len(models)
+    expected_metric_outputs = set().union(
+        *(EXPECTED_METRIC_OUTPUTS[name] for name in metrics)
+    )
+    rows_by_model = {row.get("model"): row for row in report if isinstance(row, dict)}
+    assert set(rows_by_model) == set(models)
+
+    for model in models:
+        row = rows_by_model[model]
+        assert row.get("skipped") is not True
+        assert row.get("dataset") == "drivaerml"
+        assert row.get("cases") == case_ids
+
+        summary_metrics = row.get("metrics")
+        assert isinstance(summary_metrics, dict)
+        assert set(summary_metrics) == expected_metric_outputs
+        for name, value in summary_metrics.items():
+            _assert_finite_metric(value)
+            if (
+                model == "domino_surface"
+                and name == "l2_pressure"
+                and case_ids == ["run_1"]
+            ):
+                _assert_l2_pressure(value)
+
+        per_case = row.get("per_case")
+        assert isinstance(per_case, list) and len(per_case) == len(case_ids)
+        cases_by_id = {
+            case.get("case_id"): case for case in per_case if isinstance(case, dict)
+        }
+        assert set(cases_by_id) == set(case_ids)
+        for case_id in case_ids:
+            case_metrics = cases_by_id[case_id].get("metrics")
+            assert isinstance(case_metrics, dict)
+            assert set(case_metrics) == expected_metric_outputs
+            for name, value in case_metrics.items():
+                _assert_finite_metric(value)
+                if (
+                    model == "domino_surface"
+                    and case_id == "run_1"
+                    and name == "l2_pressure"
+                ):
+                    _assert_l2_pressure(value)
+
+
+def _expected_case_digests(request_payload: dict[str, object]) -> list[dict]:
+    cases = request_payload["cases"]
+    assert isinstance(cases, list)
+    keys = (
+        "case_id",
+        "sha256",
+        "size_bytes",
+        "geometry_sha256",
+        "geometry_size_bytes",
+    )
+    return [{key: case[key] for key in keys if key in case} for case in cases]
+
+
+def _submit_without_retry(
+    *,
+    base_url: str,
+    user_token: str,
+    request_payload: dict[str, object],
+    timeout: int,
+    warmup_attempts: int,
+) -> requests.Response:
+    try:
+        with requests.Session() as session:
+            session.headers.update(
+                {
+                    "Authorization": f"Bearer {user_token}",
+                    "Content-Type": "application/json",
+                }
+            )
+            warmup = None
+            last_warmup_error = None
+            for attempt in range(warmup_attempts):
+                try:
+                    warmup = session.get(
+                        base_url + "/readyz",
+                        timeout=min(timeout, 10),
+                    )
+                    break
+                except (requests.ConnectionError, requests.Timeout) as exc:
+                    last_warmup_error = exc
+                    if attempt + 1 < warmup_attempts:
+                        time.sleep(1)
+            if warmup is None:
+                assert last_warmup_error is not None
+                raise last_warmup_error
+            warmup.raise_for_status()
+            return session.post(
+                base_url + f"/v1/infer/{WORKFLOW_ID}/run",
+                json={"parameters": request_payload},
+                timeout=timeout,
+            )
+    except requests.RequestException as exc:
+        pytest.fail(
+            f"no-retry CFD submission transport failed: {type(exc).__name__}: {exc}",
+            pytrace=False,
+        )
 
 
 def test_physicsnemo_cfd_surface_public_run_1(client, user_token):
-    request_payload = json.loads(REQUEST_PATH.read_text(encoding="utf-8"))
+    request_payload = json.loads(_request_path().read_text(encoding="utf-8"))
 
     health = client.get(client.base_url + "/readyz")
     health.raise_for_status()
@@ -120,19 +251,18 @@ def test_physicsnemo_cfd_surface_public_run_1(client, user_token):
     assert readiness.get("workflow_id") == WORKFLOW_ID
     assert readiness.get("readiness", {}).get("ready") is True, readiness
 
-    # The shared QA client retries POST. A fresh default Session deliberately does
-    # not: this API has no idempotency key, so retrying could launch two GPU jobs.
+    # The shared QA client retries POST, so use a separate no-retry session: this
+    # API has no idempotency key and retrying could launch two GPU jobs. Warm that
+    # same session with a safe GET so the POST reuses an established TLS connection.
     submit_timeout = _positive_env_int("QA_CFD_E2E_SUBMIT_TIMEOUT_SECS", 300)
-    with requests.Session() as submit_session:
-        submit_response = submit_session.post(
-            client.base_url + f"/v1/infer/{WORKFLOW_ID}/run",
-            headers={
-                "Authorization": f"Bearer {user_token}",
-                "Content-Type": "application/json",
-            },
-            json={"parameters": request_payload},
-            timeout=submit_timeout,
-        )
+    warmup_attempts = _positive_env_int("QA_CFD_E2E_WARMUP_ATTEMPTS", 10)
+    submit_response = _submit_without_retry(
+        base_url=client.base_url,
+        user_token=user_token,
+        request_payload=request_payload,
+        timeout=submit_timeout,
+        warmup_attempts=warmup_attempts,
+    )
     assert submit_response.status_code == 202, submit_response.text
     submitted = submit_response.json()
     assert submitted.get("workflow") == WORKFLOW_ID
@@ -189,20 +319,14 @@ def test_physicsnemo_cfd_surface_public_run_1(client, user_token):
     assert primary_outputs[0].get("name") == "benchmark_results.json"
 
     payload = results["payload"]
-    assert payload.get("model_names") == ["domino_surface"]
-    assert payload.get("case_ids") == ["run_1"]
-    assert payload.get("selected_metrics") == ["l2_pressure"]
+    assert payload.get("model_names") == request_payload["models"]
+    assert payload.get("case_ids") == [
+        case["case_id"] for case in request_payload["cases"]
+    ]
+    assert payload.get("selected_metrics") == request_payload["metrics"]
     assert payload.get("provider") == EXPECTED_PROVIDER
     assert re.fullmatch(r"[0-9a-f]{64}", payload.get("preset_sha256", ""))
-    assert payload.get("case_digests") == [
-        {
-            "case_id": "run_1",
-            "sha256": "01d388402dad7a783db9c666ddb18e6db745aac16a3193c275e0726dd108bb40",
-            "size_bytes": 659606189,
-            "geometry_sha256": "411e6651284a26fc94924106b833fd79febc6deba63922c929dd8acfc99720d2",
-            "geometry_size_bytes": 142385186,
-        }
-    ]
+    assert payload.get("case_digests") == _expected_case_digests(request_payload)
     assert EXPECTED_ARTIFACTS <= set(payload.get("registered_artifact_names", []))
 
     downloaded: dict[str, bytes] = {}
@@ -223,4 +347,4 @@ def test_physicsnemo_cfd_surface_public_run_1(client, user_token):
     assert primary_response.content == downloaded["benchmark_results.json"]
 
     report = json.loads(downloaded["benchmark_results.json"])
-    _assert_report(report)
+    _assert_report(report, request_payload)

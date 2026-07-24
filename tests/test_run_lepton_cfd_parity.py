@@ -137,6 +137,7 @@ def _args(tmp_path: Path, evidence: Path) -> argparse.Namespace:
         image_tag="registry/image:tag",
         image_name="ignored",
         profile=str(PROFILE_PATH),
+        rest_request_path=None,
         rest_evidence_dir=str(evidence),
         run_id="parity-test",
         artifact_dir=str(tmp_path / "artifacts"),
@@ -175,6 +176,41 @@ def test_dry_run_persists_handoff_and_extensible_job_spec(tmp_path: Path) -> Non
     )
     assert len(summary["job"]["remote_command_sha256"]) == 64
     assert "physicsnemo-cfd-surface-domino-run1-v1" in json.dumps(summary)
+
+
+def test_rest_qa_uses_request_path_override(tmp_path: Path, monkeypatch) -> None:
+    profile = json.loads(PROFILE_PATH.read_text(encoding="utf-8"))
+    args = _args(tmp_path, _evidence(tmp_path))
+    request = tmp_path / "run-1-11.json"
+    request.write_text("{}", encoding="utf-8")
+    args.rest_request_path = str(request)
+    artifact_dir = tmp_path / "rest-qa"
+    evidence = artifact_dir / "cfd-e2e" / "rest-run"
+    for name in (
+        "request.json",
+        "results.json",
+        "resolved_config.json",
+        "benchmark_results.json",
+    ):
+        _write_json(evidence / name, {})
+
+    def fake_streaming(_command, *, env, artifact_path):
+        assert env["QA_CFD_E2E_REQUEST_PATH"] == str(request)
+        assert artifact_path == artifact_dir.parent / "rest-qa.log"
+        return 0, ""
+
+    monkeypatch.setattr(orchestrator, "run_streaming", fake_streaming)
+
+    assert (
+        orchestrator.run_rest_qa(
+            args,
+            profile=profile,
+            image="registry/image:tag",
+            artifact_dir=artifact_dir,
+            env={},
+        )
+        == evidence
+    )
 
 
 def test_remote_command_creates_fresh_root_and_uses_profile_runner() -> None:

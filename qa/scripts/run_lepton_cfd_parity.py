@@ -401,7 +401,7 @@ def run_rest_qa(
     env: dict[str, str],
 ) -> Path:
     rest = profile["rest"]
-    request_path = Path(str(rest["request_path"]))
+    request_path = Path(args.rest_request_path or str(rest["request_path"]))
     if not request_path.is_absolute():
         request_path = REPO_ROOT / request_path
     if not request_path.is_file():
@@ -722,6 +722,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--image-name", default=default_image)
     parser.add_argument("--profile", default=str(DEFAULT_PROFILE))
+    parser.add_argument(
+        "--rest-request-path",
+        help="Override the profile's REST request fixture without changing its direct config.",
+    )
     parser.add_argument("--rest-evidence-dir")
     parser.add_argument("--run-id")
     parser.add_argument(

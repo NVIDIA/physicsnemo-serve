@@ -20,6 +20,13 @@ FULL_REQUEST_PATH = (
     / "examples"
     / "public_run_1_full_matrix_request.json"
 )
+TWO_CASE_REQUEST_PATH = (
+    REPO_ROOT
+    / "plugins"
+    / "physicsnemo-cfd-surface-benchmark"
+    / "examples"
+    / "public_run_1_11_full_matrix_request.json"
+)
 
 
 def _load_e2e_module():
@@ -38,6 +45,7 @@ def _load_e2e_module():
 
 def _full_report(request: dict[str, object]) -> list[dict[str, object]]:
     rows = []
+    case_ids = [case["case_id"] for case in request["cases"]]
     for model in request["models"]:
         metrics = {
             "l2_pressure": 0.16,
@@ -56,14 +64,15 @@ def _full_report(request: dict[str, object]) -> list[dict[str, object]]:
             {
                 "model": model,
                 "dataset": "drivaerml",
-                "cases": ["run_1"],
+                "cases": case_ids,
                 "metrics": metrics,
                 "per_case": [
                     {
-                        "case_id": "run_1",
+                        "case_id": case_id,
                         "metrics": metrics,
                         "metric_dtype": "cell",
                     }
+                    for case_id in case_ids
                 ],
             }
         )
@@ -85,6 +94,13 @@ def test_full_matrix_report_contract_rejects_missing_metric() -> None:
 
     with pytest.raises(AssertionError):
         module._assert_report(report, request)
+
+
+def test_two_case_matrix_report_contract_accepts_run_11() -> None:
+    module = _load_e2e_module()
+    request = json.loads(TWO_CASE_REQUEST_PATH.read_text(encoding="utf-8"))
+
+    module._assert_report(_full_report(request), request)
 
 
 def test_e2e_request_path_can_be_selected_by_profile(

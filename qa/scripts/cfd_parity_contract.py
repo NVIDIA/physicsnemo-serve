@@ -42,7 +42,7 @@ def write_json_atomic(path: str | Path, payload: object) -> None:
     )
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as file:
-            json.dump(payload, file, indent=2, sort_keys=True)
+            json.dump(payload, file, indent=2, sort_keys=True, allow_nan=False)
             file.write("\n")
             file.flush()
             os.fsync(file.fileno())
@@ -790,12 +790,19 @@ def compare_reports(
         )
         rest_value = rest_values[key]
         direct_value = direct_values[key]
-        absolute_difference = abs(rest_value - direct_value)
-        relative_difference = (
-            absolute_difference / abs(rest_value)
-            if rest_value != 0
-            else (0.0 if direct_value == 0 else math.inf)
+        raw_absolute_difference = abs(rest_value - direct_value)
+        absolute_difference = (
+            raw_absolute_difference if math.isfinite(raw_absolute_difference) else None
         )
+        if rest_value == 0:
+            relative_difference = 0.0 if direct_value == 0 else None
+        else:
+            raw_relative_difference = raw_absolute_difference / abs(rest_value)
+            relative_difference = (
+                raw_relative_difference
+                if math.isfinite(raw_relative_difference)
+                else None
+            )
         matches = math.isclose(
             rest_value,
             direct_value,

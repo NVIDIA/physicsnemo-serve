@@ -25,6 +25,13 @@ FULL_REQUEST_PATH = (
     / "examples"
     / "public_run_1_full_matrix_request.json"
 )
+TWO_CASE_REQUEST_PATH = (
+    REPO_ROOT
+    / "plugins"
+    / "physicsnemo-cfd-surface-benchmark"
+    / "examples"
+    / "public_run_1_11_full_matrix_request.json"
+)
 sys.path.insert(0, str(SCRIPTS_DIR))
 
 import cfd_parity_contract as contract  # noqa: E402
@@ -270,6 +277,30 @@ def test_report_comparison_supports_bounded_per_model_nondeterminism() -> None:
     assert all(metric["rtol"] == 0.001 for metric in result["metrics"])
 
 
+def test_zero_baseline_relative_difference_is_json_null(tmp_path: Path) -> None:
+    result = contract.compare_reports(
+        rest_report=_report(0.0),
+        direct_report=_report(5e-7),
+        comparison=_profile()["comparison"],
+    )
+
+    assert result["status"] == "passed"
+    assert all(metric["relative_difference"] is None for metric in result["metrics"])
+    output = tmp_path / "comparison.json"
+    contract.write_json_atomic(output, result)
+    text = output.read_text(encoding="utf-8")
+    assert "Infinity" not in text
+    assert all(
+        metric["relative_difference"] is None for metric in json.loads(text)["metrics"]
+    )
+    both_zero = contract.compare_reports(
+        rest_report=_report(0.0),
+        direct_report=_report(0.0),
+        comparison=_profile()["comparison"],
+    )
+    assert all(metric["relative_difference"] == 0.0 for metric in both_zero["metrics"])
+
+
 def test_report_comparison_rejects_non_finite_metrics() -> None:
     with pytest.raises(contract.ParityContractError, match="must be finite"):
         contract.compare_reports(
@@ -374,3 +405,22 @@ def test_full_surface_profile_covers_25_model_metric_tuples() -> None:
         == 0.01
     )
     assert profile["comparison"]["models"]["xmgn_surface"]["default_rtol"] == 0.001
+
+
+def test_full_surface_profile_accepts_pinned_run_1_and_run_11() -> None:
+    profile = json.loads(FULL_PROFILE_PATH.read_text(encoding="utf-8"))
+    request = json.loads(TWO_CASE_REQUEST_PATH.read_text(encoding="utf-8"))
+
+    contract.validate_profile(profile)
+    contract.validate_request(profile, request)
+
+    assert [case["case_id"] for case in request["cases"]] == ["run_1", "run_11"]
+    assert (
+        len(request["models"]) * len(request["metrics"]) * len(request["cases"]) == 50
+    )
+    assert request["cases"][1]["sha256"] == (
+        "aec39be9198f2229fb80b04a1a30d049cb0d195bdb7df566e2520222c8af679e"
+    )
+    assert request["cases"][1]["geometry_sha256"] == (
+        "6ee0dc50946fda73b00a693dc2a74d1b0a8f3c37a6d5c4d8cd5cfb5bb25830a6"
+    )

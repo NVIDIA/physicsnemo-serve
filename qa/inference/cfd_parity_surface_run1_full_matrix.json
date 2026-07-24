@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "profile_id": "physicsnemo-cfd-surface-full-run1-v1",
+  "profile_id": "physicsnemo-cfd-surface-full-v1",
   "workflow_id": "physicsnemo-cfd-surface-benchmark",
   "domain": "surface",
   "provider": {

@@ -114,6 +114,18 @@ model/case/metric selections. PhysicsNeMo-CFD expands vector and force metrics
 into 55 scalar report values; parity checks both per-case and summary scopes
 for 110 scalar comparisons.
 
+Add the pinned `run_11` case without duplicating the model profile:
+
+```bash
+python -u qa/scripts/run_lepton_cfd_parity.py \
+  --image-tag <already-pushed-tag> \
+  --profile qa/inference/cfd_parity_surface_run1_full_matrix.json \
+  --rest-request-path plugins/physicsnemo-cfd-surface-benchmark/examples/public_run_1_11_full_matrix_request.json
+```
+
+This selects 50 model/case/metric combinations and compares 110 per-case plus
+55 summary scalar values.
+
 Pass `--rest-evidence-dir <completed-cfd-e2e-run>` to reuse a completed REST
 run and launch only the direct comparison job. The handoff stores no tokens and
 uses only mount-relative paths; the job rechecks report and input digests before

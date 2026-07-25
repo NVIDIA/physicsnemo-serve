@@ -210,6 +210,7 @@ jobs:
           LEPTON_WORKSPACE_ID: ${{ secrets.LEPTON_WORKSPACE_ID }}
           LEPTON_NODE_GROUP: ${{ secrets.LEPTON_NODE_GROUP }}
           LEPTON_PULL_SECRET: ${{ secrets.PULL_SECRET }}
+          LEPTON_HF_TOKEN_SECRET: ${{ vars.LEPTON_HF_TOKEN_SECRET }}
           NFS_MOUNT_BASE: ${{ vars.NFS_MOUNT_BASE }}
           DOCKER_REGISTRY: ${{ vars.NGC_REGISTRY }}/${{ secrets.NGC_ORG }}
           IMAGE_NAME: ${{ secrets.NGC_IMAGE }}
@@ -251,6 +252,7 @@ jobs:
           LEPTON_WORKSPACE_ID: ${{ secrets.LEPTON_WORKSPACE_ID }}
           LEPTON_NODE_GROUP: ${{ secrets.LEPTON_NODE_GROUP }}
           LEPTON_PULL_SECRET: ${{ secrets.PULL_SECRET }}
+          LEPTON_HF_TOKEN_SECRET: ${{ vars.LEPTON_HF_TOKEN_SECRET }}
           NFS_MOUNT_BASE: ${{ vars.NFS_MOUNT_BASE }}
           DOCKER_REGISTRY: ${{ vars.NGC_REGISTRY }}/${{ secrets.NGC_ORG }}
           IMAGE_NAME: ${{ secrets.NGC_IMAGE }}

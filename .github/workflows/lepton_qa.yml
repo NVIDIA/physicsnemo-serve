@@ -269,7 +269,8 @@ jobs:
           uv run --extra qa python -u qa/scripts/run_lepton_crps_compare.py \
             --candidate-image-tag "$FULL_IMAGE" \
             --candidate-service rust \
-            --baseline-service python
+            --baseline-service python \
+            --candidate-resource-shape gpu.4xh100-sxm
 
   # ─── Benchmark: submit batch job ───────────────────────────────────
   benchmark:

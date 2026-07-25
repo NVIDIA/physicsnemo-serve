@@ -757,6 +757,11 @@ def run(args: argparse.Namespace) -> int:
         "DEFAULT_OUTPUT_DIR": args.mount_target,
         "RESULTS_ZIP_DIR": args.mount_target,
     }
+    candidate_container_env = dict(shared_output_env)
+    if candidate.service == "rust":
+        candidate_container_env["PHYSICSNEMO_SERVE_ENABLED_PLUGIN_ID"] = (
+            candidate.workflow
+        )
 
     config_payload: dict[str, Any] = {
         "run_id": run_id,
@@ -857,7 +862,7 @@ def run(args: argparse.Namespace) -> int:
         node_group=args.node_group,
         resource_shape=args.candidate_resource_shape or args.resource_shape,
         pull_secret=args.pull_secret,
-        container_env=shared_output_env,
+        container_env=candidate_container_env,
         dry_run=args.dry_run,
         artifact_dir=run_artifact_dir,
     )

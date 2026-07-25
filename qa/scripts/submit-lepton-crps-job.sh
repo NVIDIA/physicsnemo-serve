@@ -155,6 +155,12 @@ fi
 
 REMOTE_REPORT_DIR="${LEPTON_MOUNT_TARGET%/}/crps-reports"
 REMOTE_REPORT_PATH="${REMOTE_REPORT_DIR}/${JOB_NAME}.txt"
+REPORT_JOB_SUFFIX="-report"
+# Lepton appends a five-character "-xxxx" suffix to job names, while the
+# resulting name may contain at most 41 characters.
+REPORT_JOB_PREFIX_MAX_LENGTH=$((36 - ${#REPORT_JOB_SUFFIX}))
+REPORT_JOB_PREFIX="${JOB_NAME:0:$REPORT_JOB_PREFIX_MAX_LENGTH}"
+REPORT_JOB_NAME="${REPORT_JOB_PREFIX%-}${REPORT_JOB_SUFFIX}"
 compare_command="mkdir -p $(shell_quote "$REMOTE_REPORT_DIR"); "
 for arg in "${compare_args[@]}"; do
     compare_command+="$(shell_quote "$arg") "
@@ -179,6 +185,7 @@ echo "    forecast-a     : $FORECAST_A"
 echo "    forecast-b     : $FORECAST_B"
 echo "    threshold      : $THRESHOLD"
 echo "    report         : $REMOTE_REPORT_PATH"
+echo "    report-job     : $REPORT_JOB_NAME"
 echo "    command        : $compare_command"
 
 echo "==> Logging into Lepton workspace"
@@ -262,7 +269,7 @@ fi
 
 echo "==> Fetching final CRPS report tail"
 report_job_args=(
-    --name "${JOB_NAME}-report"
+    --name "$REPORT_JOB_NAME"
     --container-image "$IMAGE_FULL"
     --node-group "$LEPTON_NODE_GROUP"
     --resource-shape "$LEPTON_RESOURCE_SHAPE"

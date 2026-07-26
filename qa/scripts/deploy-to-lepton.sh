@@ -69,6 +69,7 @@ LEPTON_ENDPOINT_NAME="${LEPTON_ENDPOINT_NAME:-}"
 LEPTON_ENDPOINT_TOKEN="${LEPTON_ENDPOINT_TOKEN:-}"
 LEPTON_PORT="${LEPTON_PORT:-}"                   # filled by --source preset if empty
 LEPTON_PULL_SECRET="${LEPTON_PULL_SECRET:-$(_cfg pull_secret)}"
+LEPTON_HF_TOKEN_SECRET="${LEPTON_HF_TOKEN_SECRET:-}"
 LEPTON_NFS_PATH="${LEPTON_NFS_PATH:-$(_cfg nfs_mount_base)/${USER}}"
 LEPTON_MOUNT_TARGET="${LEPTON_MOUNT_TARGET:-/outputs}"
 LEPTON_CONTAINER_ENVS=()
@@ -126,6 +127,7 @@ Cluster / placement:
   --port PORT               LEPTON_PORT            Container port; overrides preset
   --pull-secret SECRET      LEPTON_PULL_SECRET     Image pull secret (default: from deploy/config.yaml)
   --env NAME=VALUE                                 Container environment variable
+  LEPTON_HF_TOKEN_SECRET                           Lepton secret name exposed as HF_TOKEN
 
 Mounts:
   --nfs-path PATH           LEPTON_NFS_PATH        Host NFS path (default: from deploy/config.yaml)
@@ -396,6 +398,7 @@ cat <<EOF
     port           : $LEPTON_PORT
     mount          : $LEPTON_NFS_PATH -> $LEPTON_MOUNT_TARGET (storage: $LEPTON_LUSTRE_STORAGE)
     pull-secret    : $LEPTON_PULL_SECRET
+    hf-token-secret: ${LEPTON_HF_TOKEN_SECRET:-<not configured>}
     skip-build=$SKIP_BUILD skip-push=$SKIP_PUSH dry-run=$DRY_RUN
 EOF
 
@@ -466,6 +469,11 @@ deploy_args=(
     --tokens "$LEPTON_ENDPOINT_TOKEN"
     --replicas-static 1
 )
+if [[ -n "$LEPTON_HF_TOKEN_SECRET" ]]; then
+    # Keep the token value in Lepton and expose it using huggingface_hub's
+    # supported environment variable name.
+    deploy_args+=(--secret "HF_TOKEN=${LEPTON_HF_TOKEN_SECRET}")
+fi
 if ((${#LEPTON_CONTAINER_ENVS[@]} > 0)); then
     for env_pair in "${LEPTON_CONTAINER_ENVS[@]}"; do
         deploy_args+=(--env "$env_pair")

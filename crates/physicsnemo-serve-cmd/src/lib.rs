@@ -8,12 +8,27 @@ use std::path::PathBuf;
 use anyhow::Result;
 
 pub mod bundle;
+pub mod digest;
 pub mod prefetch;
 
+/// Hidden JSON-over-stdin command reserved for internal prefetch subprocess use.
 pub const PREFETCH_COMMAND: &str = "__prefetch";
+pub const USAGE: &str = "\
+physicsnemo-serve — run manifest-driven inference without service processes
+
+USAGE:
+  physicsnemo-serve infer --plugin PATH --request FILE --output-dir DIR [--run-id ID] [--device DEVICE]
+  physicsnemo-serve run   --plugin PATH --request FILE --output-dir DIR [--run-id ID] [--device DEVICE]
+  physicsnemo-serve package --runtime-dir DIR --output FILE
+  physicsnemo-serve --help
+  physicsnemo-serve --version
+
+The internal __prefetch command is reserved for CLI subprocess communication.";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CliCommand {
+    Help,
+    Version,
     Infer(InferArgs),
     Package(PackageArgs),
     Prefetch(PrefetchArgs),
@@ -51,6 +66,10 @@ where
         .ok_or_else(|| anyhow::anyhow!("missing command: expected infer or package"))?;
     let remaining: Vec<String> = args.collect();
     match command.as_str() {
+        "--help" | "-h" | "help" => Ok(CliCommand::Help),
+        "--version" | "-V" => Ok(CliCommand::Version),
+        "infer" | "run" if is_help_request(&remaining) => Ok(CliCommand::Help),
+        "package" if is_help_request(&remaining) => Ok(CliCommand::Help),
         "infer" | "run" => parse_infer_args(&remaining).map(CliCommand::Infer),
         "package" => parse_package_args(&remaining).map(CliCommand::Package),
         PREFETCH_COMMAND => parse_prefetch_args(&remaining).map(CliCommand::Prefetch),
@@ -61,18 +80,35 @@ where
 }
 
 fn parse_infer_args(args: &[String]) -> Result<InferArgs> {
-    let options = parse_options(args)?;
+    let options = parse_options(
+        args,
+        &[
+            "--plugin",
+            "--request",
+            "--output-dir",
+            "--run-id",
+            "--device",
+        ],
+    )?;
+    let run_id = options.get("--run-id").cloned();
+    if let Some(run_id) = run_id.as_deref() {
+        validate_run_id(run_id)?;
+    }
+    let device = options.get("--device").cloned();
+    if let Some(device) = device.as_deref() {
+        validate_device(device)?;
+    }
     Ok(InferArgs {
         plugin_root: required_path(&options, "--plugin")?,
         request: required_path(&options, "--request")?,
         output_dir: required_path(&options, "--output-dir")?,
-        run_id: options.get("--run-id").cloned(),
-        device: options.get("--device").cloned(),
+        run_id,
+        device,
     })
 }
 
 fn parse_package_args(args: &[String]) -> Result<PackageArgs> {
-    let options = parse_options(args)?;
+    let options = parse_options(args, &["--runtime-dir", "--output"])?;
     Ok(PackageArgs {
         runtime_dir: required_path(&options, "--runtime-dir")?,
         output: required_path(&options, "--output")?,
@@ -80,20 +116,28 @@ fn parse_package_args(args: &[String]) -> Result<PackageArgs> {
 }
 
 fn parse_prefetch_args(args: &[String]) -> Result<PrefetchArgs> {
-    let options = parse_options(args)?;
+    let options = parse_options(args, &["--cache-dir", "--run-id"])?;
+    let run_id = required_value(&options, "--run-id")?;
+    validate_run_id(run_id)?;
     Ok(PrefetchArgs {
         cache_dir: required_path(&options, "--cache-dir")?,
-        run_id: required_value(&options, "--run-id")?.to_string(),
+        run_id: run_id.to_string(),
     })
 }
 
-fn parse_options(args: &[String]) -> Result<std::collections::BTreeMap<String, String>> {
+fn parse_options(
+    args: &[String],
+    allowed: &[&str],
+) -> Result<std::collections::BTreeMap<String, String>> {
     let mut options = std::collections::BTreeMap::new();
     let mut index = 0;
     while index < args.len() {
         let option = &args[index];
         if !option.starts_with("--") {
             return Err(anyhow::anyhow!("unexpected positional argument '{option}'"));
+        }
+        if !allowed.contains(&option.as_str()) {
+            return Err(anyhow::anyhow!("unknown option '{option}'"));
         }
         let value = args
             .get(index + 1)
@@ -107,6 +151,51 @@ fn parse_options(args: &[String]) -> Result<std::collections::BTreeMap<String, S
         index += 2;
     }
     Ok(options)
+}
+
+fn is_help_request(args: &[String]) -> bool {
+    matches!(args, [arg] if arg == "--help" || arg == "-h")
+}
+
+pub fn validate_run_id(run_id: &str) -> Result<()> {
+    if run_id.is_empty() || run_id.len() > 128 {
+        return Err(anyhow::anyhow!(
+            "run ID must contain between 1 and 128 characters"
+        ));
+    }
+    if run_id == "." || run_id == ".." {
+        return Err(anyhow::anyhow!("run ID must be a safe path component"));
+    }
+    if !run_id
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+    {
+        return Err(anyhow::anyhow!(
+            "run ID may contain only ASCII letters, digits, '.', '-', and '_'"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_device(device: &str) -> Result<()> {
+    if device.is_empty() || device.len() > 256 {
+        return Err(anyhow::anyhow!(
+            "device must contain between 1 and 256 characters"
+        ));
+    }
+    if device.starts_with(',') || device.ends_with(',') || device.contains(",,") {
+        return Err(anyhow::anyhow!(
+            "device contains an empty CUDA device entry"
+        ));
+    }
+    if !device.bytes().all(|byte| {
+        byte.is_ascii_alphanumeric() || matches!(byte, b',' | b'-' | b'_' | b'.' | b'/')
+    }) {
+        return Err(anyhow::anyhow!(
+            "device contains characters not valid in CUDA_VISIBLE_DEVICES"
+        ));
+    }
+    Ok(())
 }
 
 fn required_path(
@@ -131,6 +220,7 @@ mod tests {
     use std::fs;
     use std::io::{Read, Seek, SeekFrom, Write};
     use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::fs::symlink;
     use std::path::Path;
 
     use tempfile::tempdir;
@@ -173,6 +263,63 @@ mod tests {
             .expect_err("missing request and output arguments should fail");
 
         assert!(error.to_string().contains("--request"));
+    }
+
+    #[test]
+    fn parses_help_and_version_commands() {
+        assert_eq!(parse_args(["--help"]).unwrap(), CliCommand::Help);
+        assert_eq!(parse_args(["infer", "--help"]).unwrap(), CliCommand::Help);
+        assert_eq!(parse_args(["--version"]).unwrap(), CliCommand::Version);
+    }
+
+    #[test]
+    fn rejects_unsafe_run_ids_and_device_values() {
+        for run_id in ["../escape", "..", "nested/run", "has space"] {
+            let error = parse_args([
+                "infer",
+                "--plugin",
+                "/plugins/demo",
+                "--request",
+                "request.json",
+                "--output-dir",
+                "outputs",
+                "--run-id",
+                run_id,
+            ])
+            .unwrap_err();
+            assert!(error.to_string().contains("run ID"));
+        }
+
+        let error = parse_args([
+            "infer",
+            "--plugin",
+            "/plugins/demo",
+            "--request",
+            "request.json",
+            "--output-dir",
+            "outputs",
+            "--device",
+            "0;echo injected",
+        ])
+        .unwrap_err();
+        assert!(error.to_string().contains("CUDA_VISIBLE_DEVICES"));
+    }
+
+    #[test]
+    fn rejects_unknown_options() {
+        let error = parse_args([
+            "infer",
+            "--plugin",
+            "/plugins/demo",
+            "--request",
+            "request.json",
+            "--output-dir",
+            "outputs",
+            "--unknown",
+            "value",
+        ])
+        .unwrap_err();
+        assert!(error.to_string().contains("unknown option"));
     }
 
     #[test]
@@ -248,6 +395,42 @@ mod tests {
         let error = package_executable(&base, &runtime, &temp.path().join("packaged"))
             .expect_err("missing Python should fail");
         assert!(error.to_string().contains("bin/python"));
+    }
+
+    #[test]
+    fn package_rejects_existing_output() {
+        let temp = tempdir().expect("temp directory should be created");
+        let base = temp.path().join("physicsnemo-serve");
+        fs::write(&base, b"fake-elf").expect("base executable should be written");
+        let runtime = create_runtime(temp.path());
+        let output = temp.path().join("packaged");
+        fs::write(&output, b"keep-me").expect("existing output should be written");
+
+        let error = package_executable(&base, &runtime, &output)
+            .expect_err("existing output must not be overwritten");
+        assert!(error.to_string().contains("already exists"));
+        assert_eq!(fs::read(&output).unwrap(), b"keep-me");
+    }
+
+    #[test]
+    fn package_preserves_runtime_symlinks() {
+        let temp = tempdir().expect("temp directory should be created");
+        let base = temp.path().join("physicsnemo-serve");
+        fs::write(&base, b"fake-elf").expect("base executable should be written");
+        let runtime = create_runtime(temp.path());
+        fs::write(runtime.join("bin/python3.12"), "#!/bin/sh\nexit 0\n")
+            .expect("symlink target should be written");
+        symlink("python3.12", runtime.join("bin/python3"))
+            .expect("runtime symlink should be created");
+        let packaged = temp.path().join("packaged");
+        package_executable(&base, &runtime, &packaged).expect("runtime should package");
+
+        let extracted =
+            extract_runtime(&packaged, &temp.path().join("cache")).expect("runtime should extract");
+        assert_eq!(
+            fs::read_link(extracted.join("bin/python3")).unwrap(),
+            PathBuf::from("python3.12")
+        );
     }
 
     fn create_runtime(root: &Path) -> PathBuf {

@@ -10,8 +10,14 @@ use std::path::Path;
 use anyhow::{Result, anyhow};
 use serde::Deserialize;
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
 use worker_runtime::roles::prefetch::{PrefetchPlanItem, materialize_prefetch_plan};
+
+use crate::digest::sha256_file_hex;
+
+pub fn read_prefetch_plan(reader: impl Read) -> Result<Value> {
+    serde_json::from_reader(reader)
+        .map_err(|error| anyhow!("prefetch plan must be valid JSON: {error}"))
+}
 
 pub async fn materialize_direct_plan(plan: Value, cache_dir: &Path, run_id: &str) -> Result<Value> {
     let direct_items: Vec<DirectPlanItem> =
@@ -55,7 +61,7 @@ pub async fn materialize_direct_plan(plan: Value, cache_dir: &Path, run_id: &str
 
         let mut encoded = serde_json::to_value(artifact)?;
         if let Some(expected_sha256) = contract.expected_sha256.as_deref() {
-            let actual_sha256 = sha256_file(Path::new(&artifact.storage_path))?;
+            let actual_sha256 = sha256_file_hex(Path::new(&artifact.storage_path))?;
             if !actual_sha256.eq_ignore_ascii_case(expected_sha256) {
                 let _ = fs::remove_file(&artifact.storage_path);
                 return Err(anyhow!(
@@ -95,21 +101,6 @@ struct DirectPlanItem {
     expected_sha256: Option<String>,
     #[serde(default)]
     expected_size_bytes: Option<u64>,
-}
-
-fn sha256_file(path: &Path) -> Result<String> {
-    let mut file = fs::File::open(path)?;
-    let mut hasher = Sha256::new();
-    let mut buffer = vec![0u8; 1024 * 1024];
-    loop {
-        let read = file.read(&mut buffer)?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
-    }
-    let digest = hasher.finalize();
-    Ok(digest.iter().map(|byte| format!("{byte:02x}")).collect())
 }
 
 #[cfg(test)]
@@ -175,5 +166,15 @@ mod tests {
         .expect_err("checksum mismatch should fail");
 
         assert!(error.to_string().contains("SHA-256 mismatch"));
+    }
+
+    #[test]
+    fn rejects_malformed_prefetch_json() {
+        let error = read_prefetch_plan(b"{not-json".as_slice()).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("prefetch plan must be valid JSON")
+        );
     }
 }

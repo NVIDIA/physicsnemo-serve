@@ -8,9 +8,10 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow};
-use sha2::{Digest, Sha256};
-use tar::{Archive, Builder, HeaderMode};
+use tar::{Archive, Builder, EntryType, Header, HeaderMode};
 use tempfile::{Builder as TempBuilder, NamedTempFile};
+
+use crate::digest::{copy_and_sha256, hex, sha256_reader};
 
 const FOOTER_MAGIC: &[u8; 16] = b"PHYSNEMOSERVEV1\0";
 const FOOTER_SIZE: u64 = 16 + 8 + 8 + 32;
@@ -33,6 +34,12 @@ pub fn package_executable(base_executable: &Path, runtime_dir: &Path, output: &P
     if base_executable == output {
         return Err(anyhow!(
             "packaged output must differ from the base executable"
+        ));
+    }
+    if output.exists() {
+        return Err(anyhow!(
+            "packaged output already exists: {}",
+            output.display()
         ));
     }
 
@@ -116,15 +123,12 @@ pub fn extract_runtime(executable: &Path, cache_root: &Path) -> Result<PathBuf> 
         format!("{cache_key}\n"),
     )?;
 
-    let temporary_path = temporary.keep();
-    match fs::rename(&temporary_path, &runtime_root) {
+    match fs::rename(temporary.path(), &runtime_root) {
         Ok(()) => {}
         Err(error) if runtime_is_ready(&runtime_root) => {
-            let _ = fs::remove_dir_all(&temporary_path);
             let _ = error;
         }
         Err(error) => {
-            let _ = fs::remove_dir_all(&temporary_path);
             return Err(error).with_context(|| {
                 format!(
                     "failed to install runtime cache: {}",
@@ -174,32 +178,41 @@ fn append_tree_sorted<W: Write>(
                     format!("failed to add runtime directory: {}", source_path.display())
                 })?;
             append_tree_sorted(archive, root, &relative_path)?;
-        } else {
+        } else if file_type.is_symlink() {
+            let target = fs::read_link(&source_path).with_context(|| {
+                format!(
+                    "failed to read runtime symlink target: {}",
+                    source_path.display()
+                )
+            })?;
+            let metadata = fs::symlink_metadata(&source_path)?;
+            let mut header = Header::new_gnu();
+            header.set_metadata_in_mode(&metadata, HeaderMode::Deterministic);
+            header.set_entry_type(EntryType::Symlink);
+            header.set_size(0);
+            archive
+                .append_link(&mut header, &relative_path, &target)
+                .with_context(|| {
+                    format!("failed to add runtime symlink: {}", source_path.display())
+                })?;
+        } else if file_type.is_file() {
             archive
                 .append_path_with_name(&source_path, &relative_path)
                 .with_context(|| {
                     format!("failed to add runtime file: {}", source_path.display())
                 })?;
+        } else {
+            return Err(anyhow!(
+                "runtime contains unsupported filesystem entry: {}",
+                source_path.display()
+            ));
         }
     }
     Ok(())
 }
 
 fn copy_payload_with_digest(payload_path: &Path, output: &mut File) -> Result<(u64, [u8; 32])> {
-    let mut payload = File::open(payload_path)?;
-    let mut hasher = Sha256::new();
-    let mut buffer = vec![0u8; 1024 * 1024];
-    let mut length = 0u64;
-    loop {
-        let read = payload.read(&mut buffer)?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
-        output.write_all(&buffer[..read])?;
-        length += read as u64;
-    }
-    Ok((length, hasher.finalize().into()))
+    Ok(copy_and_sha256(File::open(payload_path)?, output)?)
 }
 
 fn write_footer(output: &mut File, footer: &BundleFooter) -> Result<()> {
@@ -243,16 +256,7 @@ fn read_footer(executable: &mut File) -> Result<BundleFooter> {
 fn verify_payload_checksum(executable: &mut File, footer: &BundleFooter) -> Result<()> {
     executable.seek(SeekFrom::Start(footer.payload_offset))?;
     let mut payload = executable.take(footer.payload_length);
-    let mut hasher = Sha256::new();
-    let mut buffer = vec![0u8; 1024 * 1024];
-    loop {
-        let read = payload.read(&mut buffer)?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
-    }
-    let actual: [u8; 32] = hasher.finalize().into();
+    let actual = sha256_reader(&mut payload)?;
     if actual != footer.digest {
         return Err(anyhow!("bundled runtime checksum mismatch"));
     }
@@ -278,10 +282,5 @@ fn runtime_is_ready(runtime_root: &Path) -> bool {
 }
 
 fn digest_hex(digest: &[u8; 32]) -> String {
-    let mut encoded = String::with_capacity(digest.len() * 2);
-    for byte in digest {
-        use std::fmt::Write as _;
-        let _ = write!(&mut encoded, "{byte:02x}");
-    }
-    encoded
+    hex(digest)
 }

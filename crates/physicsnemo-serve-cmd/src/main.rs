@@ -12,8 +12,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow};
 use physicsnemo_serve_cmd::bundle::{extract_runtime, package_executable};
-use physicsnemo_serve_cmd::prefetch::materialize_direct_plan;
-use physicsnemo_serve_cmd::{CliCommand, InferArgs, PackageArgs, PrefetchArgs, parse_args};
+use physicsnemo_serve_cmd::prefetch::{materialize_direct_plan, read_prefetch_plan};
+use physicsnemo_serve_cmd::{CliCommand, InferArgs, PackageArgs, PrefetchArgs, USAGE, parse_args};
 use serde_json::Value;
 use tokio::process::Command;
 
@@ -32,8 +32,16 @@ async fn main() -> ExitCode {
 }
 
 async fn run() -> Result<u8> {
-    let command = parse_args(env::args().skip(1))?;
+    let command = parse_args(env::args().skip(1)).map_err(|error| anyhow!("{error}\n\n{USAGE}"))?;
     match command {
+        CliCommand::Help => {
+            println!("{USAGE}");
+            Ok(0)
+        }
+        CliCommand::Version => {
+            println!("physicsnemo-serve {}", env!("CARGO_PKG_VERSION"));
+            Ok(0)
+        }
         CliCommand::Infer(args) => run_inference(args).await,
         CliCommand::Package(args) => {
             package_runtime(args)?;
@@ -91,8 +99,7 @@ fn package_runtime(args: PackageArgs) -> Result<()> {
 }
 
 async fn run_prefetch(args: PrefetchArgs) -> Result<()> {
-    let plan: Value =
-        serde_json::from_reader(io::stdin().lock()).context("prefetch plan must be valid JSON")?;
+    let plan: Value = read_prefetch_plan(io::stdin().lock())?;
     let result = materialize_direct_plan(plan, &args.cache_dir, &args.run_id).await?;
     serde_json::to_writer(io::stdout().lock(), &result)?;
     println!();
@@ -101,9 +108,7 @@ async fn run_prefetch(args: PrefetchArgs) -> Result<()> {
 
 fn resolve_runtime(executable: &Path) -> Result<PathBuf> {
     if let Some(runtime_dir) = env::var_os(RUNTIME_OVERRIDE_ENV) {
-        let runtime_root = PathBuf::from(runtime_dir);
-        validate_runtime(&runtime_root)?;
-        return Ok(runtime_root);
+        return Ok(PathBuf::from(runtime_dir));
     }
     let cache_root = if let Some(cache_dir) = env::var_os(CACHE_OVERRIDE_ENV) {
         PathBuf::from(cache_dir)

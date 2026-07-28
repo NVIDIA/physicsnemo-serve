@@ -16,6 +16,9 @@ use crate::digest::{copy_and_sha256, hex, sha256_reader};
 const FOOTER_MAGIC: &[u8; 16] = b"PHYSNEMOSERVEV1\0";
 const FOOTER_SIZE: u64 = 16 + 8 + 8 + 32;
 const COMPLETE_MARKER: &str = ".physicsnemo-serve-runtime-complete";
+pub const DEFAULT_COMPRESSION_LEVEL: i32 = 5;
+const MIN_COMPRESSION_LEVEL: i32 = -7;
+const MAX_COMPRESSION_LEVEL: i32 = 22;
 
 struct BundleFooter {
     payload_offset: u64,
@@ -24,6 +27,25 @@ struct BundleFooter {
 }
 
 pub fn package_executable(base_executable: &Path, runtime_dir: &Path, output: &Path) -> Result<()> {
+    package_executable_with_compression(
+        base_executable,
+        runtime_dir,
+        output,
+        DEFAULT_COMPRESSION_LEVEL,
+    )
+}
+
+pub fn package_executable_with_compression(
+    base_executable: &Path,
+    runtime_dir: &Path,
+    output: &Path,
+    compression_level: i32,
+) -> Result<()> {
+    if !(MIN_COMPRESSION_LEVEL..=MAX_COMPRESSION_LEVEL).contains(&compression_level) {
+        return Err(anyhow!(
+            "zstd compression level must be between {MIN_COMPRESSION_LEVEL} and {MAX_COMPRESSION_LEVEL}"
+        ));
+    }
     if !base_executable.is_file() {
         return Err(anyhow!(
             "base executable does not exist: {}",
@@ -53,7 +75,7 @@ pub fn package_executable(base_executable: &Path, runtime_dir: &Path, output: &P
             output_parent.display()
         )
     })?;
-    let archive = build_runtime_archive(runtime_dir, output_parent)?;
+    let archive = build_runtime_archive(runtime_dir, output_parent, compression_level)?;
 
     fs::copy(base_executable, output).with_context(|| {
         format!(
@@ -86,7 +108,7 @@ pub fn extract_runtime(executable: &Path, cache_root: &Path) -> Result<PathBuf> 
         .with_context(|| format!("failed to open executable: {}", executable.display()))?;
     let footer = read_footer(&mut executable_file)?;
     verify_payload_checksum(&mut executable_file, &footer)?;
-    let cache_key = digest_hex(&footer.digest);
+    let cache_key = hex(&footer.digest);
     let runtime_root = cache_root.join(&cache_key);
     if runtime_is_ready(&runtime_root) {
         return Ok(runtime_root);
@@ -107,7 +129,7 @@ pub fn extract_runtime(executable: &Path, cache_root: &Path) -> Result<PathBuf> 
         })?;
     }
 
-    let temporary = TempBuilder::new()
+    let mut temporary = TempBuilder::new()
         .prefix(".physicsnemo-serve-runtime-")
         .tempdir_in(cache_root)?;
     executable_file.seek(SeekFrom::Start(footer.payload_offset))?;
@@ -124,7 +146,11 @@ pub fn extract_runtime(executable: &Path, cache_root: &Path) -> Result<PathBuf> 
     )?;
 
     match fs::rename(temporary.path(), &runtime_root) {
-        Ok(()) => {}
+        Ok(()) => {
+            // The directory now belongs to the cache; do not ask TempDir to
+            // clean up its old path when it is dropped.
+            temporary.disable_cleanup(true);
+        }
         Err(error) if runtime_is_ready(&runtime_root) => {
             let _ = error;
         }
@@ -140,10 +166,15 @@ pub fn extract_runtime(executable: &Path, cache_root: &Path) -> Result<PathBuf> 
     Ok(runtime_root)
 }
 
-fn build_runtime_archive(runtime_dir: &Path, output_parent: &Path) -> Result<NamedTempFile> {
+fn build_runtime_archive(
+    runtime_dir: &Path,
+    output_parent: &Path,
+    compression_level: i32,
+) -> Result<NamedTempFile> {
     let archive_file = NamedTempFile::new_in(output_parent)?;
     let writer = archive_file.reopen()?;
-    let encoder = zstd::Encoder::new(writer, 9).context("failed to initialize zstd encoder")?;
+    let encoder = zstd::Encoder::new(writer, compression_level)
+        .context("failed to initialize zstd encoder")?;
     let mut archive = Builder::new(encoder);
     archive.mode(HeaderMode::Deterministic);
     append_tree_sorted(&mut archive, runtime_dir, Path::new(""))?;
@@ -279,8 +310,4 @@ fn validate_runtime_layout(runtime_dir: &Path) -> Result<()> {
 
 fn runtime_is_ready(runtime_root: &Path) -> bool {
     runtime_root.join(COMPLETE_MARKER).is_file() && validate_runtime_layout(runtime_root).is_ok()
-}
-
-fn digest_hex(digest: &[u8; 32]) -> String {
-    hex(digest)
 }

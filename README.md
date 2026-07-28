@@ -51,10 +51,13 @@ Then choose your path:
 The `physicsnemo-serve` command runs one compatible external manifest plugin
 without Redis, the REST inference server, worker processes, or a scheduler. Its
 packaged form appends a locked CPython runtime to the executable and extracts
-that runtime into a content-addressed cache on first use.
+that runtime into a content-addressed cache on first use. A thin binary can
+instead use a customer-managed, plugin-specific Python environment selected
+with `--runtime-dir`.
 
 ```bash
 ./dist/physicsnemo-serve infer \
+  --runtime-dir /opt/physicsnemo-runtimes/customer-plugin \
   --plugin /path/to/plugin \
   --request request.json \
   --output-dir outputs \

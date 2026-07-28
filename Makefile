@@ -10,8 +10,13 @@ IMAGE_TAG = v0.1.20260714.0
 RUNTIME_BASE_IMAGE_NAME ?= $(DOCKER_REPO)/$(call _cfg,runtime_base_image)
 RUNTIME_BASE_IMAGE_TAG = pytorch-26.01-py3-th0.8.0
 RUNTIME_BASE_IMAGE = $(RUNTIME_BASE_IMAGE_NAME):$(RUNTIME_BASE_IMAGE_TAG)
+SERVE_CMD_DIST_DIR ?= dist
+SERVE_CMD_OUTPUT ?= $(SERVE_CMD_DIST_DIR)/physicsnemo-serve
+SERVE_CMD_LINUX_AMD64_OUTPUT ?= $(SERVE_CMD_DIST_DIR)/physicsnemo-serve-linux-amd64
+SERVE_CMD_LINUX_AMD64_TARGET ?= x86_64-unknown-linux-gnu.2.17
+SERVE_CMD_LINUX_AMD64_TARGET_DIR ?= x86_64-unknown-linux-gnu
 
-.PHONY: image runtime-base-image build clean clean-all experiments observe stress
+.PHONY: image runtime-base-image build build-serve-cmd build-serve-cmd-linux-amd64 clean clean-all experiments observe stress
 
 image: runtime-base-image
 	@test -n "$(DOCKER_REPO)" || (echo "DOCKER_REPO is not set!" && exit 1)
@@ -23,6 +28,24 @@ runtime-base-image:
 
 build:
 	cargo build --release -p inference_server -p worker-runtime
+
+build-serve-cmd:
+	cargo build --locked --release --package physicsnemo-serve-cmd --bin physicsnemo-serve
+	mkdir -p $(SERVE_CMD_DIST_DIR)
+	cp target/release/physicsnemo-serve $(SERVE_CMD_OUTPUT)
+	chmod +x $(SERVE_CMD_OUTPUT)
+	@echo "Thin CLI built: $(SERVE_CMD_OUTPUT)"
+	@echo "Run it with: $(SERVE_CMD_OUTPUT) infer --runtime-dir <DIR> ..."
+
+build-serve-cmd-linux-amd64:
+	@command -v zig >/dev/null 2>&1 || (echo "zig is required; install it with: brew install zig" && exit 1)
+	@command -v cargo-zigbuild >/dev/null 2>&1 || (echo "cargo-zigbuild is required; install it with: cargo install cargo-zigbuild --locked" && exit 1)
+	cargo zigbuild --locked --release --target $(SERVE_CMD_LINUX_AMD64_TARGET) --package physicsnemo-serve-cmd --bin physicsnemo-serve
+	mkdir -p $(SERVE_CMD_DIST_DIR)
+	cp target/$(SERVE_CMD_LINUX_AMD64_TARGET_DIR)/release/physicsnemo-serve $(SERVE_CMD_LINUX_AMD64_OUTPUT)
+	chmod +x $(SERVE_CMD_LINUX_AMD64_OUTPUT)
+	@echo "Thin Linux x86_64 CLI built: $(SERVE_CMD_LINUX_AMD64_OUTPUT)"
+	@echo "Run it with: $(SERVE_CMD_LINUX_AMD64_OUTPUT) infer --runtime-dir <DIR> ..."
 
 clean:
 	cargo clean
@@ -46,4 +69,3 @@ stress:
 	cd tests/e2e && go build -o ../../bin/stress_service ./stress_service.go
 	@echo "Binary built: bin/stress_service"
 	@echo "Usage: bin/stress_service --server_url <URL> --ep_token <TOKEN> [--test_time_min N] [--cadence_sec N]"
-

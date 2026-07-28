@@ -12,6 +12,51 @@ The executable accepts JSON plugins using `simple`, `prefetch`/`default`,
 publication, multipart ingress, and custom framework stages are rejected
 explicitly.
 
+## Use a plugin-specific external runtime
+
+A thin CLI binary can use a customer-managed Python environment instead of an
+appended runtime. The external runtime owns Python, PyTorch, Earth2Studio, and
+all plugin-specific packages:
+
+```bash
+make build-serve-cmd
+
+packaging/physicsnemo-serve-cmd/external-runtime/setup.sh \
+  "$HOME/.local/share/physicsnemo-serve/runtimes/earth2studio"
+
+./dist/physicsnemo-serve infer \
+  --runtime-dir "$HOME/.local/share/physicsnemo-serve/runtimes/earth2studio" \
+  --plugin plugins/e2s-deterministic-earth2 \
+  --request request.json \
+  --output-dir outputs \
+  --device 0
+```
+
+On an Apple Silicon Mac, build a thin Linux x86_64 executable with:
+
+```bash
+brew install zig
+cargo install cargo-zigbuild --locked
+rustup target add x86_64-unknown-linux-gnu
+make build-serve-cmd-linux-amd64
+```
+
+The sample launcher defaults to the runtime path above and a binary installed
+at `$HOME/physicsnemo-serve`:
+
+```bash
+packaging/physicsnemo-serve-cmd/external-runtime/run.sh \
+  --plugin plugins/e2s-deterministic-earth2 \
+  --request request.json \
+  --output-dir outputs \
+  --device 0
+```
+
+`--runtime-dir` takes precedence over `PHYSICSNEMO_SERVE_RUNTIME_DIR`. If
+neither is set, the CLI falls back to its appended runtime. Runtime creation is
+an explicit provisioning step; dependencies are never installed during
+inference.
+
 ## Build a self-contained executable
 
 The launcher packages a filesystem CPython runtime as a compressed payload
@@ -33,6 +78,9 @@ target/release/physicsnemo-serve package \
   --runtime-dir build/inference-cli-runtime \
   --output dist/physicsnemo-serve
 ```
+
+Packaging uses zstd level 5 by default. Use `--compression-level LEVEL` (from
+`-7` through `22`) to trade packaging time for executable size.
 
 `runtime-base.lock` is the minimal fixed dependency allowlist. Generate a
 different hashed lock and pass it to `assemble_runtime.py` when the supported

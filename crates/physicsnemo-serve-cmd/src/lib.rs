@@ -17,9 +17,9 @@ pub const USAGE: &str = "\
 physicsnemo-serve — run manifest-driven inference without service processes
 
 USAGE:
-  physicsnemo-serve infer --plugin PATH --request FILE --output-dir DIR [--run-id ID] [--device DEVICE]
-  physicsnemo-serve run   --plugin PATH --request FILE --output-dir DIR [--run-id ID] [--device DEVICE]
-  physicsnemo-serve package --runtime-dir DIR --output FILE
+  physicsnemo-serve infer --plugin PATH --request FILE --output-dir DIR [--runtime-dir DIR] [--run-id ID] [--device DEVICE]
+  physicsnemo-serve run   --plugin PATH --request FILE --output-dir DIR [--runtime-dir DIR] [--run-id ID] [--device DEVICE]
+  physicsnemo-serve package --runtime-dir DIR --output FILE [--compression-level LEVEL]
   physicsnemo-serve --help
   physicsnemo-serve --version
 
@@ -39,6 +39,7 @@ pub struct InferArgs {
     pub plugin_root: PathBuf,
     pub request: PathBuf,
     pub output_dir: PathBuf,
+    pub runtime_dir: Option<PathBuf>,
     pub run_id: Option<String>,
     pub device: Option<String>,
 }
@@ -47,6 +48,7 @@ pub struct InferArgs {
 pub struct PackageArgs {
     pub runtime_dir: PathBuf,
     pub output: PathBuf,
+    pub compression_level: i32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -86,6 +88,7 @@ fn parse_infer_args(args: &[String]) -> Result<InferArgs> {
             "--plugin",
             "--request",
             "--output-dir",
+            "--runtime-dir",
             "--run-id",
             "--device",
         ],
@@ -102,16 +105,27 @@ fn parse_infer_args(args: &[String]) -> Result<InferArgs> {
         plugin_root: required_path(&options, "--plugin")?,
         request: required_path(&options, "--request")?,
         output_dir: required_path(&options, "--output-dir")?,
+        runtime_dir: options.get("--runtime-dir").map(PathBuf::from),
         run_id,
         device,
     })
 }
 
 fn parse_package_args(args: &[String]) -> Result<PackageArgs> {
-    let options = parse_options(args, &["--runtime-dir", "--output"])?;
+    let options = parse_options(args, &["--runtime-dir", "--output", "--compression-level"])?;
+    let compression_level = options
+        .get("--compression-level")
+        .map(|value| {
+            value
+                .parse::<i32>()
+                .map_err(|_| anyhow::anyhow!("compression level must be a signed integer"))
+        })
+        .transpose()?
+        .unwrap_or(bundle::DEFAULT_COMPRESSION_LEVEL);
     Ok(PackageArgs {
         runtime_dir: required_path(&options, "--runtime-dir")?,
         output: required_path(&options, "--output")?,
+        compression_level,
     })
 }
 
@@ -163,8 +177,8 @@ pub fn validate_run_id(run_id: &str) -> Result<()> {
             "run ID must contain between 1 and 128 characters"
         ));
     }
-    if run_id == "." || run_id == ".." {
-        return Err(anyhow::anyhow!("run ID must be a safe path component"));
+    if run_id.starts_with('.') {
+        return Err(anyhow::anyhow!("run ID must not start with '.'"));
     }
     if !run_id
         .bytes()
@@ -225,7 +239,7 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use super::bundle::{extract_runtime, package_executable};
+    use super::bundle::{extract_runtime, package_executable, package_executable_with_compression};
     use super::*;
 
     #[test]
@@ -251,9 +265,34 @@ mod tests {
                 plugin_root: PathBuf::from("/plugins/demo"),
                 request: PathBuf::from("request.json"),
                 output_dir: PathBuf::from("outputs"),
+                runtime_dir: None,
                 run_id: Some("run-1".to_string()),
                 device: Some("2".to_string()),
             })
+        );
+    }
+
+    #[test]
+    fn parses_external_runtime_directory() {
+        let command = parse_args([
+            "infer",
+            "--plugin",
+            "/plugins/demo",
+            "--request",
+            "request.json",
+            "--output-dir",
+            "outputs",
+            "--runtime-dir",
+            "/opt/physicsnemo-runtime",
+        ])
+        .unwrap();
+
+        let CliCommand::Infer(args) = command else {
+            panic!("expected infer command");
+        };
+        assert_eq!(
+            args.runtime_dir,
+            Some(PathBuf::from("/opt/physicsnemo-runtime"))
         );
     }
 
@@ -274,7 +313,7 @@ mod tests {
 
     #[test]
     fn rejects_unsafe_run_ids_and_device_values() {
-        for run_id in ["../escape", "..", "nested/run", "has space"] {
+        for run_id in ["../escape", "..", ".hidden", "nested/run", "has space"] {
             let error = parse_args([
                 "infer",
                 "--plugin",
@@ -320,6 +359,69 @@ mod tests {
         ])
         .unwrap_err();
         assert!(error.to_string().contains("unknown option"));
+    }
+
+    #[test]
+    fn parses_package_compression_level() {
+        assert_eq!(
+            parse_args([
+                "package",
+                "--runtime-dir",
+                "runtime",
+                "--output",
+                "physicsnemo-serve",
+            ])
+            .unwrap(),
+            CliCommand::Package(PackageArgs {
+                runtime_dir: PathBuf::from("runtime"),
+                output: PathBuf::from("physicsnemo-serve"),
+                compression_level: bundle::DEFAULT_COMPRESSION_LEVEL,
+            })
+        );
+        assert_eq!(
+            parse_args([
+                "package",
+                "--runtime-dir",
+                "runtime",
+                "--output",
+                "physicsnemo-serve",
+                "--compression-level",
+                "12",
+            ])
+            .unwrap(),
+            CliCommand::Package(PackageArgs {
+                runtime_dir: PathBuf::from("runtime"),
+                output: PathBuf::from("physicsnemo-serve"),
+                compression_level: 12,
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_non_integer_package_compression_level() {
+        let error = parse_args([
+            "package",
+            "--runtime-dir",
+            "runtime",
+            "--output",
+            "physicsnemo-serve",
+            "--compression-level",
+            "fast",
+        ])
+        .unwrap_err();
+        assert!(error.to_string().contains("signed integer"));
+    }
+
+    #[test]
+    fn rejects_out_of_range_package_compression_level() {
+        let error = package_executable_with_compression(
+            Path::new("base"),
+            Path::new("runtime"),
+            Path::new("output"),
+            23,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("between -7 and 22"));
     }
 
     #[test]

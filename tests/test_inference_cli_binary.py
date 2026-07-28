@@ -10,6 +10,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
 import yaml
 
 
@@ -22,8 +23,13 @@ def _write(path: Path, content: str) -> None:
 
 
 def _build_binary() -> Path:
+    cargo = shutil.which("cargo")
+    if cargo is None:
+        pytest.skip(
+            "cargo is required for the embedded-runtime binary integration test"
+        )
     proc = subprocess.run(
-        ["cargo", "build", "-p", "physicsnemo-serve-cmd", "--bin", "physicsnemo-serve"],
+        [cargo, "build", "-p", "physicsnemo-serve-cmd", "--bin", "physicsnemo-serve"],
         cwd=REPO_ROOT,
         text=True,
         capture_output=True,

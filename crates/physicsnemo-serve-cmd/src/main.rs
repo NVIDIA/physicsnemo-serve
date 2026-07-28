@@ -11,7 +11,7 @@ use std::process::ExitCode;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow};
-use physicsnemo_serve_cmd::bundle::{extract_runtime, package_executable};
+use physicsnemo_serve_cmd::bundle::{extract_runtime, package_executable_with_compression};
 use physicsnemo_serve_cmd::prefetch::{materialize_direct_plan, read_prefetch_plan};
 use physicsnemo_serve_cmd::{CliCommand, InferArgs, PackageArgs, PrefetchArgs, USAGE, parse_args};
 use serde_json::Value;
@@ -56,7 +56,7 @@ async fn run() -> Result<u8> {
 
 async fn run_inference(args: InferArgs) -> Result<u8> {
     let executable = env::current_exe().context("failed to resolve the CLI executable")?;
-    let runtime_root = resolve_runtime(&executable)?;
+    let runtime_root = resolve_runtime(&executable, args.runtime_dir.as_deref())?;
     let python = runtime_root.join("bin/python");
     let runner = runtime_root.join("scripts/plugin_direct_runner.py");
     validate_runtime(&runtime_root)?;
@@ -94,7 +94,12 @@ async fn run_inference(args: InferArgs) -> Result<u8> {
 
 fn package_runtime(args: PackageArgs) -> Result<()> {
     let executable = env::current_exe().context("failed to resolve the CLI executable")?;
-    package_executable(&executable, &args.runtime_dir, &args.output)?;
+    package_executable_with_compression(
+        &executable,
+        &args.runtime_dir,
+        &args.output,
+        args.compression_level,
+    )?;
     Ok(())
 }
 
@@ -106,7 +111,10 @@ async fn run_prefetch(args: PrefetchArgs) -> Result<()> {
     Ok(())
 }
 
-fn resolve_runtime(executable: &Path) -> Result<PathBuf> {
+fn resolve_runtime(executable: &Path, runtime_dir: Option<&Path>) -> Result<PathBuf> {
+    if let Some(runtime_dir) = runtime_dir {
+        return Ok(runtime_dir.to_path_buf());
+    }
     if let Some(runtime_dir) = env::var_os(RUNTIME_OVERRIDE_ENV) {
         return Ok(PathBuf::from(runtime_dir));
     }
@@ -125,7 +133,7 @@ fn validate_runtime(runtime_root: &Path) -> Result<()> {
         let path = runtime_root.join(relative_path);
         if !path.is_file() {
             return Err(anyhow!(
-                "bundled runtime is missing '{}': {}",
+                "runtime is missing '{}': {}",
                 relative_path,
                 path.display()
             ));

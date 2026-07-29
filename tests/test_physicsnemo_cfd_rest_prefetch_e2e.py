@@ -68,6 +68,11 @@ def _write_readiness_stub(root: Path) -> None:
         'raise RuntimeError("readiness-only stub must never execute")\n',
         encoding="utf-8",
     )
+    for module_name in ["torch_geometric", "torch_scatter"]:
+        (root / f"{module_name}.py").write_text(
+            'raise RuntimeError("readiness-only stub must never execute")\n',
+            encoding="utf-8",
+        )
 
 
 def _request_json(

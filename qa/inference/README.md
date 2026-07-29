@@ -245,6 +245,9 @@ python -u qa/scripts/run_qa.py \
 
 Azure example:
 
+A sourceable, credential-free template is available at
+`qa/configs/publication-azure.env.example`.
+
 ```bash
 QA_PUBLICATION_STORAGE_TYPE=azure \
 QA_PUBLICATION_AZURE_ENDPOINT=https://<account>.blob.core.windows.net \

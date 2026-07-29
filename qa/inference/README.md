@@ -39,6 +39,7 @@ pytest -n 2
 - `test_cicd.py` - CI/CD pipeline tests (@pytest.mark.cicd)
 - `test_stress.py` - Sustained concurrency/load tests (@pytest.mark.stress)
 - `test_output_publication.py` - Live object-store sync tests (@pytest.mark.publication)
+- `test_physicsnemo_cfd_surface_e2e.py` - Opt-in live CFD GPU test (@pytest.mark.cfd_e2e)
 - `test_basic.py` - Core workflow tests (health, list workflows, run workflows)
 - `test_negative.py` - Invalid parameter tests
 - `test_experiments.py` - Experimental/exploratory tests
@@ -48,6 +49,87 @@ pytest -n 2
 - `deterministic_fcn_workflow`
 - `deterministic_workflow`
 - `diagnostic_workflow`
+
+## PhysicsNeMo-CFD E2E
+
+The Rust-only `cfd_e2e` suite is explicit opt-in and excluded from normal QA.
+It downloads the pinned public DrivAerML VTP and STL inputs, runs one
+`domino_surface` inference with `l2_pressure`, and validates the full
+API-to-GPU-to-artifact path. Submission uses a no-retry HTTP session so a
+transient response cannot duplicate the long-running GPU job.
+
+The deploy runner selects only `physicsnemo-cfd-gpu`, configures the exact
+Hugging Face source/CDN host policy, and increases the verified download
+timeout:
+
+```bash
+python -u qa/scripts/run_qa.py \
+  --service rust \
+  --image-tag <already-pushed-tag> \
+  --suite cfd_e2e \
+  --num-proc 1
+```
+
+For an existing correctly configured endpoint:
+
+```bash
+QA_CFD_E2E_ENABLED=1 \
+QA_CFD_E2E_TIMEOUT_SECS=23400 \
+pytest -m cfd_e2e \
+  --service rust \
+  --urls https://<endpoint> \
+  --token <endpoint-token> \
+  -v
+```
+
+Evidence is written under `QA_CFD_E2E_ARTIFACT_DIR` (default
+`artifacts/cfd-e2e`). The suite requires one compatible 80 GiB-class GPU,
+writable persistent `/outputs`, and outbound Hugging Face access.
+
+### Direct-provider parity
+
+The opt-in parity orchestrator first runs `cfd_e2e` through REST and persists a
+versioned handoff containing mount-relative input and report paths plus their
+digests. After the endpoint is torn down, it starts one same-image Lepton batch
+job. The job re-verifies the staged inputs, builds the checked-in provider
+configuration independently of the plugin's resolved config, invokes
+PhysicsNeMo-CFD directly, and compares the report structures and finite metric
+values symmetrically.
+
+```bash
+python -u qa/scripts/run_lepton_cfd_parity.py \
+  --image-tag <already-pushed-tag>
+```
+
+The endpoint and batch job run sequentially, so peak allocation remains one
+H100. Local evidence is under `qa/artifacts/cfd-parity/<run-id>` and remote
+evidence is under `/outputs/cfd-parity/<run-id>`. The default profile is
+`cfd_parity_surface_run1.json`; future surface or volume coverage is added by
+supplying another profile with its REST suite, direct runner module, input
+layout, provider config, and per-metric tolerances.
+
+Use `--profile qa/inference/cfd_parity_surface_run1_full_matrix.json` for the
+full `run_1` matrix: five surface models by five metrics, producing 25 unique
+model/case/metric selections. PhysicsNeMo-CFD expands vector and force metrics
+into 55 scalar report values; parity checks both per-case and summary scopes
+for 110 scalar comparisons.
+
+Add the pinned `run_11` case without duplicating the model profile:
+
+```bash
+python -u qa/scripts/run_lepton_cfd_parity.py \
+  --image-tag <already-pushed-tag> \
+  --profile qa/inference/cfd_parity_surface_run1_full_matrix.json \
+  --rest-request-path plugins/physicsnemo-cfd-surface-benchmark/examples/public_run_1_11_full_matrix_request.json
+```
+
+This selects 50 model/case/metric combinations and compares 110 per-case plus
+55 summary scalar values.
+
+Pass `--rest-evidence-dir <completed-cfd-e2e-run>` to reuse a completed REST
+run and launch only the direct comparison job. The handoff stores no tokens and
+uses only mount-relative paths; the job rechecks report and input digests before
+execution.
 
 ## Multi-GPU CI/CD Check
 
@@ -162,6 +244,9 @@ python -u qa/scripts/run_qa.py \
 ```
 
 Azure example:
+
+A sourceable, credential-free template is available at
+`qa/configs/publication-azure.env.example`.
 
 ```bash
 QA_PUBLICATION_STORAGE_TYPE=azure \
@@ -383,7 +468,7 @@ Useful flags:
 - `--lustre-dir`: subdirectory under `<NFS_MOUNT_BASE>/`; defaults to
   `crps_tests_<YYYYMMDD>`.
 - `--candidate-resource-shape`: Lepton shape for the PhysicsNeMo Serve candidate;
-  defaults to `gpu.8xh100-sxm`.
+  defaults to `gpu.4xh100-sxm`.
 - `--candidate-materialization-modes`: comma-separated PhysicsNeMo Serve fanout modes to
   compare against the Python baseline. Defaults to `scheduled_gpu,prepare_cpu`.
   Pass one mode, such as `scheduled_gpu`, for a single candidate run.

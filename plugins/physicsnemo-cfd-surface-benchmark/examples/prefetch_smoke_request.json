@@ -1,0 +1,22 @@
+{
+  "models": [
+    "domino_surface"
+  ],
+  "cases": [
+    {
+      "case_id": "run_1",
+      "mesh_uri": "https://raw.githubusercontent.com/Kitware/vtk-examples/5bdc0728cfe386fcba9df4250aa48fbd3ac05fab/src/SupplementaryData/Cxx/Visualization/Ring.vtp",
+      "sha256": "4996c7de165682f3bf35a0b4c1c019c366dde3ffafbc56d815a1a54a08cf0678",
+      "size_bytes": 5297,
+      "geometry_uri": "https://raw.githubusercontent.com/Kitware/vtk-examples/5bdc0728cfe386fcba9df4250aa48fbd3ac05fab/src/SupplementaryData/Cxx/Visualization/Ring.vtp",
+      "geometry_sha256": "4996c7de165682f3bf35a0b4c1c019c366dde3ffafbc56d815a1a54a08cf0678",
+      "geometry_size_bytes": 5297
+    }
+  ],
+  "metrics": [
+    "l2_pressure"
+  ],
+  "seed": 42,
+  "save_inference_mesh": false,
+  "visual_case_ids": []
+}

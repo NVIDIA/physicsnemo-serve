@@ -1,0 +1,23 @@
+{
+  "models": [
+    "domino_surface"
+  ],
+  "cases": [
+    {
+      "case_id": "run_1",
+      "mesh_uri": "https://cfd-assets.example.com/drivaerml/run_1/boundary_1.vtp",
+      "sha256": "50f68e26ffdf0681e4c151781de417c86ad0cf8e569b124d8b294b81118a0a78",
+      "size_bytes": 813,
+      "geometry_uri": "https://cfd-assets.example.com/drivaerml/run_1/drivaer_1.stl",
+      "geometry_sha256": "a5b34c0dcec59e32dce66e7f3010c59625d666888187b52910678a8a17ff472b",
+      "geometry_size_bytes": 29
+    }
+  ],
+  "metrics": [
+    "l2_pressure",
+    "l2_shear_stress"
+  ],
+  "seed": 42,
+  "save_inference_mesh": false,
+  "visual_case_ids": []
+}

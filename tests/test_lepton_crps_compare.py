@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -147,6 +149,54 @@ def test_default_compare_endpoint_name_is_meaningful_and_valid():
     assert candidate[-1].isalnum()
 
 
+def test_crps_report_reader_job_name_fits_lepton_limit(tmp_path: Path) -> None:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_lep = fake_bin / "lep"
+    fake_lep.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+    fake_lep.chmod(0o755)
+
+    env = {
+        **os.environ,
+        "PATH": f"{fake_bin}:{os.environ['PATH']}",
+        "IMAGE_NAME": "nvcr.io/test/earth2studio",
+        "LEPTON_NFS_PATH": "/shared/crps",
+    }
+    result = subprocess.run(
+        [
+            str(REPO_ROOT / "qa" / "scripts" / "submit-lepton-crps-job.sh"),
+            "--job-name",
+            "ff-crps-rogcl016-scheduled-gpu",
+            "--image-tag",
+            "nvcr.io/test/earth2studio:test",
+            "--forecast-a",
+            "/outputs/baseline.zarr",
+            "--forecast-b",
+            "/outputs/candidate.zarr",
+            "--workspace-id",
+            "test-workspace",
+            "--node-group",
+            "test-node-group",
+            "--pull-secret",
+            "test-pull-secret",
+            "--dry-run",
+        ],
+        cwd=REPO_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    report_job_line = next(
+        line for line in result.stdout.splitlines() if "report-job" in line
+    )
+    report_job_name = report_job_line.split(":", 1)[1].strip()
+    assert report_job_name == "ff-crps-rogcl016-scheduled-gp-report"
+    assert len(report_job_name) <= 36
+
+
 def test_parse_crps_report_extracts_final_summary(tmp_path):
     log_path = tmp_path / "crps.log"
     log_path.write_text(
@@ -226,9 +276,11 @@ def test_run_tears_down_endpoints_after_outputs_before_crps_job(
     baseline_request.write_text(json.dumps({"input": "baseline"}), encoding="utf-8")
     candidate_request.write_text(json.dumps({"input": "candidate"}), encoding="utf-8")
     events: list[str] = []
+    deployment_envs: dict[str, dict[str, str]] = {}
 
     def fake_deploy_endpoint(**kwargs):
         config = kwargs["config"]
+        deployment_envs[config.label] = kwargs["container_env"]
         return f"https://{config.label}.example.test", config.endpoint_name
 
     def fake_submit_endpoint_workflow(**kwargs):
@@ -324,6 +376,17 @@ def test_run_tears_down_endpoints_after_outputs_before_crps_job(
 
     assert crps_runner.run(args) == 0
 
+    assert deployment_envs == {
+        "baseline": {
+            "DEFAULT_OUTPUT_DIR": "/outputs",
+            "RESULTS_ZIP_DIR": "/outputs",
+        },
+        "candidate": {
+            "DEFAULT_OUTPUT_DIR": "/outputs",
+            "RESULTS_ZIP_DIR": "/outputs",
+            "PHYSICSNEMO_SERVE_ENABLED_PLUGIN_ID": "earth2-ensemble-fanout",
+        },
+    }
     assert events == [
         "baseline-submitted",
         "candidate-scheduled-gpu-submitted",

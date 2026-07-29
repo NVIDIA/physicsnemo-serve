@@ -9,7 +9,10 @@ import inspect
 import json
 import logging
 import os
+import queue
 import sys
+import threading
+import time
 from pathlib import Path
 from typing import Any, Callable
 
@@ -46,6 +49,9 @@ PIPELINE_PROFILE_ALIASES = {
 PARENT_TERMINAL_PREFIX = os.environ.get(
     "PHYSICSNEMO_SERVE_PARENT_TERMINAL_PREFIX", "parent_terminal"
 )
+PARENT_TERMINAL_POLL_INTERVAL_SECONDS = 0.25
+PARENT_TERMINAL_POLL_WORKERS = 2
+PARENT_TERMINAL_POLL_QUEUE_SIZE = 64
 logger = logging.getLogger(__name__)
 PHASE_EXECUTOR_FIELDS = {
     "prepare": "prepare_executor_class",
@@ -346,6 +352,10 @@ def expand_plugin_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
         developer["readiness"] = readiness
     if not isinstance(readiness, dict):
         raise ValueError("Plugin manifest developer.readiness must be an object")
+
+    configuration = expanded.get("configuration")
+    if "configuration" in expanded and not isinstance(configuration, dict):
+        raise ValueError("Plugin manifest configuration must be an object")
 
     if pipeline_profile:
         readiness.setdefault(
@@ -712,13 +722,14 @@ def legacy_artifacts_from_outputs(
 
     artifacts: list[dict[str, Any]] = []
     for output in outputs.registered_outputs():
-        artifacts.append(
-            {
-                "name": str(output.name),
-                "media_type": str(output.media_type),
-                "storage_path": str(output.path),
-            }
-        )
+        artifact = {
+            "name": str(output.name),
+            "media_type": str(output.media_type),
+            "storage_path": str(output.path),
+        }
+        if bool(getattr(output, "primary", False)):
+            artifact["primary"] = True
+        artifacts.append(artifact)
     return artifacts
 
 
@@ -1003,20 +1014,138 @@ def _has_phase_method(candidate: Any) -> bool:
     )
 
 
-def _build_abort_requested(
-    service_objects: dict[str, Any], parent_run_id: Any
-) -> Callable[[], bool]:
-    parent = str(parent_run_id or "").strip()
-    redis_client = service_objects.get("redis_client")
-    if not parent or redis_client is None or not hasattr(redis_client, "exists"):
-        return lambda: False
+class _DaemonPollPool:
+    """Small bounded daemon pool for Redis cancellation probes."""
 
-    terminal_key = f"{PARENT_TERMINAL_PREFIX}:{parent}"
+    def __init__(self) -> None:
+        self._tasks: queue.Queue[Callable[[], None]] = queue.Queue(
+            maxsize=PARENT_TERMINAL_POLL_QUEUE_SIZE
+        )
+        for index in range(PARENT_TERMINAL_POLL_WORKERS):
+            threading.Thread(
+                target=self._run,
+                name=f"plugin-parent-terminal-poll-{index}",
+                daemon=True,
+            ).start()
 
-    def abort_requested() -> bool:
+    def _run(self) -> None:
+        while True:
+            task = self._tasks.get()
+            try:
+                task()
+            except Exception:
+                logger.exception("Unhandled parent-terminal poll failure")
+            finally:
+                self._tasks.task_done()
+
+    def submit(self, task: Callable[[], None]) -> bool:
         try:
-            return bool(redis_client.exists(terminal_key))
+            self._tasks.put_nowait(task)
+        except queue.Full:
+            return False
+        return True
+
+
+_PARENT_TERMINAL_POLL_POOL: _DaemonPollPool | None = None
+_PARENT_TERMINAL_POLL_POOL_LOCK = threading.Lock()
+
+
+def _parent_terminal_poll_pool() -> _DaemonPollPool:
+    global _PARENT_TERMINAL_POLL_POOL
+    with _PARENT_TERMINAL_POLL_POOL_LOCK:
+        if _PARENT_TERMINAL_POLL_POOL is None:
+            _PARENT_TERMINAL_POLL_POOL = _DaemonPollPool()
+        return _PARENT_TERMINAL_POLL_POOL
+
+
+class _AbortRequested:
+    """Nonblocking composite cancellation check for synchronous plugin code."""
+
+    def __init__(self, service_objects: dict[str, Any], parent_run_id: Any) -> None:
+        self._worker_shutdown_event = service_objects.get("worker_shutdown_event")
+        self._parent_terminal_event = threading.Event()
+        self._redis_client = service_objects.get("redis_client")
+        parent = str(parent_run_id or "").strip()
+        self._terminal_key = f"{PARENT_TERMINAL_PREFIX}:{parent}" if parent else None
+        self._poll_lock = threading.Lock()
+        self._poll_in_flight = False
+        self._next_poll_at = 0.0
+        self._initial_poll_complete = threading.Event()
+
+    def _worker_shutdown_requested(self) -> bool:
+        is_set = getattr(self._worker_shutdown_event, "is_set", None)
+        if not callable(is_set):
+            return False
+        try:
+            return bool(is_set())
         except Exception:
             return False
 
-    return abort_requested
+    def _poll_parent_terminal(self) -> None:
+        try:
+            if bool(self._redis_client.exists(self._terminal_key)):
+                self._parent_terminal_event.set()
+        except Exception as exc:
+            logger.debug("Failed to poll parent terminal state: %s", exc)
+        finally:
+            self._initial_poll_complete.set()
+            with self._poll_lock:
+                self._poll_in_flight = False
+                self._next_poll_at = (
+                    time.monotonic() + PARENT_TERMINAL_POLL_INTERVAL_SECONDS
+                )
+
+    def _start_parent_poll_if_due(self) -> None:
+        if (
+            self._terminal_key is None
+            or self._redis_client is None
+            or not hasattr(self._redis_client, "exists")
+        ):
+            return
+
+        now = time.monotonic()
+        with self._poll_lock:
+            if self._poll_in_flight or now < self._next_poll_at:
+                return
+            self._poll_in_flight = True
+
+        if not _parent_terminal_poll_pool().submit(self._poll_parent_terminal):
+            self._initial_poll_complete.set()
+            with self._poll_lock:
+                self._poll_in_flight = False
+                self._next_poll_at = (
+                    time.monotonic() + PARENT_TERMINAL_POLL_INTERVAL_SECONDS
+                )
+
+    def __call__(self) -> bool:
+        if self._worker_shutdown_requested() or self._parent_terminal_event.is_set():
+            return True
+        self._start_parent_poll_if_due()
+        return self._worker_shutdown_requested() or self._parent_terminal_event.is_set()
+
+    def wait_for_initial_poll(self, timeout_seconds: float) -> bool:
+        """Wait briefly for the first parent check while remaining shutdown-aware."""
+        if self():
+            return True
+        if (
+            self._terminal_key is None
+            or self._redis_client is None
+            or not hasattr(self._redis_client, "exists")
+        ):
+            return False
+
+        deadline = time.monotonic() + max(0.0, timeout_seconds)
+        while not self._initial_poll_complete.is_set():
+            if self._worker_shutdown_requested():
+                return True
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return self()
+            self._initial_poll_complete.wait(min(remaining, 0.01))
+        return self()
+
+
+def _build_abort_requested(
+    service_objects: dict[str, Any], parent_run_id: Any
+) -> Callable[[], bool]:
+    return _AbortRequested(service_objects, parent_run_id)

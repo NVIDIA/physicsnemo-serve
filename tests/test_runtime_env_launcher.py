@@ -237,6 +237,118 @@ def test_build_worker_launch_specs_respects_executor_class_filter() -> None:
     assert specs[0]["env"]["GPU_DEVICE_KIND"] == "cpu"
 
 
+def test_explicit_executor_class_filter_opts_into_disabled_runtime() -> None:
+    module = load_runtime_env_launcher_module()
+    runtime_envs = {
+        "earth2-gpu": {
+            "python_executable": "/envs/earth2/bin/python",
+            "launch": {"enabled": True, "device_kind": "gpu"},
+        },
+        "physicsnemo-cfd-gpu": {
+            "python_executable": "/envs/cfd/bin/python",
+            "launch": {"enabled": False, "device_kind": "gpu"},
+        },
+    }
+    gpu = {
+        "device_index": 0,
+        "device_name": "H100",
+        "device_uuid": "GPU-0000",
+        "memory_mb": 81920,
+    }
+
+    default_specs = module.build_worker_launch_specs(
+        runtime_envs,
+        namespace="default",
+        pod_name="pod-0",
+        enabled_executor_classes=None,
+        gpu_inventory=[gpu],
+        worker_script="/repo/scripts/inference_worker.py",
+    )
+    assert [spec["executor_class"] for spec in default_specs] == ["earth2-gpu"]
+
+    selected_specs = module.build_worker_launch_specs(
+        runtime_envs,
+        namespace="default",
+        pod_name="pod-0",
+        enabled_executor_classes={"physicsnemo-cfd-gpu"},
+        gpu_inventory=[gpu],
+        worker_script="/repo/scripts/inference_worker.py",
+    )
+    assert [spec["executor_class"] for spec in selected_specs] == [
+        "physicsnemo-cfd-gpu"
+    ]
+
+
+def test_launcher_rejects_two_executor_classes_for_same_gpu() -> None:
+    module = load_runtime_env_launcher_module()
+    specs = [
+        {
+            "executor_class": "earth2-gpu",
+            "env": {
+                "GPU_DEVICE_KIND": "gpu",
+                "GPU_DEVICE_UUID": "GPU-0000",
+            },
+        },
+        {
+            "executor_class": "physicsnemo-cfd-gpu",
+            "env": {
+                "GPU_DEVICE_KIND": "gpu",
+                "GPU_DEVICE_UUID": "GPU-0000",
+            },
+        },
+    ]
+
+    try:
+        module._validate_one_gpu_executor_class_per_device(specs)
+    except ValueError as exc:
+        assert "multiple GPU executor classes" in str(exc)
+    else:
+        raise AssertionError("co-resident GPU executor classes must fail closed")
+
+
+def test_load_launch_specs_detects_gpu_for_explicitly_selected_disabled_runtime(
+    monkeypatch, tmp_path
+) -> None:
+    module = load_runtime_env_launcher_module()
+    config_path = tmp_path / "runtime.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "python_runtime_envs": {
+                    "physicsnemo-cfd-gpu": {
+                        "python_executable": "/envs/cfd/bin/python",
+                        "launch": {"enabled": False, "device_kind": "gpu"},
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    detected = []
+
+    def fake_detect_gpus():
+        detected.append(True)
+        return [
+            {
+                "device_index": 0,
+                "device_name": "H100",
+                "device_uuid": "GPU-0000",
+                "memory_mb": 81920,
+            }
+        ]
+
+    monkeypatch.setattr(module, "detect_gpus", fake_detect_gpus)
+    monkeypatch.setenv("PHYSICSNEMO_SERVE_RUNTIME_ENVS_CONFIG", str(config_path))
+    monkeypatch.setenv("PHYSICSNEMO_SERVE_EXECUTOR_CLASSES", "physicsnemo-cfd-gpu")
+
+    specs = module._load_launch_specs()
+
+    assert detected == [True]
+    assert len(specs) == 1
+    assert specs[0]["executor_class"] == "physicsnemo-cfd-gpu"
+    assert specs[0]["env"]["CUDA_VISIBLE_DEVICES"] == "0"
+
+
 def test_build_worker_launch_specs_rejects_workers_per_device_for_cpu() -> None:
     module = load_runtime_env_launcher_module()
 

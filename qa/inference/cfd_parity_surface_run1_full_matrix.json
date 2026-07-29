@@ -1,0 +1,184 @@
+{
+  "schema_version": 1,
+  "profile_id": "physicsnemo-cfd-surface-full-v1",
+  "workflow_id": "physicsnemo-cfd-surface-benchmark",
+  "domain": "surface",
+  "provider": {
+    "distribution": "nvidia-physicsnemo-cfd",
+    "module": "physicsnemo.cfd",
+    "repository": "https://github.com/NVIDIA/physicsnemo-cfd.git",
+    "tag": "v0.0.2",
+    "version": "0.0.2",
+    "commit": "921f14dc2ac14c04aabffaba3290deb792379dd8",
+    "physicsnemo_version": "2.1.1",
+    "python_version": "3.12"
+  },
+  "rest": {
+    "service": "rust",
+    "suite": "cfd_e2e",
+    "evidence_subdir": "cfd-e2e",
+    "request_path": "plugins/physicsnemo-cfd-surface-benchmark/examples/public_run_1_full_matrix_request.json"
+  },
+  "request": {
+    "models": [
+      "domino_surface",
+      "geotransolver_surface",
+      "transolver_surface",
+      "xmgn_surface",
+      "fignet_surface"
+    ],
+    "metrics": [
+      "l2_pressure",
+      "l2_shear_stress",
+      "l2_pressure_area_weighted",
+      "drag",
+      "lift"
+    ],
+    "seed": 42,
+    "save_inference_mesh": false,
+    "visual_case_ids": [],
+    "case_id_pattern": "^run_(?P<case_number>[1-9][0-9]*)$"
+  },
+  "input_layout": [
+    {
+      "digest_field": "sha256",
+      "size_field": "size_bytes",
+      "relative_path": "run_{case_number}/boundary_{case_number}.vtp"
+    },
+    {
+      "digest_field": "geometry_sha256",
+      "size_field": "geometry_size_bytes",
+      "relative_path": "run_{case_number}/drivaer_{case_number}.stl"
+    }
+  ],
+  "runner": {
+    "python": "/opt/physicsnemo-cfd-venv/bin/python",
+    "module": "physicsnemo.cfd.evaluation.benchmarks.run",
+    "timeout_seconds": 21600,
+    "environment": {
+      "HF_HOME": "$MOUNT_TARGET/.cache/physicsnemo-cfd/huggingface",
+      "PHYSICSNEMO_CFD_MODEL_CACHE": "$MOUNT_TARGET/.cache/physicsnemo-cfd/models",
+      "PYTHONPATH": "/app/python"
+    }
+  },
+  "config": {
+    "run": {
+      "device": "cuda:0",
+      "batch_size": 1,
+      "distributed": false,
+      "fail_on_all_skipped": true,
+      "fail_on_any_metric_nan": false
+    },
+    "models": [
+      {
+        "name": "domino_surface",
+        "inference_domain": "surface",
+        "kwargs": {}
+      },
+      {
+        "name": "geotransolver_surface",
+        "inference_domain": "surface",
+        "kwargs": {
+          "batch_resolution": 60000,
+          "geometry_sampling": 300000
+        }
+      },
+      {
+        "name": "transolver_surface",
+        "inference_domain": "surface",
+        "kwargs": {
+          "batch_resolution": 60000,
+          "geometry_sampling": 300000
+        }
+      },
+      {
+        "name": "xmgn_surface",
+        "inference_domain": "surface",
+        "kwargs": {
+          "max_points": 250000,
+          "interpolation_k": 4
+        }
+      },
+      {
+        "name": "fignet_surface",
+        "inference_domain": "surface",
+        "kwargs": {
+          "max_points": 250000,
+          "interpolation_k": 4
+        }
+      }
+    ],
+    "dataset": {
+      "name": "drivaerml",
+      "kwargs": {
+        "align_ground_truth_to_model": true,
+        "inference_domain": "surface"
+      }
+    },
+    "reproducibility": {
+      "log_env": false,
+      "save_artifacts": true
+    },
+    "output": {
+      "surface_interpolate_point_to_cell_for_metrics": true,
+      "surface_metrics_idw_k": 5,
+      "surface_metrics_idw_device": "cpu",
+      "mesh_field_names": {
+        "pressure": "pressure_pred",
+        "shear_stress": "wall_shear_stress_pred"
+      },
+      "ground_truth_mesh_field_names": {
+        "pressure": "pressure_true",
+        "shear_stress": "wall_shear_stress_true"
+      }
+    },
+    "reports": {
+      "enabled": false,
+      "save_comparison_meshes": false,
+      "comparison_mesh_subdir": "comparison_meshes",
+      "visuals": []
+    }
+  },
+  "comparison": {
+    "default_rtol": 1e-05,
+    "default_atol": 1e-06,
+    "metrics": {
+      "l2_pressure": {
+        "rtol": 1e-05,
+        "atol": 1e-06
+      },
+      "l2_shear_stress": {
+        "rtol": 1e-05,
+        "atol": 1e-06
+      },
+      "l2_pressure_area_weighted": {
+        "rtol": 1e-05,
+        "atol": 1e-06
+      },
+      "drag": {
+        "rtol": 1e-05,
+        "atol": 1e-06
+      },
+      "lift": {
+        "rtol": 1e-05,
+        "atol": 1e-06
+      }
+    },
+    "models": {
+      "geotransolver_surface": {
+        "default_rtol": 0.005,
+        "default_atol": 1e-06,
+        "metrics": {
+          "drag_error": {
+            "rtol": 0.01,
+            "atol": 1e-06
+          }
+        }
+      },
+      "xmgn_surface": {
+        "default_rtol": 0.001,
+        "default_atol": 1e-06
+      }
+    }
+  }
+}

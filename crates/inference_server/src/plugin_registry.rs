@@ -58,6 +58,12 @@ pub struct PluginManifest {
     pub outputs: PluginOutputs,
     #[serde(default)]
     pub developer: PluginDeveloper,
+    /// Immutable, non-secret provider/workflow settings consumed by the plugin.
+    ///
+    /// Keeping these settings in the manifest makes the deployed workflow
+    /// contract discoverable without importing its Python dependencies.
+    #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
+    pub configuration: serde_json::Value,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -262,6 +268,12 @@ impl PluginManifest {
     pub fn from_yaml_str(input: &str) -> Result<Self> {
         let mut value: serde_json::Value =
             serde_yaml::from_str(input).context("failed to parse plugin manifest YAML")?;
+        if value
+            .as_object()
+            .is_some_and(|manifest| manifest.get("configuration").is_some_and(|v| v.is_null()))
+        {
+            bail!("configuration must be an object when provided");
+        }
         expand_manifest_defaults(&mut value)?;
         serde_json::from_value(value).context("failed to parse plugin manifest YAML")
     }
@@ -271,6 +283,10 @@ impl PluginManifest {
         validate_non_empty("metadata.display_name", &self.metadata.display_name)?;
         validate_non_empty("metadata.version", &self.metadata.version)?;
         validate_non_empty("metadata.description", &self.metadata.description)?;
+
+        if !self.configuration.is_null() && !self.configuration.is_object() {
+            bail!("configuration must be an object when provided");
+        }
 
         if self.ingress.content_types.is_empty() {
             bail!("ingress.content_types must contain at least one content type");

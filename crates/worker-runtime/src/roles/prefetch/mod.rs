@@ -99,7 +99,10 @@ impl PrefetchRole {
             .await
             .context("prefetch: materializer failed")?;
 
-        if self.fail_on_plan_generation_error && materialized.stats.required_errors > 0 {
+        if materialized.stats.required_errors > 0
+            && (self.fail_on_plan_generation_error
+                || materialized.stats.required_verified_errors > 0)
+        {
             return Err(anyhow!(
                 "prefetch: required download failures: {}",
                 materialized.stats.required_errors

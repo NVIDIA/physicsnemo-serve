@@ -11,6 +11,7 @@ import os
 import signal
 import subprocess
 import sys
+import threading
 import time
 import urllib.request
 from pathlib import Path
@@ -1526,6 +1527,7 @@ WORKFLOW = DemoWorkflow()
             "name": "postprocessed-output",
             "media_type": "application/json",
             "storage_path": str(expected_output),
+            "primary": True,
         }
     ]
 
@@ -1559,6 +1561,97 @@ def test_inference_worker_supports_class_based_plugin_module(
 
     assert result["status"] == "succeeded"
     assert result["doubled"] == 10
+
+
+def test_inference_worker_exposes_process_shutdown_to_plugin_abort_callback(
+    tmp_path: Path, monkeypatch
+):
+    plugin_root = create_class_based_json_plugin(
+        tmp_path, plugin_id="demo-worker-shutdown"
+    )
+    module = load_inference_worker_module()
+    monkeypatch.setenv("PLUGIN_DIR", str(plugin_root.parent))
+    monkeypatch.setenv("DEFAULT_OUTPUT_DIR", str(tmp_path / "outputs"))
+
+    shutdown_event = threading.Event()
+    abort_callbacks = []
+    original_build_context = module.build_plugin_context
+
+    def recording_build_context(payload):
+        context = original_build_context(payload)
+        abort_callbacks.append(context["abort_requested"])
+        return context
+
+    monkeypatch.setattr(module, "build_plugin_context", recording_build_context)
+    result = module.WorkflowExecutor(
+        DummyRedis(), worker_shutdown_event=shutdown_event
+    ).execute(
+        plugin_root.name,
+        "run-worker-shutdown",
+        {"value": 5, "doubled": 10},
+        payload={
+            "workflow_id": plugin_root.name,
+            "operation": "run",
+            "parameters": {"value": 5, "doubled": 10},
+            "request": {
+                "content_type": "application/json",
+                "raw_fields": {"value": 5},
+                "input_artifacts": [],
+            },
+            "runtime": {"entrypoint": "workflow.py", "kind": "python"},
+        },
+    )
+
+    assert result["status"] == "succeeded"
+    assert len(abort_callbacks) == 1
+    assert abort_callbacks[0]() is False
+    shutdown_event.set()
+    assert abort_callbacks[0]() is True
+
+
+def test_inference_worker_maps_plugin_cancellation_to_cancelled_status(
+    tmp_path: Path, monkeypatch
+):
+    plugin_root = create_class_based_json_plugin(tmp_path, plugin_id="demo-cancel")
+    write_file(
+        plugin_root / "workflow.py",
+        """
+from plugin_sdk import PluginCancelledError, PluginWorkflow
+
+
+class CancelledWorkflow(PluginWorkflow):
+    def execute(self, ctx):
+        raise PluginCancelledError("operator requested shutdown")
+
+
+WORKFLOW = CancelledWorkflow
+""".strip(),
+    )
+    module = load_inference_worker_module()
+
+    monkeypatch.setenv("PLUGIN_DIR", str(plugin_root.parent))
+    monkeypatch.setenv("DEFAULT_OUTPUT_DIR", str(tmp_path / "outputs"))
+
+    result = module.WorkflowExecutor(DummyRedis()).execute(
+        plugin_root.name,
+        "run-cancelled",
+        {"value": 5},
+        payload={
+            "workflow_id": plugin_root.name,
+            "operation": "run",
+            "parameters": {"value": 5},
+            "request": {
+                "content_type": "application/json",
+                "raw_fields": {"value": 5},
+                "input_artifacts": [],
+            },
+            "runtime": {"entrypoint": "workflow.py", "kind": "python"},
+        },
+    )
+
+    assert result["status"] == "cancelled"
+    assert result["output_path"] is None
+    assert result["error"] == "operator requested shutdown"
 
 
 def test_inference_worker_execute_creates_fresh_workflow_object_per_request(
@@ -1905,6 +1998,7 @@ def test_inference_worker_builds_legacy_envelope_from_registered_outputs(
             "name": "demo-output",
             "media_type": "application/json",
             "storage_path": str(expected_output_path),
+            "primary": True,
         }
     ]
 
@@ -3686,6 +3780,39 @@ def test_inference_worker_process_message_async_ignores_removed_unload_flag(
     sys.modules.pop(module_name, None)
 
 
+def test_inference_worker_sigterm_sets_process_event_while_event_loop_is_blocked():
+    module = load_inference_worker_module()
+
+    async def scenario() -> None:
+        async_shutdown_event = asyncio.Event()
+        worker_shutdown_event = threading.Event()
+        registered_handlers = module._register_async_shutdown_handlers(
+            async_shutdown_event, worker_shutdown_event
+        )
+
+        def send_sigterm() -> None:
+            time.sleep(0.05)
+            os.kill(os.getpid(), signal.SIGTERM)
+
+        sender = threading.Thread(target=send_sigterm, daemon=True)
+        try:
+            sender.start()
+            deadline = time.monotonic() + 1
+            while not worker_shutdown_event.is_set() and time.monotonic() < deadline:
+                time.sleep(0.01)
+
+            assert worker_shutdown_event.is_set()
+            assert not async_shutdown_event.is_set()
+            await asyncio.sleep(0)
+            assert async_shutdown_event.is_set()
+        finally:
+            sender.join(timeout=1)
+            for signum, previous_handler in registered_handlers:
+                signal.signal(signum, previous_handler)
+
+    asyncio.run(scenario())
+
+
 def test_inference_worker_main_async_registers_signal_handlers_for_shutdown(
     monkeypatch,
 ):
@@ -3714,7 +3841,19 @@ def test_inference_worker_main_async_registers_signal_handlers_for_shutdown(
     monkeypatch.setitem(sys.modules, "redis", fake_redis_module)
 
     deregister_calls: list[tuple[str, str | None]] = []
-    signal_handlers: dict[int, tuple[object, tuple[object, ...]]] = {}
+    signal_handlers: dict[int, object] = {}
+    worker_shutdown_events: list[threading.Event] = []
+
+    def fake_getsignal(signum: int):
+        return signal_handlers.get(signum, signal.SIG_DFL)
+
+    def fake_signal(signum: int, handler):
+        previous = signal_handlers.get(signum, signal.SIG_DFL)
+        signal_handlers[signum] = handler
+        return previous
+
+    monkeypatch.setattr(module.signal, "getsignal", fake_getsignal)
+    monkeypatch.setattr(module.signal, "signal", fake_signal)
 
     async def fake_register_stream_async(
         _qm, _stream_name, _metadata, registry_field=None
@@ -3723,6 +3862,25 @@ def test_inference_worker_main_async_registers_signal_handlers_for_shutdown(
 
     async def fake_deregister_stream_async(_qm, stream_name, registry_field=None):
         deregister_calls.append((stream_name, registry_field))
+
+    class FakeWorkflowExecutor:
+        def __init__(
+            self,
+            _redis_client,
+            registry_publisher=None,
+            worker_shutdown_event=None,
+        ):
+            assert registry_publisher is not None
+            assert worker_shutdown_event is not None
+            worker_shutdown_events.append(worker_shutdown_event)
+
+        def warm_enabled_workflow(self):
+            return None
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(module, "WorkflowExecutor", FakeWorkflowExecutor)
 
     async def scenario() -> None:
         read_started = asyncio.Event()
@@ -3749,20 +3907,6 @@ def test_inference_worker_main_async_registers_signal_handlers_for_shutdown(
             module, "deregister_stream_async", fake_deregister_stream_async
         )
 
-        loop_type = type(asyncio.get_running_loop())
-
-        def fake_add_signal_handler(self, signum, callback, *args):
-            signal_handlers[signum] = (callback, args)
-
-        def fake_remove_signal_handler(self, signum):
-            signal_handlers.pop(signum, None)
-            return True
-
-        monkeypatch.setattr(loop_type, "add_signal_handler", fake_add_signal_handler)
-        monkeypatch.setattr(
-            loop_type, "remove_signal_handler", fake_remove_signal_handler
-        )
-
         task = asyncio.create_task(module.main_async())
         try:
             await asyncio.wait_for(read_started.wait(), timeout=1)
@@ -3772,8 +3916,10 @@ def test_inference_worker_main_async_registers_signal_handlers_for_shutdown(
             assert signal.SIGINT in signal_handlers, (
                 "main_async should register a SIGINT handler for graceful shutdown"
             )
-            callback, args = signal_handlers[signal.SIGTERM]
-            callback(*args)
+            callback = signal_handlers[signal.SIGTERM]
+            assert callable(callback)
+            callback(signal.SIGTERM, None)
+            assert worker_shutdown_events[0].is_set()
             await asyncio.wait_for(task, timeout=1)
         finally:
             if not task.done():
@@ -4173,6 +4319,21 @@ def test_plugin_dev_run_local_plan_uses_scheduler_profile_for_empty_resource_def
     ]
 
 
+@pytest.mark.parametrize("value", ["unsafe", "null"])
+def test_plugin_manifest_configuration_must_be_an_object(tmp_path: Path, value: str):
+    script_dir = repo_root() / "scripts"
+    if str(script_dir) not in sys.path:
+        sys.path.insert(0, str(script_dir))
+
+    from plugin_runtime import load_plugin_manifest  # type: ignore
+
+    manifest_path = tmp_path / "plugin.yaml"
+    manifest_path.write_text(f"configuration: {value}\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="configuration must be an object"):
+        load_plugin_manifest(manifest_path)
+
+
 def test_shipped_plugins_have_local_docs_and_example_fixtures():
     script_dir = repo_root() / "scripts"
     if str(script_dir) not in sys.path:
@@ -4346,6 +4507,9 @@ def test_plugin_runtime_build_context_exposes_abort_requested_for_parent_run():
     )
 
     assert callable(ctx["abort_requested"])
+    deadline = time.monotonic() + 1
+    while not ctx["abort_requested"]() and time.monotonic() < deadline:
+        time.sleep(0.01)
     assert ctx["abort_requested"]() is True
 
 
@@ -5622,6 +5786,7 @@ def test_plugin_dev_run_example_builds_legacy_metadata_for_new_contract_plugin(
             "name": "demo-output",
             "media_type": "application/json",
             "storage_path": str(expected_output_path),
+            "primary": True,
         }
     ]
 

@@ -423,7 +423,7 @@ inference crps compare:
     QA_CRPS_THRESHOLD: "0.01"
     QA_RUN_TIMEOUT: "10800"
     QA_RUN_POLL_INTERVAL: "120"
-    QA_CANDIDATE_RESOURCE_SHAPE: gpu.8xh100-sxm
+    QA_CANDIDATE_RESOURCE_SHAPE: gpu.4xh100-sxm
     QA_STREAM_ENDPOINT_LOGS: "true"
     QA_ENDPOINT_LOG_INTERVAL: "30"
   before_script:

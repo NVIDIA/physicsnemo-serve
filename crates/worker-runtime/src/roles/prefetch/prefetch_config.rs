@@ -9,9 +9,12 @@
 //! Transport/engine concerns (read_block_ms, read_count, handoff_stream) live
 //! in [`crate::config::PrefetchRoleConfig`] / [`crate::config::RuntimeConfig`].
 
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::time::Duration;
 use tracing::warn;
+
+const DEFAULT_MAX_PREFETCH_BYTES: u64 = 64 * 1024 * 1024 * 1024;
 
 /// Download infrastructure configuration for prefetch operations.
 ///
@@ -44,6 +47,18 @@ pub struct PrefetchConfig {
 
     /// Index cache TTL in days.
     pub idx_cache_ttl_days: i64,
+
+    /// Exact DNS hosts permitted for integrity-verified HTTPS downloads.
+    pub allowed_https_hosts: BTreeSet<String>,
+
+    /// Exact redirect hosts permitted to receive provider-generated signed queries.
+    pub allowed_signed_redirect_hosts: BTreeSet<String>,
+
+    /// Maximum bytes materialized for a single object.
+    pub max_object_bytes: u64,
+
+    /// Maximum aggregate bytes materialized by one prefetch request.
+    pub max_request_bytes: u64,
 }
 
 impl Default for PrefetchConfig {
@@ -60,6 +75,10 @@ impl Default for PrefetchConfig {
                 .unwrap_or_else(|| PathBuf::from("/tmp"))
                 .join("e2s_ext"),
             idx_cache_ttl_days: 7,
+            allowed_https_hosts: BTreeSet::new(),
+            allowed_signed_redirect_hosts: BTreeSet::new(),
+            max_object_bytes: DEFAULT_MAX_PREFETCH_BYTES,
+            max_request_bytes: DEFAULT_MAX_PREFETCH_BYTES,
         }
     }
 }
@@ -75,6 +94,20 @@ impl PrefetchConfig {
 
     fn parse_env_u32(var_name: &str) -> Option<u32> {
         std::env::var(var_name).ok().and_then(|s| s.parse().ok())
+    }
+
+    fn parse_env_host_set(var_name: &str) -> BTreeSet<String> {
+        std::env::var(var_name)
+            .ok()
+            .map(|value| {
+                value
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|host| !host.is_empty())
+                    .map(str::to_ascii_lowercase)
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     fn validate_non_zero_usize(
@@ -160,6 +193,18 @@ impl PrefetchConfig {
             "s3_rate_limit_per_sec",
             "E2S_S3_RATE_LIMIT_PER_SEC",
         );
+        self.max_object_bytes = Self::validate_non_zero_u64(
+            self.max_object_bytes,
+            default.max_object_bytes,
+            "max_object_bytes",
+            "E2S_PREFETCH_MAX_OBJECT_BYTES",
+        );
+        self.max_request_bytes = Self::validate_non_zero_u64(
+            self.max_request_bytes,
+            default.max_request_bytes,
+            "max_request_bytes",
+            "E2S_PREFETCH_MAX_REQUEST_BYTES",
+        );
         self
     }
 
@@ -178,6 +223,10 @@ impl PrefetchConfig {
     /// | `E2S_HTTP_POOL_TIMEOUT_SECS` | 90 | HTTP pool timeout |
     /// | `E2S_EXT_CACHE` | ~/.cache/e2s_ext | Cache directory |
     /// | `E2S_IDX_CACHE_TTL_DAYS` | 7 | Index cache TTL |
+    /// | `E2S_PREFETCH_ALLOWED_HTTPS_HOSTS` | empty | Comma-separated exact host allowlist for verified downloads |
+    /// | `E2S_PREFETCH_ALLOWED_SIGNED_REDIRECT_HOSTS` | empty | Exact redirect hosts allowed to receive provider-generated signed queries; each must also be in `E2S_PREFETCH_ALLOWED_HTTPS_HOSTS` |
+    /// | `E2S_PREFETCH_MAX_OBJECT_BYTES` | 64 GiB | Maximum bytes per object |
+    /// | `E2S_PREFETCH_MAX_REQUEST_BYTES` | 64 GiB | Maximum aggregate bytes per request |
     pub fn from_env() -> Self {
         let default = Self::default();
 
@@ -217,6 +266,18 @@ impl PrefetchConfig {
                 .ok()
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(default.idx_cache_ttl_days),
+
+            allowed_https_hosts: Self::parse_env_host_set("E2S_PREFETCH_ALLOWED_HTTPS_HOSTS"),
+
+            allowed_signed_redirect_hosts: Self::parse_env_host_set(
+                "E2S_PREFETCH_ALLOWED_SIGNED_REDIRECT_HOSTS",
+            ),
+
+            max_object_bytes: Self::parse_env_u64("E2S_PREFETCH_MAX_OBJECT_BYTES")
+                .unwrap_or(default.max_object_bytes),
+
+            max_request_bytes: Self::parse_env_u64("E2S_PREFETCH_MAX_REQUEST_BYTES")
+                .unwrap_or(default.max_request_bytes),
         }
         .validate()
     }
@@ -270,6 +331,8 @@ mod tests {
         assert_eq!(config.s3_rate_limit_per_sec, 500);
         assert_eq!(config.http_pool_max_idle_per_host, 50);
         assert_eq!(config.http_pool_idle_timeout_secs, 90);
+        assert_eq!(config.max_object_bytes, 64 * 1024 * 1024 * 1024);
+        assert_eq!(config.max_request_bytes, 64 * 1024 * 1024 * 1024);
     }
 
     #[test]
@@ -356,6 +419,40 @@ mod tests {
         assert_eq!(
             config.s3_rate_limit_per_sec,
             PrefetchConfig::default().s3_rate_limit_per_sec
+        );
+    }
+
+    #[test]
+    fn from_env_normalizes_exact_https_host_allowlist() {
+        let config = with_env_var(
+            "E2S_PREFETCH_ALLOWED_HTTPS_HOSTS",
+            Some(" Assets.Example.COM,models.example.com, "),
+            PrefetchConfig::from_env,
+        );
+
+        assert_eq!(
+            config.allowed_https_hosts,
+            BTreeSet::from([
+                "assets.example.com".to_string(),
+                "models.example.com".to_string(),
+            ])
+        );
+    }
+
+    #[test]
+    fn from_env_normalizes_exact_signed_redirect_host_allowlist() {
+        let config = with_env_var(
+            "E2S_PREFETCH_ALLOWED_SIGNED_REDIRECT_HOSTS",
+            Some(" US.AWS.CDN.HF.CO,cdn.example.com, "),
+            PrefetchConfig::from_env,
+        );
+
+        assert_eq!(
+            config.allowed_signed_redirect_hosts,
+            BTreeSet::from([
+                "cdn.example.com".to_string(),
+                "us.aws.cdn.hf.co".to_string(),
+            ])
         );
     }
 }

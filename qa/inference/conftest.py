@@ -200,6 +200,10 @@ def pytest_configure(config):
         "markers",
         "publication: live object-store publication sync tests",
     )
+    config.addinivalue_line(
+        "markers",
+        "cfd_e2e: opt-in live PhysicsNeMo-CFD GPU workflow test",
+    )
 
     pathlib.Path("reports").mkdir(exist_ok=True)
     pathlib.Path("logs").mkdir(exist_ok=True)

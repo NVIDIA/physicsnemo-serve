@@ -191,6 +191,23 @@
           "gpu"
         ]
       }
+    },
+    "physicsnemo-cfd-gpu": {
+      "python_executable": "/opt/physicsnemo-cfd-venv/bin/python",
+      "env": {
+        "HF_HOME": "/outputs/.cache/physicsnemo-cfd/huggingface",
+        "PHYSICSNEMO_CFD_MODEL_CACHE": "/outputs/.cache/physicsnemo-cfd/models",
+        "PYTHONPATH": "/app/python"
+      },
+      "launch": {
+        "enabled": false,
+        "device_kind": "gpu",
+        "workers_per_device": 1,
+        "tags": [
+          "physicsnemo-cfd",
+          "gpu"
+        ]
+      }
     }
   },
   "output_publication": {

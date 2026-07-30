@@ -52,6 +52,8 @@ This project is currently not accepting contributions.
 
 PhysicsNeMo-Serve is provided under the Apache License 2.0, refer to the [LICENSE file](LICENSE) for full license text.
 
+This project will download and install additional third-party open source software projects. Review the license terms of these open source projects before use. In particular, note that NVIDIA does not release docker images or host this service. If you choose to do either, also inspect the default Dockerfile provided (and any changes you make) and ensure you comply with any additional licensing terms.
+
 ## Docs
 
 - [onboarding.md](docs/onboarding.md)

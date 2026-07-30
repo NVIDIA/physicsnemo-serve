@@ -10,6 +10,7 @@ import json
 import os
 import subprocess
 import sys
+from contextlib import redirect_stdout
 from pathlib import Path
 from typing import Any
 
@@ -82,12 +83,16 @@ def main() -> int:
     args = parser.parse_args()
 
     try:
-        result = run_plugin(
-            Path(args.plugin_root).expanduser().resolve(),
-            Path(args.request).expanduser().resolve(),
-            Path(args.output_dir).expanduser().resolve(),
-            args.run_id,
-        )
+        # Plugin imports and hooks may print progress or library diagnostics.
+        # Keep stdout reserved for the single JSON protocol response expected
+        # by the Rust caller.
+        with redirect_stdout(sys.stderr):
+            result = run_plugin(
+                Path(args.plugin_root).expanduser().resolve(),
+                Path(args.request).expanduser().resolve(),
+                Path(args.output_dir).expanduser().resolve(),
+                args.run_id,
+            )
         json.dump(result, sys.stdout)
         sys.stdout.write("\n")
         return 0

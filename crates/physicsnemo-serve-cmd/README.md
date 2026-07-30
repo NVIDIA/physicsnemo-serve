@@ -57,6 +57,39 @@ neither is set, the CLI falls back to its appended runtime. Runtime creation is
 an explicit provisioning step; dependencies are never installed during
 inference.
 
+### Install a runtime for one plugin
+
+Build the separate installer binary:
+
+```bash
+make build-serve-installer
+```
+
+The installer uses `uv`, creates the virtual environment in a temporary
+directory, installs the base runner dependencies and plugin requirements,
+copies the embedded runner/SDK modules, verifies the imports listed under
+`developer.readiness.python_modules`, and only then publishes the requested
+runtime directory. If `uv` is not already on `PATH`, the installer bootstraps a
+pinned release under the user's local PhysicsNeMo Serve data directory without
+requiring `sudo` or editing shell startup files:
+
+```bash
+./dist/physicsnemo-serve-install \
+  --plugin plugins/e2s-deterministic \
+  --requirements packaging/physicsnemo-serve-cmd/external-runtime/requirements-earth2studio.txt \
+  --runtime-dir "$HOME/.local/share/physicsnemo-serve/runtimes/e2s-deterministic" \
+  --python 3.12 \
+  --torch-backend cu128
+```
+
+`--requirements` may be repeated. When it is omitted, the installer uses
+`<plugin>/requirements.txt` if that file exists. Import names in
+`plugin.yaml` are used only for verification because a Python import name does
+not reliably identify its installable package. Pass `--uv PATH` to use a
+preinstalled copy in an offline or controlled environment. Use
+`--skip-import-checks` only when imports require unavailable runtime resources
+such as model assets.
+
 ## Build a self-contained executable
 
 The launcher packages a filesystem CPython runtime as a compressed payload

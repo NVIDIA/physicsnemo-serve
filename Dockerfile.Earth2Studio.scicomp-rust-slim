@@ -30,12 +30,17 @@ FROM chef AS planner
 # Copy workspace manifests.
 COPY Cargo.toml Cargo.lock ./
 COPY crates/inference_server/Cargo.toml ./crates/inference_server/
+COPY crates/physicsnemo-serve-cmd/Cargo.toml ./crates/physicsnemo-serve-cmd/
 COPY crates/scicomp-rq/Cargo.toml ./crates/scicomp-rq/
 COPY crates/worker-runtime/Cargo.toml ./crates/worker-runtime/
 COPY crates/e2s_zarr_io/Cargo.toml ./crates/e2s_zarr_io/
 
 # Create minimal source stubs for cargo-chef to analyze
 RUN mkdir -p crates/inference_server/src && echo "fn main() {}" > crates/inference_server/src/main.rs \
+ && mkdir -p crates/physicsnemo-serve-cmd/src \
+ && echo "pub fn dummy() {}" > crates/physicsnemo-serve-cmd/src/lib.rs \
+ && echo "fn main() {}" > crates/physicsnemo-serve-cmd/src/main.rs \
+ && echo "fn main() {}" > crates/physicsnemo-serve-cmd/src/runtime_installer_main.rs \
  && mkdir -p crates/scicomp-rq/src && echo "pub fn dummy() {}" > crates/scicomp-rq/src/lib.rs \
  && mkdir -p crates/scicomp-rq/benches && echo "fn main() {}" > crates/scicomp-rq/benches/redis_utils_parser.rs \
  && mkdir -p crates/worker-runtime/src && echo "fn main() {}" > crates/worker-runtime/src/main.rs \
@@ -86,12 +91,17 @@ COPY --from=planner /src/recipe.json recipe.json
 # Copy workspace manifests (needed for cargo chef cook).
 COPY Cargo.toml Cargo.lock ./
 COPY crates/inference_server/Cargo.toml ./crates/inference_server/
+COPY crates/physicsnemo-serve-cmd/Cargo.toml ./crates/physicsnemo-serve-cmd/
 COPY crates/scicomp-rq/Cargo.toml ./crates/scicomp-rq/
 COPY crates/worker-runtime/Cargo.toml ./crates/worker-runtime/
 COPY crates/e2s_zarr_io/Cargo.toml ./crates/e2s_zarr_io/
 
 # Create minimal source stubs required for manifest parsing during cargo-chef cook.
 RUN mkdir -p crates/inference_server/src && echo "fn main() {}" > crates/inference_server/src/main.rs \
+ && mkdir -p crates/physicsnemo-serve-cmd/src \
+ && echo "pub fn dummy() {}" > crates/physicsnemo-serve-cmd/src/lib.rs \
+ && echo "fn main() {}" > crates/physicsnemo-serve-cmd/src/main.rs \
+ && echo "fn main() {}" > crates/physicsnemo-serve-cmd/src/runtime_installer_main.rs \
  && mkdir -p crates/scicomp-rq/src && echo "pub fn dummy() {}" > crates/scicomp-rq/src/lib.rs \
  && mkdir -p crates/scicomp-rq/benches && echo "fn main() {}" > crates/scicomp-rq/benches/redis_utils_parser.rs \
  && mkdir -p crates/worker-runtime/src && echo "fn main() {}" > crates/worker-runtime/src/main.rs \
@@ -133,6 +143,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 # skeleton so the actual build can run with --locked.
 COPY Cargo.toml Cargo.lock ./
 COPY crates/inference_server/Cargo.toml ./crates/inference_server/
+COPY crates/physicsnemo-serve-cmd/Cargo.toml ./crates/physicsnemo-serve-cmd/
 COPY crates/scicomp-rq/Cargo.toml ./crates/scicomp-rq/
 COPY crates/worker-runtime/Cargo.toml ./crates/worker-runtime/
 COPY crates/e2s_zarr_io/Cargo.toml ./crates/e2s_zarr_io/

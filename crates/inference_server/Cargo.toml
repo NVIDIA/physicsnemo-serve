@@ -8,37 +8,14 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 
-[[bin]]
-name = "inference_server"
-path = "src/main.rs"
-required-features = ["rest"]
-
-[features]
-default = ["rest"]
-rest = [
-    "dep:axum",
-    "dep:jsonschema",
-    "dep:nvml-wrapper",
-    "dep:prometheus-client",
-    "dep:redis",
-    "dep:scicomp-rq",
-    "dep:sysinfo",
-    "dep:tokio",
-    "dep:tower",
-    "dep:tower-http",
-    "dep:tracing",
-    "dep:tracing-subscriber",
-    "dep:uuid",
-]
-
 [dependencies]
 # Web framework
-axum = { version = "0.7", features = ["macros", "multipart"], optional = true }
-tower = { version = "0.5.2", optional = true }
-tower-http = { version = "0.5", features = ["cors", "limit", "trace"], optional = true }
+axum = { version = "0.7", features = ["macros", "multipart"] }
+tower = "0.5.2"
+tower-http = { version = "0.5", features = ["cors", "limit", "trace"] }
 
 # Async runtime
-tokio = { workspace = true, features = ["fs"], optional = true }
+tokio = { workspace = true, features = ["fs"] }
 
 # Serialization
 serde = { workspace = true }
@@ -49,21 +26,21 @@ serde_yaml = "0.9"
 anyhow = { workspace = true }
 
 # Utilities
-uuid = { workspace = true, optional = true }
-jsonschema = { workspace = true, optional = true }
+uuid = { workspace = true }
+jsonschema = { workspace = true }
 
 # Logging
-tracing = { workspace = true, optional = true }
-tracing-subscriber = { workspace = true, optional = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
 
 # Redis (via scicomp-rq)
-scicomp-rq = { path = "../scicomp-rq", optional = true }
-redis = { workspace = true, optional = true }
+scicomp-rq = { path = "../scicomp-rq" }
+redis = { workspace = true }
 
 # Metrics / Observability
-prometheus-client = { workspace = true, optional = true }
-nvml-wrapper = { workspace = true, optional = true }
-sysinfo = { workspace = true, optional = true }
+prometheus-client.workspace = true
+nvml-wrapper.workspace = true
+sysinfo.workspace = true
 
 # HTTP client (for Prometheus proxy)
 reqwest = { version = "0.12", features = ["json"] }

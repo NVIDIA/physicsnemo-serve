@@ -14,11 +14,18 @@ readme = "README.md"
 name = "physicsnemo-serve"
 path = "src/main.rs"
 
+[[bin]]
+name = "physicsnemo-serve-install"
+path = "src/runtime_installer_main.rs"
+
 [dependencies]
 anyhow.workspace = true
 dirs = "6.0.0"
+flate2 = "1"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
 serde.workspace = true
 serde_json.workspace = true
+serde_yaml = "0.9"
 sha2 = "0.11.0"
 tar = "0.4.46"
 tempfile = "3"

@@ -10,7 +10,6 @@ import subprocess
 import sys
 from pathlib import Path
 
-import pytest
 import yaml
 
 
@@ -327,6 +326,39 @@ WORKFLOW = BatchWorkflow
     result = json.loads(proc.stdout)
     assert result["status"] == "succeeded"
     assert result["payload"]["value"] == 12
+
+
+def test_direct_runner_keeps_plugin_output_out_of_json_protocol(
+    tmp_path: Path,
+) -> None:
+    plugin_root = _write_plugin(
+        tmp_path,
+        plugin_id="direct-noisy-plugin",
+        profile="simple",
+        options={},
+        request_schema={"type": "object"},
+        workflow="""
+from plugin_sdk import PluginWorkflow
+
+print("noise emitted while importing plugin")
+
+
+class NoisyWorkflow(PluginWorkflow):
+    def execute(self, ctx):
+        print("noise emitted while executing plugin")
+        return {"ok": True}
+
+
+WORKFLOW = NoisyWorkflow
+""",
+    )
+
+    proc = _run_direct(plugin_root, {}, tmp_path / "outputs")
+
+    assert proc.returncode == 0, proc.stderr
+    result = json.loads(proc.stdout)
+    assert result["payload"] == {"ok": True}
+    assert "noise emitted" not in proc.stdout
 
 
 def test_direct_runner_rejects_ensemble_pipeline_explicitly(tmp_path: Path) -> None:

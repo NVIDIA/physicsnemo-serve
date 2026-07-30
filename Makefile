@@ -13,10 +13,14 @@ RUNTIME_BASE_IMAGE = $(RUNTIME_BASE_IMAGE_NAME):$(RUNTIME_BASE_IMAGE_TAG)
 SERVE_CMD_DIST_DIR ?= dist
 SERVE_CMD_OUTPUT ?= $(SERVE_CMD_DIST_DIR)/physicsnemo-serve
 SERVE_CMD_LINUX_AMD64_OUTPUT ?= $(SERVE_CMD_DIST_DIR)/physicsnemo-serve-linux-amd64
+SERVE_INSTALLER_OUTPUT ?= $(SERVE_CMD_DIST_DIR)/physicsnemo-serve-install
+SERVE_INSTALLER_LINUX_AMD64_OUTPUT ?= $(SERVE_CMD_DIST_DIR)/physicsnemo-serve-install-linux-amd64
 SERVE_CMD_LINUX_AMD64_TARGET ?= x86_64-unknown-linux-gnu.2.17
 SERVE_CMD_LINUX_AMD64_TARGET_DIR ?= x86_64-unknown-linux-gnu
+SERVE_CMD_RUST_TOOLCHAIN ?= 1.94.1
+SERVE_CMD_RUST_BIN = $(dir $(shell rustup which --toolchain $(SERVE_CMD_RUST_TOOLCHAIN) cargo))
 
-.PHONY: image runtime-base-image build build-serve-cmd build-serve-cmd-linux-amd64 clean clean-all experiments observe stress
+.PHONY: image runtime-base-image build build-serve-cmd build-serve-cmd-linux-amd64 build-serve-installer build-serve-installer-linux-amd64 clean clean-all experiments observe stress
 
 image: runtime-base-image
 	@test -n "$(DOCKER_REPO)" || (echo "DOCKER_REPO is not set!" && exit 1)
@@ -40,12 +44,30 @@ build-serve-cmd:
 build-serve-cmd-linux-amd64:
 	@command -v zig >/dev/null 2>&1 || (echo "zig is required; install it with: brew install zig" && exit 1)
 	@command -v cargo-zigbuild >/dev/null 2>&1 || (echo "cargo-zigbuild is required; install it with: cargo install cargo-zigbuild --locked" && exit 1)
-	cargo zigbuild --locked --release --target $(SERVE_CMD_LINUX_AMD64_TARGET) --package physicsnemo-serve-cmd --bin physicsnemo-serve
+	rustup target add --toolchain $(SERVE_CMD_RUST_TOOLCHAIN) $(SERVE_CMD_LINUX_AMD64_TARGET_DIR)
+	PATH="$(SERVE_CMD_RUST_BIN):$(PATH)" cargo zigbuild --locked --release --target $(SERVE_CMD_LINUX_AMD64_TARGET) --package physicsnemo-serve-cmd --bin physicsnemo-serve
 	mkdir -p $(SERVE_CMD_DIST_DIR)
 	cp target/$(SERVE_CMD_LINUX_AMD64_TARGET_DIR)/release/physicsnemo-serve $(SERVE_CMD_LINUX_AMD64_OUTPUT)
 	chmod +x $(SERVE_CMD_LINUX_AMD64_OUTPUT)
 	@echo "Thin Linux x86_64 CLI built: $(SERVE_CMD_LINUX_AMD64_OUTPUT)"
 	@echo "Run it with: $(SERVE_CMD_LINUX_AMD64_OUTPUT) infer --runtime-dir <DIR> ..."
+
+build-serve-installer:
+	cargo build --locked --release --package physicsnemo-serve-cmd --bin physicsnemo-serve-install
+	mkdir -p $(SERVE_CMD_DIST_DIR)
+	cp target/release/physicsnemo-serve-install $(SERVE_INSTALLER_OUTPUT)
+	chmod +x $(SERVE_INSTALLER_OUTPUT)
+	@echo "Runtime installer built: $(SERVE_INSTALLER_OUTPUT)"
+
+build-serve-installer-linux-amd64:
+	@command -v zig >/dev/null 2>&1 || (echo "zig is required; install it with: brew install zig" && exit 1)
+	@command -v cargo-zigbuild >/dev/null 2>&1 || (echo "cargo-zigbuild is required; install it with: cargo install cargo-zigbuild --locked" && exit 1)
+	rustup target add --toolchain $(SERVE_CMD_RUST_TOOLCHAIN) $(SERVE_CMD_LINUX_AMD64_TARGET_DIR)
+	PATH="$(SERVE_CMD_RUST_BIN):$(PATH)" cargo zigbuild --locked --release --target $(SERVE_CMD_LINUX_AMD64_TARGET) --package physicsnemo-serve-cmd --bin physicsnemo-serve-install
+	mkdir -p $(SERVE_CMD_DIST_DIR)
+	cp target/$(SERVE_CMD_LINUX_AMD64_TARGET_DIR)/release/physicsnemo-serve-install $(SERVE_INSTALLER_LINUX_AMD64_OUTPUT)
+	chmod +x $(SERVE_INSTALLER_LINUX_AMD64_OUTPUT)
+	@echo "Linux x86_64 runtime installer built: $(SERVE_INSTALLER_LINUX_AMD64_OUTPUT)"
 
 clean:
 	cargo clean

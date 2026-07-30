@@ -1,0 +1,128 @@
+# syntax=docker/dockerfile:1.7
+
+# Build with:
+#   docker buildx build --platform linux/amd64 --load \
+#     -f Dockerfile.physicsnemo-serve-cmd \
+#     -t physicsnemo-serve-cmd:latest .
+#
+# Earth2Studio and PhysicsNeMo CFD share one CUDA 13 runtime. All plugin
+# definitions are copied into the image.
+
+ARG PHYSICSNEMO_SERVE_PLATFORM=linux/amd64
+
+FROM --platform=${PHYSICSNEMO_SERVE_PLATFORM} ubuntu:22.04 AS rust-builder
+
+ARG DEBIAN_FRONTEND=noninteractive
+
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends \
+        build-essential \
+        ca-certificates \
+        curl \
+        pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV PATH="/root/.cargo/bin:${PATH}"
+
+RUN curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error \
+        https://sh.rustup.rs \
+        | sh -s -- -y --profile minimal --default-toolchain 1.94.1
+
+WORKDIR /src/physicsnemo-serve
+COPY . .
+
+RUN cargo build --locked --release \
+        --package physicsnemo-serve-cmd \
+        --bin physicsnemo-serve \
+        --bin physicsnemo-serve-install
+
+
+FROM --platform=${PHYSICSNEMO_SERVE_PLATFORM} ubuntu:22.04 AS runtime-builder
+
+ARG DEBIAN_FRONTEND=noninteractive
+ARG PHYSICSNEMO_SERVE_PYTHON=3.12
+ARG PHYSICSNEMO_SERVE_RUNTIME_NAME=shared
+ARG PHYSICSNEMO_SERVE_TORCH_BACKEND=cu130
+ARG PHYSICSNEMO_SERVE_E2S_PLUGIN=e2s-deterministic
+ARG PHYSICSNEMO_SERVE_E2S_REQUIREMENTS=packaging/physicsnemo-serve-cmd/external-runtime/requirements-earth2studio.txt
+ARG PHYSICSNEMO_SERVE_CFD_PLUGIN=physicsnemo-cfd-surface-benchmark
+ARG PHYSICSNEMO_SERVE_CFD_REQUIREMENTS=packaging/physicsnemo-serve-cmd/external-runtime/requirements-physicsnemo-cfd.txt
+
+ENV UV_PYTHON_INSTALL_DIR="/opt/physicsnemo-serve/uv-python"
+
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends \
+        build-essential \
+        ca-certificates \
+        curl \
+        git \
+        ninja-build \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error \
+        https://astral.sh/uv/install.sh \
+        | env UV_INSTALL_DIR=/usr/local/bin sh
+
+COPY --from=rust-builder \
+    /src/physicsnemo-serve/target/release/physicsnemo-serve-install \
+    /usr/local/bin/physicsnemo-serve-install
+COPY plugins /opt/physicsnemo-serve/plugins
+COPY packaging/physicsnemo-serve-cmd /opt/physicsnemo-serve/packaging/physicsnemo-serve-cmd
+
+RUN --mount=type=cache,target=/root/.cache/uv \
+    test -f "/opt/physicsnemo-serve/plugins/${PHYSICSNEMO_SERVE_E2S_PLUGIN}/plugin.yaml" \
+    && test -f "/opt/physicsnemo-serve/plugins/${PHYSICSNEMO_SERVE_CFD_PLUGIN}/plugin.yaml" \
+    && test -f "/opt/physicsnemo-serve/${PHYSICSNEMO_SERVE_E2S_REQUIREMENTS}" \
+    && test -f "/opt/physicsnemo-serve/${PHYSICSNEMO_SERVE_CFD_REQUIREMENTS}" \
+    && physicsnemo-serve-install \
+        --plugin "/opt/physicsnemo-serve/plugins/${PHYSICSNEMO_SERVE_CFD_PLUGIN}" \
+        --requirements "/opt/physicsnemo-serve/${PHYSICSNEMO_SERVE_E2S_REQUIREMENTS}" \
+        --requirements "/opt/physicsnemo-serve/${PHYSICSNEMO_SERVE_CFD_REQUIREMENTS}" \
+        --runtime-dir "/opt/physicsnemo-serve/runtimes/${PHYSICSNEMO_SERVE_RUNTIME_NAME}" \
+        --python "${PHYSICSNEMO_SERVE_PYTHON}" \
+        --torch-backend "${PHYSICSNEMO_SERVE_TORCH_BACKEND}" \
+    && PYTHONPATH="/opt/physicsnemo-serve/runtimes/${PHYSICSNEMO_SERVE_RUNTIME_NAME}/scripts:/opt/physicsnemo-serve/runtimes/${PHYSICSNEMO_SERVE_RUNTIME_NAME}/python" \
+        "/opt/physicsnemo-serve/runtimes/${PHYSICSNEMO_SERVE_RUNTIME_NAME}/bin/python" \
+        -c 'import importlib, sys, yaml; manifest = yaml.safe_load(open(sys.argv[1], encoding="utf-8")); modules = manifest.get("developer", {}).get("readiness", {}).get("python_modules", []); [importlib.import_module(module) for module in modules]' \
+        "/opt/physicsnemo-serve/plugins/${PHYSICSNEMO_SERVE_E2S_PLUGIN}/plugin.yaml"
+
+
+FROM --platform=${PHYSICSNEMO_SERVE_PLATFORM} ubuntu:22.04
+
+ARG DEBIAN_FRONTEND=noninteractive
+ARG PHYSICSNEMO_SERVE_RUNTIME_NAME=shared
+ARG PHYSICSNEMO_SERVE_E2S_PLUGIN=e2s-deterministic
+ARG PHYSICSNEMO_SERVE_CFD_PLUGIN=physicsnemo-cfd-surface-benchmark
+
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends \
+        ca-certificates \
+        libgomp1 \
+        libgl1 \
+        libglib2.0-0 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=rust-builder \
+    /src/physicsnemo-serve/target/release/physicsnemo-serve \
+    /usr/local/bin/physicsnemo-serve
+COPY --from=rust-builder \
+    /src/physicsnemo-serve/target/release/physicsnemo-serve-install \
+    /usr/local/bin/physicsnemo-serve-install
+COPY --from=runtime-builder /usr/local/bin/uv /usr/local/bin/uv
+COPY --from=runtime-builder /opt/physicsnemo-serve /opt/physicsnemo-serve
+
+ENV PHYSICSNEMO_SERVE_PLUGIN_ROOT="/opt/physicsnemo-serve/plugins/${PHYSICSNEMO_SERVE_E2S_PLUGIN}" \
+    PHYSICSNEMO_SERVE_RUNTIME_DIR="/opt/physicsnemo-serve/runtimes/${PHYSICSNEMO_SERVE_RUNTIME_NAME}" \
+    PHYSICSNEMO_SERVE_E2S_RUNTIME_DIR="/opt/physicsnemo-serve/runtimes/${PHYSICSNEMO_SERVE_RUNTIME_NAME}" \
+    PHYSICSNEMO_SERVE_CFD_RUNTIME_DIR="/opt/physicsnemo-serve/runtimes/${PHYSICSNEMO_SERVE_RUNTIME_NAME}" \
+    UV_PYTHON_INSTALL_DIR="/opt/physicsnemo-serve/uv-python" \
+    PATH="/usr/local/bin:${PATH}"
+
+WORKDIR /workspace
+
+ENTRYPOINT ["physicsnemo-serve"]
+CMD ["--help"]

@@ -9,6 +9,7 @@ use anyhow::Result;
 
 pub mod bundle;
 pub mod digest;
+pub mod installer;
 pub mod prefetch;
 
 /// Hidden JSON-over-stdin command reserved for internal prefetch subprocess use.

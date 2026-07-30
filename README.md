@@ -40,7 +40,7 @@ Then choose your path:
 - `crates/scicomp-rq`
   - Redis Streams–based distributed task queue for scientific computing pipelines
 - `crates/physicsnemo-serve-cmd`
-  - Optional one-shot workflow runner with bounded local queues and in-memory results
+  - Optional one-shot manifest plugin runner using a packaged or external Python runtime
 - `scripts/inference_worker.py`
   - Python execute worker for plugin hooks
 - `scripts/plugin_dev.py`

@@ -1,0 +1,16 @@
+# Earth2Studio FCN/DLWP runtime used by the example external-runtime launcher.
+# PyTorch wheels are selected by uv's --torch-backend policy in setup.sh.
+# Add further packages here for plugins using FCN3, StormCast, or StormScope.
+
+torch
+torch-harmonics==0.8.1
+earth2studio[dlwp,fcn,data]==0.13.0
+warp-lang>=1.13.0
+cartopy
+cfgrib
+scipy>=1.15.2
+xarray
+zarr>=3
+netCDF4
+boto3
+s3fs

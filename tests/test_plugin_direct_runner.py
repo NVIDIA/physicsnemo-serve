@@ -224,6 +224,59 @@ WORKFLOW = PostprocessOutputWorkflow
     assert result["payload"] == {"value": 2}
 
 
+def test_direct_runner_preserves_execute_artifacts_when_postprocess_registers_output(
+    tmp_path: Path,
+) -> None:
+    plugin_root = _write_plugin(
+        tmp_path,
+        plugin_id="direct-merged-postprocess-outputs",
+        profile="postprocess",
+        options={},
+        request_schema={"type": "object"},
+        workflow="""
+from plugin_sdk import PluginWorkflow, PostprocessOutcome
+
+
+class MergedOutputWorkflow(PluginWorkflow):
+    def execute(self, ctx):
+        output_path = ctx["run_dir"] / "execute.json"
+        output_path.write_text('{"execute": true}', encoding="utf-8")
+        return {
+            "artifacts": [{
+                "name": "execute",
+                "media_type": "application/json",
+                "storage_path": str(output_path),
+                "primary": True,
+            }],
+            "output_path": str(output_path),
+        }
+
+    def postprocess(self, result, ctx):
+        output_path = ctx.outputs.create(
+            "postprocess",
+            filename="postprocess.json",
+            media_type="application/json",
+        )
+        output_path.write_text('{"postprocess": true}', encoding="utf-8")
+        return PostprocessOutcome(payload={"merged": True})
+
+
+WORKFLOW = MergedOutputWorkflow
+""",
+    )
+
+    proc = _run_direct(plugin_root, {}, tmp_path / "outputs")
+
+    assert proc.returncode == 0, proc.stderr
+    result = json.loads(proc.stdout)
+    assert [artifact["name"] for artifact in result["execution"]["outputs"]] == [
+        "execute",
+        "postprocess",
+    ]
+    assert result["execution"]["output_path"].endswith("postprocess.json")
+    assert result["payload"] == {"merged": True}
+
+
 def test_direct_runner_rejects_postprocess_result_operations(tmp_path: Path) -> None:
     plugin_root = _write_plugin(
         tmp_path,
@@ -659,6 +712,47 @@ WORKFLOW = BatchWorkflow
     assert result["payload"]["value"] == 12
 
 
+def test_direct_runner_sets_plugin_environment_before_import(tmp_path: Path) -> None:
+    output_dir = tmp_path / "outputs"
+    plugin_root = _write_plugin(
+        tmp_path,
+        plugin_id="import-environment",
+        profile="batch",
+        options={},
+        request_schema={"type": "object"},
+        workflow="""
+import os
+
+from plugin_sdk import PluginWorkflow
+
+
+IMPORTED_ENVIRONMENT = {
+    "default_output_dir": os.environ["DEFAULT_OUTPUT_DIR"],
+    "plugin_dir": os.environ["PLUGIN_DIR"],
+    "plugin_id": os.environ["PHYSICSNEMO_SERVE_ENABLED_PLUGIN_ID"],
+}
+
+
+class EnvironmentWorkflow(PluginWorkflow):
+    def run_batch(self, items, ctx):
+        return [IMPORTED_ENVIRONMENT]
+
+
+WORKFLOW = EnvironmentWorkflow
+""",
+    )
+
+    proc = _run_direct(plugin_root, {}, output_dir)
+
+    assert proc.returncode == 0, proc.stderr
+    result = json.loads(proc.stdout)
+    assert result["payload"] == {
+        "default_output_dir": str(output_dir),
+        "plugin_dir": str(plugin_root),
+        "plugin_id": "import-environment",
+    }
+
+
 def test_direct_runner_preserves_batch_item_failure(tmp_path: Path) -> None:
     plugin_root = _write_plugin(
         tmp_path,
@@ -698,6 +792,7 @@ def test_direct_runner_keeps_plugin_output_out_of_json_protocol(
         options={},
         request_schema={"type": "object"},
         workflow="""
+import ctypes
 import os
 import subprocess
 import sys
@@ -712,6 +807,7 @@ class NoisyWorkflow(PluginWorkflow):
     def execute(self, ctx):
         print("noise emitted while executing plugin")
         os.write(1, b"native noise emitted while executing plugin\\n")
+        ctypes.CDLL(None).printf(b"buffered native noise emitted while exiting")
         subprocess.run(
             [sys.executable, "-c", "print('child process noise')"],
             check=True,
@@ -732,6 +828,7 @@ WORKFLOW = NoisyWorkflow
     assert "native noise emitted" not in proc.stdout
     assert "child process noise" not in proc.stdout
     assert "native noise emitted" in proc.stderr
+    assert "buffered native noise emitted" in proc.stderr
     assert "child process noise" in proc.stderr
 
 

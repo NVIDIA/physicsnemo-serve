@@ -436,6 +436,7 @@ async fn prefetch_from_real_config_processes_message_through_engine() {
             size_bytes: 512,
             sha256: None,
             media_type: Some("application/octet-stream".to_string()),
+            downloaded: true,
         }],
     }));
 

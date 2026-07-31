@@ -5,6 +5,8 @@
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow};
@@ -77,21 +79,25 @@ pub fn package_executable_with_compression(
     })?;
     let archive = build_runtime_archive(runtime_dir, output_parent, compression_level)?;
 
-    fs::copy(base_executable, output).with_context(|| {
+    let mut staged_output = NamedTempFile::new_in(output_parent).with_context(|| {
         format!(
-            "failed to copy base executable '{}' to '{}'",
+            "failed to create temporary packaged output in {}",
+            output_parent.display()
+        )
+    })?;
+    fs::copy(base_executable, staged_output.path()).with_context(|| {
+        format!(
+            "failed to stage base executable '{}' for '{}'",
             base_executable.display(),
             output.display()
         )
     })?;
-    let payload_offset = fs::metadata(output)?.len();
-    let mut output_file = OpenOptions::new()
-        .append(true)
-        .open(output)
-        .with_context(|| format!("failed to open packaged output: {}", output.display()))?;
-    let (payload_length, digest) = copy_payload_with_digest(archive.path(), &mut output_file)?;
+    let payload_offset = fs::metadata(staged_output.path())?.len();
+    let output_file = staged_output.as_file_mut();
+    output_file.seek(SeekFrom::End(0))?;
+    let (payload_length, digest) = copy_payload_with_digest(archive.path(), output_file)?;
     write_footer(
-        &mut output_file,
+        output_file,
         &BundleFooter {
             payload_offset,
             payload_length,
@@ -99,7 +105,16 @@ pub fn package_executable_with_compression(
         },
     )?;
     output_file.sync_all()?;
-    fs::set_permissions(output, fs::metadata(base_executable)?.permissions())?;
+    fs::set_permissions(
+        staged_output.path(),
+        fs::metadata(base_executable)?.permissions(),
+    )?;
+    staged_output.persist_noclobber(output).map_err(|error| {
+        anyhow!(error.error).context(format!(
+            "failed to publish packaged output: {}",
+            output.display()
+        ))
+    })?;
     Ok(())
 }
 
@@ -107,10 +122,9 @@ pub fn extract_runtime(executable: &Path, cache_root: &Path) -> Result<PathBuf> 
     let mut executable_file = File::open(executable)
         .with_context(|| format!("failed to open executable: {}", executable.display()))?;
     let footer = read_footer(&mut executable_file)?;
-    verify_payload_checksum(&mut executable_file, &footer)?;
     let cache_key = hex(&footer.digest);
     let runtime_root = cache_root.join(&cache_key);
-    if runtime_is_ready(&runtime_root) {
+    if runtime_is_ready(&runtime_root, &cache_key) {
         return Ok(runtime_root);
     }
 
@@ -130,9 +144,10 @@ pub fn extract_runtime(executable: &Path, cache_root: &Path) -> Result<PathBuf> 
         .with_context(|| format!("failed to open runtime cache lock: {}", lock_path.display()))?;
     fs2::FileExt::lock_exclusive(&cache_lock)
         .with_context(|| format!("failed to lock runtime cache: {}", lock_path.display()))?;
-    if runtime_is_ready(&runtime_root) {
+    if runtime_is_ready(&runtime_root, &cache_key) {
         return Ok(runtime_root);
     }
+    verify_payload_checksum(&mut executable_file, &footer)?;
     if runtime_root.exists() {
         fs::remove_dir_all(&runtime_root).with_context(|| {
             format!(
@@ -164,7 +179,7 @@ pub fn extract_runtime(executable: &Path, cache_root: &Path) -> Result<PathBuf> 
             // clean up its old path when it is dropped.
             temporary.disable_cleanup(true);
         }
-        Err(error) if runtime_is_ready(&runtime_root) => {
+        Err(error) if runtime_is_ready(&runtime_root, &cache_key) => {
             let _ = error;
         }
         Err(error) => {
@@ -363,6 +378,27 @@ fn validate_runtime_symlinks(directory: &Path, canonical_root: &Path) -> Result<
     Ok(())
 }
 
-fn runtime_is_ready(runtime_root: &Path) -> bool {
-    runtime_root.join(COMPLETE_MARKER).is_file() && validate_runtime_layout(runtime_root).is_ok()
+fn runtime_is_ready(runtime_root: &Path, cache_key: &str) -> bool {
+    fs::read_to_string(runtime_root.join(COMPLETE_MARKER))
+        .is_ok_and(|marker| marker.trim() == cache_key)
+        && runtime_has_essential_files(runtime_root)
+}
+
+fn runtime_has_essential_files(runtime_root: &Path) -> bool {
+    let python = runtime_root.join("bin/python");
+    if !python.is_file()
+        || !runtime_root
+            .join("scripts/plugin_direct_runner.py")
+            .is_file()
+    {
+        return false;
+    }
+    #[cfg(unix)]
+    if fs::metadata(&python)
+        .map(|metadata| metadata.permissions().mode() & 0o111 == 0)
+        .unwrap_or(true)
+    {
+        return false;
+    }
+    true
 }

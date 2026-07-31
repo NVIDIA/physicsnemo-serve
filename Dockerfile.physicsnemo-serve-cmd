@@ -1,5 +1,3 @@
-# syntax=docker/dockerfile:1.7
-
 # The shared CFD runtime currently supports only linux/amd64 because its
 # torch-scatter dependency has no Linux arm64 wheel. Build with:
 #   docker buildx build --platform linux/amd64 --load \
@@ -9,7 +7,9 @@
 # Earth2Studio and PhysicsNeMo CFD share one CUDA 13 runtime. All plugin
 # definitions are copied into the image.
 
-FROM ubuntu:22.04 AS rust-builder
+ARG PHYSICSNEMO_SERVE_UBUNTU_IMAGE=nvcr.io/nvidia/base/ubuntu:jammy-20260217
+
+FROM ${PHYSICSNEMO_SERVE_UBUNTU_IMAGE} AS rust-builder
 
 ARG DEBIAN_FRONTEND=noninteractive
 ARG RUSTUP_VERSION=1.28.2
@@ -53,16 +53,15 @@ RUN cargo build --locked --release \
         --bin physicsnemo-serve-install
 
 
-FROM ubuntu:22.04 AS runtime-builder
+FROM ${PHYSICSNEMO_SERVE_UBUNTU_IMAGE} AS runtime-builder
 
 ARG DEBIAN_FRONTEND=noninteractive
 ARG PHYSICSNEMO_SERVE_PYTHON=3.12
 ARG PHYSICSNEMO_SERVE_RUNTIME_NAME=shared
 ARG PHYSICSNEMO_SERVE_TORCH_BACKEND=cu130
 ARG PHYSICSNEMO_SERVE_E2S_PLUGIN=e2s-deterministic
-ARG PHYSICSNEMO_SERVE_E2S_REQUIREMENTS=packaging/physicsnemo-serve-cmd/external-runtime/requirements-earth2studio.txt
 ARG PHYSICSNEMO_SERVE_CFD_PLUGIN=physicsnemo-cfd-surface-benchmark
-ARG PHYSICSNEMO_SERVE_CFD_REQUIREMENTS=packaging/physicsnemo-serve-cmd/external-runtime/requirements-physicsnemo-cfd.txt
+ARG PHYSICSNEMO_SERVE_SHARED_REQUIREMENTS=packaging/physicsnemo-serve-cmd/external-runtime/requirements-shared.lock
 ARG UV_VERSION=0.11.16
 ARG TARGETARCH
 
@@ -108,19 +107,17 @@ COPY packaging/physicsnemo-serve-cmd /opt/physicsnemo-serve/packaging/physicsnem
 RUN --mount=type=cache,target=/root/.cache/uv \
     test -f "/opt/physicsnemo-serve/plugins/${PHYSICSNEMO_SERVE_E2S_PLUGIN}/plugin.yaml" \
     && test -f "/opt/physicsnemo-serve/plugins/${PHYSICSNEMO_SERVE_CFD_PLUGIN}/plugin.yaml" \
-    && test -f "/opt/physicsnemo-serve/${PHYSICSNEMO_SERVE_E2S_REQUIREMENTS}" \
-    && test -f "/opt/physicsnemo-serve/${PHYSICSNEMO_SERVE_CFD_REQUIREMENTS}" \
+    && test -f "/opt/physicsnemo-serve/${PHYSICSNEMO_SERVE_SHARED_REQUIREMENTS}" \
     && physicsnemo-serve-install \
         --plugin "/opt/physicsnemo-serve/plugins/${PHYSICSNEMO_SERVE_E2S_PLUGIN}" \
         --plugin "/opt/physicsnemo-serve/plugins/${PHYSICSNEMO_SERVE_CFD_PLUGIN}" \
-        --requirements "/opt/physicsnemo-serve/${PHYSICSNEMO_SERVE_E2S_REQUIREMENTS}" \
-        --requirements "/opt/physicsnemo-serve/${PHYSICSNEMO_SERVE_CFD_REQUIREMENTS}" \
+        --requirements "/opt/physicsnemo-serve/${PHYSICSNEMO_SERVE_SHARED_REQUIREMENTS}" \
         --runtime-dir "/opt/physicsnemo-serve/runtimes/${PHYSICSNEMO_SERVE_RUNTIME_NAME}" \
         --python "${PHYSICSNEMO_SERVE_PYTHON}" \
         --torch-backend "${PHYSICSNEMO_SERVE_TORCH_BACKEND}"
 
 
-FROM ubuntu:22.04
+FROM ${PHYSICSNEMO_SERVE_UBUNTU_IMAGE}
 
 ARG DEBIAN_FRONTEND=noninteractive
 ARG PHYSICSNEMO_SERVE_RUNTIME_NAME=shared
@@ -130,6 +127,7 @@ ARG PHYSICSNEMO_SERVE_CFD_PLUGIN=physicsnemo-cfd-surface-benchmark
 RUN apt-get update \
     && apt-get install --yes --no-install-recommends \
         ca-certificates \
+        dumb-init \
         libgomp1 \
         libgl1 \
         libglib2.0-0 \
@@ -154,5 +152,5 @@ ENV PHYSICSNEMO_SERVE_PLUGIN_ROOT="/opt/physicsnemo-serve/plugins/${PHYSICSNEMO_
 
 WORKDIR /workspace
 
-ENTRYPOINT ["physicsnemo-serve"]
+ENTRYPOINT ["dumb-init", "--", "physicsnemo-serve"]
 CMD ["--help"]

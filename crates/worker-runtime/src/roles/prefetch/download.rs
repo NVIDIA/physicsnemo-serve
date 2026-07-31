@@ -82,6 +82,8 @@ pub struct MaterializedArtifact {
     pub media_type: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sha256: Option<String>,
+    #[serde(skip)]
+    pub downloaded: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -333,6 +335,7 @@ impl HttpDownloader {
                     size_bytes: success.size_bytes,
                     media_type: item.media_type.clone(),
                     sha256: success.sha256.clone(),
+                    downloaded: success.downloaded,
                 });
             }
         }

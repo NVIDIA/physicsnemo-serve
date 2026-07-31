@@ -82,55 +82,63 @@ def main() -> int:
     parser.add_argument("--run-id", required=True)
     args = parser.parse_args()
 
-    try:
-        # Plugin imports and hooks may print progress or library diagnostics.
-        # Keep stdout reserved for the single JSON protocol response expected
-        # by the Rust caller.
-        with _redirect_process_stdout_to_stderr():
+    # Plugin imports and hooks may print progress or library diagnostics.
+    # Keep fd 1 redirected through process shutdown so buffered native output
+    # cannot be appended to the JSON protocol response while exiting.
+    with _redirect_process_stdout_to_stderr() as protocol_stdout:
+        try:
             result = run_plugin(
                 Path(args.plugin_root).expanduser().resolve(),
                 Path(args.request).expanduser().resolve(),
                 Path(args.output_dir).expanduser().resolve(),
                 args.run_id,
             )
-        encoded = json.dumps(result)
-        sys.stdout.write(f"{encoded}\n")
-        return 0
-    except Exception as exc:
-        error_result = {
-            "run_id": args.run_id,
-            "status": "failed",
-            "workflow": None,
-            "request": None,
-            "execution": {
-                "outputs": [],
-                "output_path": None,
-                "error": str(exc),
-            },
-            "payload": {},
-        }
-        sys.stdout.write(f"{json.dumps(error_result)}\n")
-        print(str(exc), file=sys.stderr)
-        return 1
+            encoded = json.dumps(result)
+            return_code = 0
+        except Exception as exc:
+            error_result = {
+                "run_id": args.run_id,
+                "status": "failed",
+                "workflow": None,
+                "request": None,
+                "execution": {
+                    "outputs": [],
+                    "output_path": None,
+                    "error": str(exc),
+                },
+                "payload": {},
+            }
+            encoded = json.dumps(error_result)
+            print(str(exc), file=sys.stderr)
+            return_code = 1
+
+        _write_protocol_response(protocol_stdout, encoded)
+        return return_code
 
 
 @contextmanager
 def _redirect_process_stdout_to_stderr():
-    """Reserve stdout for the JSON response, including native and child output."""
+    """Redirect fd 1 until process exit and yield its original descriptor."""
     sys.stdout.flush()
     saved_stdout: int | None = None
     try:
         saved_stdout = os.dup(1)
         os.dup2(2, 1)
         with redirect_stdout(sys.stderr):
-            yield
+            yield saved_stdout
     finally:
         if saved_stdout is not None:
-            try:
-                sys.stdout.flush()
-                os.dup2(saved_stdout, 1)
-            finally:
-                os.close(saved_stdout)
+            os.close(saved_stdout)
+
+
+def _write_protocol_response(protocol_stdout: int, encoded: str) -> None:
+    """Write the single JSON response through the saved original stdout."""
+    remaining = memoryview(f"{encoded}\n".encode())
+    while remaining:
+        written = os.write(protocol_stdout, remaining)
+        if written == 0:
+            raise BrokenPipeError("failed to write plugin protocol response")
+        remaining = remaining[written:]
 
 
 def run_plugin(
@@ -202,15 +210,15 @@ def run_plugin(
     plugin_path = str(plugin_root)
     if plugin_path not in sys.path:
         sys.path.insert(0, plugin_path)
+
+    os.environ["DEFAULT_OUTPUT_DIR"] = str(output_dir)
+    os.environ["PLUGIN_DIR"] = str(plugin_root)
+    os.environ["PHYSICSNEMO_SERVE_ENABLED_PLUGIN_ID"] = workflow_id
     module = load_plugin_module(
         workflow_id,
         plugin_root / entrypoint,
         module_prefix="physicsnemo_serve_direct_plugin",
     )
-
-    os.environ["DEFAULT_OUTPUT_DIR"] = str(output_dir)
-    os.environ["PLUGIN_DIR"] = str(plugin_root)
-    os.environ["PHYSICSNEMO_SERVE_ENABLED_PLUGIN_ID"] = workflow_id
     prefetch_stats: dict[str, Any] | None = None
     stage_by_id = {
         str(stage.get("id")): stage
@@ -456,9 +464,11 @@ def _invoke_phase(
         result = merge_registered_outputs_into_result(result, payload["outputs"])
         prior_result = payload.get("result")
         if isinstance(prior_result, dict):
+            result["artifacts"] = _merge_artifact_lists(
+                prior_result.get("artifacts"), result.get("artifacts")
+            )
             for field in (
                 "status",
-                "artifacts",
                 "output_path",
                 "error",
                 "error_traceback",
@@ -467,6 +477,33 @@ def _invoke_phase(
                 if field not in result and field in prior_result:
                     result[field] = prior_result[field]
     return result
+
+
+def _merge_artifact_lists(prior: Any, current: Any) -> list[Any]:
+    """Preserve execute artifacts and overlay matching postprocess outputs."""
+    merged: list[Any] = []
+    positions: dict[tuple[str, str], int] = {}
+    for artifact in [
+        *(prior if isinstance(prior, list) else []),
+        *(current if isinstance(current, list) else []),
+    ]:
+        if not isinstance(artifact, dict):
+            if artifact not in merged:
+                merged.append(artifact)
+            continue
+        path = str(artifact.get("storage_path") or artifact.get("path") or "")
+        name = str(artifact.get("name") or "")
+        key = (path, name)
+        if not any(key):
+            if artifact not in merged:
+                merged.append(artifact)
+            continue
+        if key in positions:
+            merged[positions[key]] = artifact
+        else:
+            positions[key] = len(merged)
+            merged.append(artifact)
+    return merged
 
 
 def _supports_explicit_contract(hook: Any) -> bool:

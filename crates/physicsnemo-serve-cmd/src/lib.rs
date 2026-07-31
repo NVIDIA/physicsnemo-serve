@@ -456,6 +456,70 @@ mod tests {
     }
 
     #[test]
+    fn cached_runtime_is_reused_without_reading_the_payload() {
+        let temp = tempdir().expect("temp directory should be created");
+        let base = temp.path().join("physicsnemo-serve");
+        fs::write(&base, b"fake-elf").expect("base executable should be written");
+        let runtime = create_runtime(temp.path());
+        let packaged = temp.path().join("physicsnemo-serve-packaged");
+        package_executable(&base, &runtime, &packaged).expect("runtime should package");
+        let cache_root = temp.path().join("cache");
+        let extracted = extract_runtime(&packaged, &cache_root).expect("runtime should extract");
+
+        let mut file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&packaged)
+            .expect("packaged executable should open");
+        file.seek(SeekFrom::Start(8))
+            .expect("payload byte should be seekable");
+        let mut byte = [0u8; 1];
+        file.read_exact(&mut byte)
+            .expect("payload byte should be readable");
+        file.seek(SeekFrom::Start(8))
+            .expect("payload byte should be seekable");
+        file.write_all(&[byte[0] ^ 0xff])
+            .expect("payload byte should be changed");
+
+        let reused = extract_runtime(&packaged, &cache_root)
+            .expect("a completed digest cache should bypass payload hashing");
+        assert_eq!(reused, extracted);
+    }
+
+    #[test]
+    fn cached_runtime_repairs_missing_or_non_executable_essential_files() {
+        let temp = tempdir().expect("temp directory should be created");
+        let base = temp.path().join("physicsnemo-serve");
+        fs::write(&base, b"fake-elf").expect("base executable should be written");
+        let runtime = create_runtime(temp.path());
+        let packaged = temp.path().join("physicsnemo-serve-packaged");
+        package_executable(&base, &runtime, &packaged).expect("runtime should package");
+        let cache_root = temp.path().join("cache");
+        let extracted = extract_runtime(&packaged, &cache_root).expect("runtime should extract");
+
+        fs::remove_file(extracted.join("scripts/plugin_direct_runner.py"))
+            .expect("cached runner should be removed");
+        let repaired = extract_runtime(&packaged, &cache_root)
+            .expect("missing cached runner should be repaired");
+        assert!(repaired.join("scripts/plugin_direct_runner.py").is_file());
+
+        let python = repaired.join("bin/python");
+        let mut permissions = fs::metadata(&python)
+            .expect("cached python should exist")
+            .permissions();
+        permissions.set_mode(0o644);
+        fs::set_permissions(&python, permissions)
+            .expect("cached python permissions should be changed");
+        let repaired = extract_runtime(&packaged, &cache_root)
+            .expect("non-executable cached python should be repaired");
+        let repaired_mode = fs::metadata(repaired.join("bin/python"))
+            .expect("repaired python should exist")
+            .permissions()
+            .mode();
+        assert_ne!(repaired_mode & 0o111, 0);
+    }
+
+    #[test]
     fn concurrent_extraction_serializes_incomplete_cache_repair() {
         let temp = tempdir().expect("temp directory should be created");
         let base = temp.path().join("physicsnemo-serve");

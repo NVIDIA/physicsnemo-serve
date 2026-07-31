@@ -26,22 +26,46 @@ if [[ "${TORCH_BACKEND}" != "cu130" ]]; then
     exit 1
 fi
 
-uv venv --python "${PYTHON_VERSION}" "${RUNTIME_DIR}"
+RUNTIME_PARENT="$(dirname -- "${RUNTIME_DIR}")"
+RUNTIME_NAME="$(basename -- "${RUNTIME_DIR}")"
+mkdir -p "${RUNTIME_PARENT}"
+STAGING_ROOT="$(mktemp -d "${RUNTIME_PARENT}/.${RUNTIME_NAME}.tmp.XXXXXX")"
+STAGING_RUNTIME="${STAGING_ROOT}/runtime"
+PUBLISHED_RUNTIME=""
+cleanup() {
+    rm -rf -- "${STAGING_ROOT}"
+    if [[ -n "${PUBLISHED_RUNTIME}" ]]; then
+        rm -rf -- "${PUBLISHED_RUNTIME}"
+    fi
+}
+trap cleanup EXIT
+
+uv venv --python "${PYTHON_VERSION}" --relocatable "${STAGING_RUNTIME}"
 uv pip install \
-    --python "${RUNTIME_DIR}/bin/python" \
+    --python "${STAGING_RUNTIME}/bin/python" \
     --torch-backend "${TORCH_BACKEND}" \
     --require-hashes \
     --requirements "${REQUIREMENTS_LOCK}"
 
-mkdir -p "${RUNTIME_DIR}/scripts" "${RUNTIME_DIR}/python"
+mkdir -p "${STAGING_RUNTIME}/scripts" "${STAGING_RUNTIME}/python"
 install -m 0644 \
     "${REPO_ROOT}/scripts/plugin_direct_runner.py" \
     "${REPO_ROOT}/scripts/plugin_runtime.py" \
     "${REPO_ROOT}/scripts/plugin_sdk.py" \
-    "${RUNTIME_DIR}/scripts/"
-cp -R "${REPO_ROOT}/python/." "${RUNTIME_DIR}/python/"
+    "${STAGING_RUNTIME}/scripts/"
+cp -R "${REPO_ROOT}/python/." "${STAGING_RUNTIME}/python/"
 
+if [[ -e "${RUNTIME_DIR}" ]]; then
+    echo "runtime directory was created concurrently: ${RUNTIME_DIR}" >&2
+    exit 1
+fi
+mv --no-target-directory -- "${STAGING_RUNTIME}" "${RUNTIME_DIR}"
+PUBLISHED_RUNTIME="${RUNTIME_DIR}"
 "${RUNTIME_DIR}/bin/python" -c "import earth2studio, jsonschema, torch, yaml"
+"${RUNTIME_DIR}/bin/dask" --version >/dev/null
+PUBLISHED_RUNTIME=""
+trap - EXIT
+rm -rf -- "${STAGING_ROOT}"
 
 echo "Earth2Studio runtime created at ${RUNTIME_DIR}"
 echo "PyTorch backend: ${TORCH_BACKEND}"

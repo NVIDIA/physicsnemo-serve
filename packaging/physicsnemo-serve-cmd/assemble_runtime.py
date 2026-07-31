@@ -10,6 +10,7 @@ import json
 import os
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 
 
@@ -71,79 +72,151 @@ def assemble_runtime(
     python = python_prefix / "bin" / "python"
     if not python.is_file():
         raise ValueError(f"Python prefix is missing bin/python: {python}")
+    if not (python_prefix / "BUILD").is_file():
+        raise ValueError(
+            "Python prefix must be a standalone uv-managed Python installation "
+            "containing BUILD; venvs and system Python prefixes are not relocatable"
+        )
+    _validate_relocatable_symlinks(python_prefix)
     if output.exists():
         raise ValueError(f"Runtime output already exists: {output}")
     if requirements is not None and not requirements.is_file():
         raise ValueError(f"Requirements lock does not exist: {requirements}")
     if wheelhouse is not None and not wheelhouse.is_dir():
         raise ValueError(f"Wheelhouse does not exist: {wheelhouse}")
-
-    output.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copytree(python_prefix, output, symlinks=True)
-    runtime_python = output / "bin" / "python"
-    if requirements is not None:
-        _install_requirements(runtime_python, requirements, wheelhouse)
-
-    scripts_dir = output / "scripts"
-    scripts_dir.mkdir()
     for script_name in SUPPORT_SCRIPTS:
         source = repo_root / "scripts" / script_name
         if not source.is_file():
             raise ValueError(f"Required support script does not exist: {source}")
-        shutil.copy2(source, scripts_dir / script_name)
-
-    python_dir = output / "python"
-    shutil.copytree(repo_root / "python", python_dir)
     for package in extra_python_packages or []:
         if not package.is_dir():
             raise ValueError(f"Extra Python package does not exist: {package}")
-        destination = python_dir / package.name
-        if destination.exists():
-            raise ValueError(
-                f"Extra Python package destination already exists: {destination}"
-            )
-        shutil.copytree(package, destination, symlinks=True)
+    uv = _require_uv() if requirements is not None else None
 
-    environment = os.environ.copy()
-    environment["PYTHONNOUSERSITE"] = "1"
-    version = subprocess.run(
-        [str(runtime_python), "--version"],
-        env=environment,
-        text=True,
-        capture_output=True,
-        check=True,
+    output.parent.mkdir(parents=True, exist_ok=True)
+    staging_root = Path(
+        tempfile.mkdtemp(prefix=".physicsnemo-runtime-", dir=output.parent)
     )
-    subprocess.run(
-        [str(runtime_python), "-c", "import jsonschema, yaml"],
-        env=environment,
-        text=True,
-        capture_output=True,
-        check=True,
-    )
-    manifest = {
-        "schema_version": 1,
-        "python_version": (version.stdout or version.stderr).strip(),
-        "requirements_sha256": (
-            _sha256_file(requirements) if requirements is not None else None
-        ),
-        "support_scripts": list(SUPPORT_SCRIPTS),
-        "extra_python_packages": [
-            package.name for package in extra_python_packages or []
-        ],
-    }
-    (output / "runtime-manifest.json").write_text(
-        json.dumps(manifest, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
+    staging = staging_root / "runtime"
+    try:
+        shutil.copytree(python_prefix, staging, symlinks=True)
+        runtime_python = staging / "bin" / "python"
+        if requirements is not None:
+            _install_requirements(runtime_python, requirements, wheelhouse, uv=uv)
+
+        _rewrite_python_entrypoints(staging)
+
+        scripts_dir = staging / "scripts"
+        scripts_dir.mkdir()
+        for script_name in SUPPORT_SCRIPTS:
+            source = repo_root / "scripts" / script_name
+            shutil.copy2(source, scripts_dir / script_name)
+
+        python_dir = staging / "python"
+        shutil.copytree(repo_root / "python", python_dir)
+        for package in extra_python_packages or []:
+            destination = python_dir / package.name
+            if destination.exists():
+                raise ValueError(
+                    f"Extra Python package destination already exists: {destination}"
+                )
+            shutil.copytree(package, destination, symlinks=True)
+
+        _validate_relocatable_symlinks(staging)
+
+        environment = os.environ.copy()
+        environment["PYTHONNOUSERSITE"] = "1"
+        version = subprocess.run(
+            [str(runtime_python), "--version"],
+            env=environment,
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+        subprocess.run(
+            [str(runtime_python), "-c", "import jsonschema, yaml"],
+            env=environment,
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+        manifest = {
+            "schema_version": 1,
+            "python_version": (version.stdout or version.stderr).strip(),
+            "requirements_sha256": (
+                _sha256_file(requirements) if requirements is not None else None
+            ),
+            "support_scripts": list(SUPPORT_SCRIPTS),
+            "extra_python_packages": [
+                package.name for package in extra_python_packages or []
+            ],
+        }
+        (staging / "runtime-manifest.json").write_text(
+            json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        staging.rename(output)
+    finally:
+        if staging_root.exists():
+            shutil.rmtree(staging_root)
+
+
+def _validate_relocatable_symlinks(python_prefix: Path) -> None:
+    prefix_root = python_prefix.resolve(strict=True)
+    for path in python_prefix.rglob("*"):
+        if not path.is_symlink():
+            continue
+        target = Path(os.readlink(path))
+        if target.is_absolute():
+            raise ValueError(
+                f"Python prefix contains a non-relocatable absolute symlink: {path}"
+            )
+        try:
+            path.resolve(strict=True).relative_to(prefix_root)
+        except (FileNotFoundError, ValueError) as error:
+            raise ValueError(
+                f"Python prefix contains a symlink that escapes the runtime: {path}"
+            ) from error
+
+
+def _rewrite_python_entrypoints(runtime: Path) -> None:
+    """Replace staging-path shebangs with wrappers resolved from each command."""
+    bin_dir = runtime / "bin"
+    for path in bin_dir.iterdir():
+        if path.is_symlink() or not path.is_file():
+            continue
+        with path.open("rb") as entrypoint:
+            first_line = entrypoint.readline(4096)
+        if not first_line.startswith(b"#!") or not first_line.endswith(b"\n"):
+            continue
+        try:
+            interpreter = Path(os.fsdecode(first_line[2:-1]))
+        except UnicodeDecodeError:
+            continue
+        if interpreter.parent != bin_dir or not interpreter.name.startswith("python"):
+            continue
+        contents = path.read_bytes()
+        _, separator, body = contents.partition(b"\n")
+        if not separator:
+            continue
+        wrapper = (
+            b"#!/bin/sh\n"
+            b'\'\'\'exec\' "$(dirname -- "$(realpath -- "$0")")"/\'python\' "$0" "$@"\n'
+            b"' '''\n"
+        )
+        path.write_bytes(wrapper + body)
 
 
 def _install_requirements(
     python: Path,
     requirements: Path,
     wheelhouse: Path | None,
+    *,
+    uv: str | None = None,
 ) -> None:
+    uv = uv or _require_uv()
     command = [
-        "uv",
+        uv,
         "pip",
         "install",
         "--python",
@@ -156,6 +229,16 @@ def _install_requirements(
     if wheelhouse is not None:
         command.extend(["--no-index", "--find-links", str(wheelhouse)])
     subprocess.run(command, check=True)
+
+
+def _require_uv() -> str:
+    uv = shutil.which("uv")
+    if uv is None:
+        raise RuntimeError(
+            "uv is required to install runtime requirements but was not found on PATH; "
+            "install it from https://docs.astral.sh/uv/getting-started/installation/"
+        )
+    return uv
 
 
 def _sha256_file(path: Path) -> str:

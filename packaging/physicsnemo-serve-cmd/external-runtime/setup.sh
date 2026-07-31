@@ -8,7 +8,8 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "${SCRIPT_DIR}/../../.." && pwd)"
 RUNTIME_DIR="${1:-${HOME}/.local/share/physicsnemo-serve/runtimes/earth2studio}"
 PYTHON_VERSION="${PYTHON_VERSION:-3.12}"
-TORCH_BACKEND="${UV_TORCH_BACKEND:-auto}"
+TORCH_BACKEND="${UV_TORCH_BACKEND:-cu130}"
+REQUIREMENTS_LOCK="${SCRIPT_DIR}/requirements-earth2studio.lock"
 
 if [[ -e "${RUNTIME_DIR}" ]]; then
     echo "runtime directory already exists: ${RUNTIME_DIR}" >&2
@@ -20,13 +21,17 @@ command -v uv >/dev/null 2>&1 || {
     echo "uv is required to create the external runtime" >&2
     exit 1
 }
+if [[ "${TORCH_BACKEND}" != "cu130" ]]; then
+    echo "requirements-earth2studio.lock is generated for the cu130 backend" >&2
+    exit 1
+fi
 
 uv venv --python "${PYTHON_VERSION}" "${RUNTIME_DIR}"
 uv pip install \
     --python "${RUNTIME_DIR}/bin/python" \
     --torch-backend "${TORCH_BACKEND}" \
-    --requirements "${REPO_ROOT}/packaging/physicsnemo-serve-cmd/runtime-base.in" \
-    --requirements "${SCRIPT_DIR}/requirements-earth2studio.txt"
+    --require-hashes \
+    --requirements "${REQUIREMENTS_LOCK}"
 
 mkdir -p "${RUNTIME_DIR}/scripts" "${RUNTIME_DIR}/python"
 install -m 0644 \

@@ -10,6 +10,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
 import yaml
 
 
@@ -141,6 +142,122 @@ WORKFLOW = DirectWorkflow
     assert result["execution"]["output_path"].endswith("direct-test/result.json")
     assert result["execution"]["outputs"][0]["name"] == "primary"
     assert result["request"]["raw_fields"] == {"value": 7}
+
+
+def test_direct_runner_preserves_execution_failure_through_postprocess(
+    tmp_path: Path,
+) -> None:
+    plugin_root = _write_plugin(
+        tmp_path,
+        plugin_id="direct-failed-postprocess",
+        profile="postprocess",
+        options={},
+        request_schema={"type": "object"},
+        workflow="""
+from plugin_sdk import PluginWorkflow
+
+
+class FailedPostprocessWorkflow(PluginWorkflow):
+    def execute(self, ctx):
+        return {
+            "status": "failed",
+            "error": "execution failed",
+            "error_traceback": "execution traceback",
+        }
+
+    def postprocess(self, result, ctx):
+        return {"postprocessed": True}
+
+
+WORKFLOW = FailedPostprocessWorkflow
+""",
+    )
+
+    proc = _run_direct(plugin_root, {}, tmp_path / "outputs")
+
+    assert proc.returncode == 0, proc.stderr
+    result = json.loads(proc.stdout)
+    assert result["status"] == "failed"
+    assert result["execution"]["error"] == "execution failed"
+    assert result["execution"]["error_traceback"] == "execution traceback"
+    assert result["payload"] == {"postprocessed": True}
+
+
+def test_direct_runner_merges_outputs_registered_during_postprocess(
+    tmp_path: Path,
+) -> None:
+    plugin_root = _write_plugin(
+        tmp_path,
+        plugin_id="direct-postprocess-output",
+        profile="postprocess",
+        options={},
+        request_schema={"type": "object"},
+        workflow="""
+from plugin_sdk import PluginWorkflow, PostprocessOutcome
+
+
+class PostprocessOutputWorkflow(PluginWorkflow):
+    def execute(self, ctx):
+        return {"value": 1}
+
+    def postprocess(self, result, ctx):
+        output_path = ctx.outputs.create(
+            "postprocessed",
+            filename="postprocessed.json",
+            media_type="application/json",
+            primary=True,
+        )
+        output_path.write_text('{"postprocessed": true}', encoding="utf-8")
+        return PostprocessOutcome(payload={"value": 2})
+
+
+WORKFLOW = PostprocessOutputWorkflow
+""",
+    )
+
+    proc = _run_direct(plugin_root, {}, tmp_path / "outputs")
+
+    assert proc.returncode == 0, proc.stderr
+    result = json.loads(proc.stdout)
+    assert result["execution"]["outputs"][0]["name"] == "postprocessed"
+    assert result["execution"]["output_path"].endswith("postprocessed.json")
+    assert result["payload"] == {"value": 2}
+
+
+def test_direct_runner_rejects_postprocess_result_operations(tmp_path: Path) -> None:
+    plugin_root = _write_plugin(
+        tmp_path,
+        plugin_id="direct-postprocess-ops",
+        profile="postprocess",
+        options={},
+        request_schema={"type": "object"},
+        workflow="""
+from plugin_sdk import DatasetExportNetcdfOp, PluginWorkflow, PostprocessOutcome
+
+
+class PostprocessOpsWorkflow(PluginWorkflow):
+    def execute(self, ctx):
+        return {"value": 1}
+
+    def postprocess(self, result, ctx):
+        return PostprocessOutcome(
+            payload={"value": 2},
+            result_ops=[DatasetExportNetcdfOp()],
+        )
+
+
+WORKFLOW = PostprocessOpsWorkflow
+""",
+    )
+
+    proc = _run_direct(plugin_root, {}, tmp_path / "outputs")
+
+    assert proc.returncode == 1
+    assert "does not support postprocess result_ops" in proc.stderr
+    assert (
+        "does not support postprocess result_ops"
+        in json.loads(proc.stdout)["execution"]["error"]
+    )
 
 
 def test_direct_runner_materializes_prefetch_and_skips_schedule(tmp_path: Path) -> None:
@@ -280,7 +397,221 @@ WORKFLOW = ValidationWorkflow
 
     assert proc.returncode == 1
     assert "does not conform to schema" in proc.stderr
+    error_result = json.loads(proc.stdout)
+    assert error_result["status"] == "failed"
+    assert "does not conform to schema" in error_result["execution"]["error"]
     assert not marker.exists()
+
+
+@pytest.mark.parametrize(
+    ("stage_ids", "message"),
+    [
+        ([None, None], "non-empty ids"),
+        (["execute", "execute"], "duplicate stage id 'execute'"),
+    ],
+)
+def test_direct_runner_rejects_missing_or_duplicate_stage_ids(
+    tmp_path: Path,
+    stage_ids: list[str | None],
+    message: str,
+) -> None:
+    plugin_root = _write_plugin(
+        tmp_path,
+        plugin_id="direct-invalid-stages",
+        profile="simple",
+        options={},
+        request_schema={"type": "object"},
+        workflow="""
+from plugin_sdk import PluginWorkflow
+
+
+class InvalidStagesWorkflow(PluginWorkflow):
+    def execute(self, ctx):
+        return {"ok": True}
+
+
+WORKFLOW = InvalidStagesWorkflow
+""",
+    )
+    manifest_path = plugin_root / "plugin.yaml"
+    manifest = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+    manifest["pipeline"] = {
+        "stages": [
+            {
+                "id": stage_ids[0],
+                "phase": "execute",
+                "handler": "plugin_phase",
+                "queue": "execute.python.test",
+                "next": stage_ids[1],
+            },
+            {
+                "id": stage_ids[1],
+                "phase": "results",
+                "handler": "persist_results",
+                "queue": "results",
+                "next": None,
+            },
+        ]
+    }
+    manifest_path.write_text(
+        yaml.safe_dump(manifest, sort_keys=False), encoding="utf-8"
+    )
+
+    proc = _run_direct(plugin_root, {}, tmp_path / "outputs")
+
+    assert proc.returncode == 1
+    assert message in proc.stderr
+    assert message in json.loads(proc.stdout)["execution"]["error"]
+
+
+@pytest.mark.parametrize(
+    ("next_value", "message"),
+    [
+        (None, "must define a non-empty next stage"),
+        ("missing-stage", "references unknown next stage 'missing-stage'"),
+    ],
+)
+def test_direct_runner_rejects_invalid_pipeline_transition(
+    tmp_path: Path,
+    next_value: str | None,
+    message: str,
+) -> None:
+    plugin_root = _write_plugin(
+        tmp_path,
+        plugin_id="direct-invalid-transition",
+        profile="simple",
+        options={},
+        request_schema={"type": "object"},
+        workflow="""
+from plugin_sdk import PluginWorkflow
+
+
+class InvalidTransitionWorkflow(PluginWorkflow):
+    def execute(self, ctx):
+        return {"ok": True}
+
+
+WORKFLOW = InvalidTransitionWorkflow
+""",
+    )
+    manifest_path = plugin_root / "plugin.yaml"
+    manifest = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+    manifest["pipeline"] = {
+        "stages": [
+            {
+                "id": "execute",
+                "phase": "execute",
+                "handler": "plugin_phase",
+                "queue": "execute.python.test",
+                "next": next_value,
+            },
+            {
+                "id": "results",
+                "phase": "results",
+                "handler": "persist_results",
+                "queue": "results",
+                "next": None,
+            },
+        ]
+    }
+    manifest_path.write_text(
+        yaml.safe_dump(manifest, sort_keys=False), encoding="utf-8"
+    )
+
+    proc = _run_direct(plugin_root, {}, tmp_path / "outputs")
+
+    assert proc.returncode == 1
+    assert message in proc.stderr
+    assert message in json.loads(proc.stdout)["execution"]["error"]
+
+
+def test_direct_runner_defaults_content_type_and_skips_empty_operation_allowlist(
+    tmp_path: Path,
+) -> None:
+    plugin_root = _write_plugin(
+        tmp_path,
+        plugin_id="direct-ingress-defaults",
+        profile="simple",
+        options={},
+        request_schema={"type": "object"},
+        workflow="""
+from plugin_sdk import PluginWorkflow
+
+
+class IngressDefaultsWorkflow(PluginWorkflow):
+    def execute(self, ctx):
+        return {"operation": ctx["operation"]}
+
+
+WORKFLOW = IngressDefaultsWorkflow
+""",
+    )
+    manifest_path = plugin_root / "plugin.yaml"
+    manifest = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+    manifest["ingress"].pop("content_type")
+    manifest["ingress"]["operation"] = {"default": "run", "allowed": []}
+    manifest_path.write_text(
+        yaml.safe_dump(manifest, sort_keys=False), encoding="utf-8"
+    )
+
+    proc = _run_direct(
+        plugin_root,
+        {"operation": "custom-operation"},
+        tmp_path / "outputs",
+    )
+
+    assert proc.returncode == 0, proc.stderr
+    result = json.loads(proc.stdout)
+    assert result["request"]["content_type"] == "application/json"
+    assert result["request"]["operation"] == "custom-operation"
+    assert result["payload"]["operation"] == "custom-operation"
+
+
+@pytest.mark.parametrize(
+    ("content_types", "expected_returncode", "message"),
+    [
+        (["application/json"], 0, None),
+        ("application/json", 1, "ingress.content_types must be an array"),
+    ],
+)
+def test_direct_runner_validates_plural_content_types(
+    tmp_path: Path,
+    content_types: object,
+    expected_returncode: int,
+    message: str | None,
+) -> None:
+    plugin_root = _write_plugin(
+        tmp_path,
+        plugin_id="direct-content-types",
+        profile="simple",
+        options={},
+        request_schema={"type": "object"},
+        workflow="""
+from plugin_sdk import PluginWorkflow
+
+
+class ContentTypesWorkflow(PluginWorkflow):
+    def execute(self, ctx):
+        return {"ok": True}
+
+
+WORKFLOW = ContentTypesWorkflow
+""",
+    )
+    manifest_path = plugin_root / "plugin.yaml"
+    manifest = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+    manifest["ingress"].pop("content_type")
+    manifest["ingress"]["content_types"] = content_types
+    manifest_path.write_text(
+        yaml.safe_dump(manifest, sort_keys=False), encoding="utf-8"
+    )
+
+    proc = _run_direct(plugin_root, {}, tmp_path / "outputs")
+
+    assert proc.returncode == expected_returncode
+    if message is not None:
+        assert message in proc.stderr
+        assert message in json.loads(proc.stdout)["execution"]["error"]
 
 
 def test_direct_runner_executes_batch_profile_as_one_item(tmp_path: Path) -> None:
@@ -328,6 +659,35 @@ WORKFLOW = BatchWorkflow
     assert result["payload"]["value"] == 12
 
 
+def test_direct_runner_preserves_batch_item_failure(tmp_path: Path) -> None:
+    plugin_root = _write_plugin(
+        tmp_path,
+        plugin_id="direct-failed-batch",
+        profile="batch",
+        options={},
+        request_schema={"type": "object"},
+        workflow="""
+from plugin_sdk import BatchItemResult, PluginWorkflow
+
+
+class FailedBatchWorkflow(PluginWorkflow):
+    def run_batch(self, items, ctx):
+        return [BatchItemResult.failed("batch item failed")]
+
+
+WORKFLOW = FailedBatchWorkflow
+""",
+    )
+
+    proc = _run_direct(plugin_root, {}, tmp_path / "outputs")
+
+    assert proc.returncode == 0, proc.stderr
+    result = json.loads(proc.stdout)
+    assert result["status"] == "failed"
+    assert result["execution"]["error"] == "batch item failed"
+    assert result["payload"] == {}
+
+
 def test_direct_runner_keeps_plugin_output_out_of_json_protocol(
     tmp_path: Path,
 ) -> None:
@@ -338,14 +698,24 @@ def test_direct_runner_keeps_plugin_output_out_of_json_protocol(
         options={},
         request_schema={"type": "object"},
         workflow="""
+import os
+import subprocess
+import sys
+
 from plugin_sdk import PluginWorkflow
 
 print("noise emitted while importing plugin")
+os.write(1, b"native noise emitted while importing plugin\\n")
 
 
 class NoisyWorkflow(PluginWorkflow):
     def execute(self, ctx):
         print("noise emitted while executing plugin")
+        os.write(1, b"native noise emitted while executing plugin\\n")
+        subprocess.run(
+            [sys.executable, "-c", "print('child process noise')"],
+            check=True,
+        )
         return {"ok": True}
 
 
@@ -359,6 +729,49 @@ WORKFLOW = NoisyWorkflow
     result = json.loads(proc.stdout)
     assert result["payload"] == {"ok": True}
     assert "noise emitted" not in proc.stdout
+    assert "native noise emitted" not in proc.stdout
+    assert "child process noise" not in proc.stdout
+    assert "native noise emitted" in proc.stderr
+    assert "child process noise" in proc.stderr
+
+
+def test_direct_runner_moves_failure_and_timing_metadata_to_execution(
+    tmp_path: Path,
+) -> None:
+    plugin_root = _write_plugin(
+        tmp_path,
+        plugin_id="direct-failed-result",
+        profile="simple",
+        options={},
+        request_schema={"type": "object"},
+        workflow="""
+from plugin_sdk import PluginWorkflow
+
+
+class FailedWorkflow(PluginWorkflow):
+    def execute(self, ctx):
+        return {
+            "status": "failed",
+            "error": "model execution failed",
+            "error_traceback": "traceback details",
+            "execution_time_seconds": 1.25,
+            "diagnostic_code": "E_MODEL",
+        }
+
+
+WORKFLOW = FailedWorkflow
+""",
+    )
+
+    proc = _run_direct(plugin_root, {}, tmp_path / "outputs")
+
+    assert proc.returncode == 0, proc.stderr
+    result = json.loads(proc.stdout)
+    assert result["status"] == "failed"
+    assert result["execution"]["error"] == "model execution failed"
+    assert result["execution"]["error_traceback"] == "traceback details"
+    assert result["execution"]["execution_time_seconds"] == 1.25
+    assert result["payload"] == {"diagnostic_code": "E_MODEL"}
 
 
 def test_direct_runner_rejects_ensemble_pipeline_explicitly(tmp_path: Path) -> None:

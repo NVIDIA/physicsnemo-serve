@@ -237,6 +237,8 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
     use std::os::unix::fs::symlink;
     use std::path::Path;
+    use std::sync::{Arc, Barrier};
+    use std::thread;
 
     use tempfile::tempdir;
 
@@ -454,6 +456,47 @@ mod tests {
     }
 
     #[test]
+    fn concurrent_extraction_serializes_incomplete_cache_repair() {
+        let temp = tempdir().expect("temp directory should be created");
+        let base = temp.path().join("physicsnemo-serve");
+        fs::write(&base, b"fake-elf").expect("base executable should be written");
+        let runtime = create_runtime(temp.path());
+        let packaged = temp.path().join("physicsnemo-serve-packaged");
+        package_executable(&base, &runtime, &packaged).expect("runtime should package");
+        let cache_root = temp.path().join("cache");
+        let extracted = extract_runtime(&packaged, &cache_root).expect("runtime should extract");
+        fs::remove_file(extracted.join(".physicsnemo-serve-runtime-complete"))
+            .expect("cache should be marked incomplete");
+
+        let workers = 8;
+        let barrier = Arc::new(Barrier::new(workers));
+        let handles = (0..workers)
+            .map(|_| {
+                let barrier = Arc::clone(&barrier);
+                let packaged = packaged.clone();
+                let cache_root = cache_root.clone();
+                thread::spawn(move || {
+                    barrier.wait();
+                    extract_runtime(&packaged, &cache_root)
+                })
+            })
+            .collect::<Vec<_>>();
+
+        for handle in handles {
+            let repaired = handle
+                .join()
+                .expect("cache repair thread should not panic")
+                .expect("concurrent cache repair should succeed");
+            assert!(repaired.join("bin/python").is_file());
+            assert!(
+                repaired
+                    .join(".physicsnemo-serve-runtime-complete")
+                    .is_file()
+            );
+        }
+    }
+
+    #[test]
     fn rejects_tampered_runtime_payload() {
         let temp = tempdir().expect("temp directory should be created");
         let base = temp.path().join("physicsnemo-serve");
@@ -534,6 +577,44 @@ mod tests {
             fs::read_link(extracted.join("bin/python3")).unwrap(),
             PathBuf::from("python3.12")
         );
+    }
+
+    #[test]
+    fn package_rejects_absolute_runtime_symlinks() {
+        let temp = tempdir().expect("temp directory should be created");
+        let base = temp.path().join("physicsnemo-serve");
+        fs::write(&base, b"fake-elf").expect("base executable should be written");
+        let runtime = create_runtime(temp.path());
+        let outside = temp.path().join("outside");
+        fs::write(&outside, b"outside").expect("outside file should be written");
+        symlink(&outside, runtime.join("absolute-link"))
+            .expect("absolute runtime symlink should be created");
+
+        let error = package_executable(&base, &runtime, &temp.path().join("packaged"))
+            .expect_err("absolute runtime symlink must be rejected");
+
+        assert!(
+            error
+                .to_string()
+                .contains("non-relocatable absolute symlink")
+        );
+    }
+
+    #[test]
+    fn package_rejects_runtime_symlinks_that_escape() {
+        let temp = tempdir().expect("temp directory should be created");
+        let base = temp.path().join("physicsnemo-serve");
+        fs::write(&base, b"fake-elf").expect("base executable should be written");
+        let runtime = create_runtime(temp.path());
+        let outside = temp.path().join("outside");
+        fs::write(&outside, b"outside").expect("outside file should be written");
+        symlink("../../outside", runtime.join("bin/escaping-link"))
+            .expect("escaping runtime symlink should be created");
+
+        let error = package_executable(&base, &runtime, &temp.path().join("packaged"))
+            .expect_err("runtime-escaping symlink must be rejected");
+
+        assert!(error.to_string().contains("escapes the runtime"));
     }
 
     fn create_runtime(root: &Path) -> PathBuf {

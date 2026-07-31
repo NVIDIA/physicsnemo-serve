@@ -58,7 +58,10 @@ exec {sys.executable!r} "$@"
         shutil.copy2(
             REPO_ROOT / "scripts" / script_name, runtime / "scripts" / script_name
         )
-    (runtime / "python").mkdir()
+    _write(
+        runtime / "python" / "bundled_runtime_fixture.py",
+        "BUNDLED_MULTIPLIER = 2",
+    )
     return runtime
 
 
@@ -91,12 +94,15 @@ def _create_plugin(root: Path) -> tuple[Path, Path]:
     _write(
         plugin_root / "workflow.py",
         """
+from bundled_runtime_fixture import BUNDLED_MULTIPLIER
+
+
 def prepare(ctx):
     return {"parameters": {"value": int(ctx["parameters"]["value"])}}
 
 
 def execute(ctx):
-    return {"value": ctx["parameters"]["value"] * 2}
+    return {"value": ctx["parameters"]["value"] * BUNDLED_MULTIPLIER}
 """,
     )
     request_path = root / "request.json"
@@ -110,11 +116,13 @@ def _run_infer(
     request_path: Path,
     output_dir: Path,
     env: dict[str, str],
+    runtime_dir: Path | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
+    command = [str(executable), "infer"]
+    if runtime_dir is not None:
+        command.extend(["--runtime-dir", str(runtime_dir)])
+    command.extend(
         [
-            str(executable),
-            "infer",
             "--plugin",
             str(plugin_root),
             "--request",
@@ -123,7 +131,10 @@ def _run_infer(
             str(output_dir),
             "--run-id",
             "binary-smoke",
-        ],
+        ]
+    )
+    return subprocess.run(
+        command,
         cwd=REPO_ROOT,
         env=env,
         text=True,
@@ -170,3 +181,26 @@ def test_binary_runs_external_plugin_from_embedded_runtime(tmp_path: Path) -> No
     assert result["payload"] == {"value": 18}
     assert result["status"] == "succeeded"
     assert list((tmp_path / "runtime-cache").iterdir())
+
+
+def test_binary_runs_external_plugin_from_explicit_runtime_dir(tmp_path: Path) -> None:
+    binary = _build_binary()
+    runtime = _create_fixture_runtime(tmp_path)
+    plugin_root, request_path = _create_plugin(tmp_path)
+    cache_dir = tmp_path / "unused-runtime-cache"
+    env = os.environ.copy()
+    env["PHYSICSNEMO_SERVE_CLI_CACHE_DIR"] = str(cache_dir)
+
+    proc = _run_infer(
+        binary,
+        plugin_root,
+        request_path,
+        tmp_path / "outputs",
+        env,
+        runtime_dir=runtime,
+    )
+
+    assert proc.returncode == 0, proc.stderr
+    result = json.loads(proc.stdout)
+    assert result["payload"] == {"value": 18}
+    assert not cache_dir.exists()

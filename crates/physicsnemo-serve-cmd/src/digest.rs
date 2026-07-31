@@ -68,4 +68,19 @@ mod tests {
         assert_eq!(output, input);
         assert_eq!(copied_digest, read_digest);
     }
+
+    #[test]
+    fn hashes_empty_input_with_the_standard_sha256_digest() {
+        let digest = sha256_reader([].as_slice()).unwrap();
+
+        assert_eq!(
+            hex(&digest),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+    }
+
+    #[test]
+    fn hex_preserves_leading_zeroes() {
+        assert_eq!(hex(&[0x00, 0x01, 0x0f, 0x10, 0xff]), "00010f10ff");
+    }
 }

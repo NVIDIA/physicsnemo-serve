@@ -59,7 +59,6 @@ async fn run_inference(args: InferArgs) -> Result<u8> {
     let runtime_root = resolve_runtime(&executable, args.runtime_dir.as_deref())?;
     let python = runtime_root.join("bin/python");
     let runner = runtime_root.join("scripts/plugin_direct_runner.py");
-    validate_runtime(&runtime_root)?;
     fs::create_dir_all(&args.output_dir).with_context(|| {
         format!(
             "failed to create output directory: {}",
@@ -113,10 +112,14 @@ async fn run_prefetch(args: PrefetchArgs) -> Result<()> {
 
 fn resolve_runtime(executable: &Path, runtime_dir: Option<&Path>) -> Result<PathBuf> {
     if let Some(runtime_dir) = runtime_dir {
+        validate_runtime(runtime_dir).context("runtime supplied with --runtime-dir is invalid")?;
         return Ok(runtime_dir.to_path_buf());
     }
     if let Some(runtime_dir) = env::var_os(RUNTIME_OVERRIDE_ENV) {
-        return Ok(PathBuf::from(runtime_dir));
+        let runtime_dir = PathBuf::from(runtime_dir);
+        validate_runtime(&runtime_dir)
+            .with_context(|| format!("runtime supplied by {RUNTIME_OVERRIDE_ENV} is invalid"))?;
+        return Ok(runtime_dir);
     }
     let cache_root = if let Some(cache_dir) = env::var_os(CACHE_OVERRIDE_ENV) {
         PathBuf::from(cache_dir)
@@ -125,7 +128,9 @@ fn resolve_runtime(executable: &Path, runtime_dir: Option<&Path>) -> Result<Path
             .ok_or_else(|| anyhow!("could not determine the runtime cache directory"))?
             .join("physicsnemo-serve/inference-cli")
     };
-    extract_runtime(executable, &cache_root)
+    let runtime_dir = extract_runtime(executable, &cache_root)?;
+    validate_runtime(&runtime_dir).context("bundled runtime is invalid")?;
+    Ok(runtime_dir)
 }
 
 fn validate_runtime(runtime_root: &Path) -> Result<()> {

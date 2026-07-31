@@ -318,6 +318,19 @@ fn manifest_preserves_plugin_configuration() {
 }
 
 #[test]
+fn manifest_without_configuration_uses_null_and_omits_it_when_serialized() {
+    let manifest = PluginManifest::from_yaml_str(minimal_manifest_yaml())
+        .expect("manifest without configuration should parse");
+
+    assert!(manifest.configuration.is_null());
+    manifest
+        .validate()
+        .expect("missing configuration should remain valid");
+    let encoded = serde_json::to_value(&manifest).expect("manifest should serialize");
+    assert!(encoded.get("configuration").is_none());
+}
+
+#[test]
 fn manifest_validation_rejects_scalar_configuration() {
     let yaml = format!("{}\nconfiguration: unsafe\n", minimal_manifest_yaml());
     let manifest = PluginManifest::from_yaml_str(&yaml).expect("manifest should parse");

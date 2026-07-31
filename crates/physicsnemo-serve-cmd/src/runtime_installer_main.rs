@@ -26,8 +26,8 @@ fn run() -> anyhow::Result<()> {
     }
     let installed = install_runtime(&args)?;
     println!(
-        "Runtime for plugin '{}' installed at {}",
-        installed.plugin_id,
+        "Runtime for plugin(s) '{}' installed at {}",
+        installed.plugin_ids.join(", "),
         installed.runtime_dir.display()
     );
     Ok(())

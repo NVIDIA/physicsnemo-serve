@@ -25,7 +25,7 @@ jobs:
     runs-on: linux-amd64-cpu16
     timeout-minutes: 120
     env:
-      IMAGE: ${{ format('{0}/{1}/{2}-cmd', vars.NGC_REGISTRY, secrets.NGC_ORG, secrets.NGC_IMAGE) }}
+      IMAGE: ${{ format('{0}/{1}/physicsnemo-serve-cmd', vars.NGC_REGISTRY, secrets.NGC_ORG) }}
       BUILDER_NAME: physicsnemo-serve-cmd-${{ github.run_id }}-${{ github.run_attempt }}
 
     steps:
@@ -59,6 +59,9 @@ jobs:
       - name: Set up Docker Buildx
         run: docker buildx create --use --name "$BUILDER_NAME"
 
+      # The shared CFD runtime pins torch-scatter==2.1.2, which currently has
+      # no Linux arm64 wheel. Keep the published image on amd64 until that
+      # dependency can resolve without an unsupported source build.
       - name: Build and push Linux amd64 image
         run: |
           docker buildx build \

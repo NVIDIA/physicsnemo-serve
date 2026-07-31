@@ -24,6 +24,7 @@ make build-serve-cmd
 packaging/physicsnemo-serve-cmd/external-runtime/setup.sh \
   "$HOME/.local/share/physicsnemo-serve/runtimes/earth2studio"
 
+export PHYSICSNEMO_SERVE_E2S_ZARR_BACKEND=python
 ./dist/physicsnemo-serve infer \
   --runtime-dir "$HOME/.local/share/physicsnemo-serve/runtimes/earth2studio" \
   --plugin plugins/e2s-deterministic-earth2 \
@@ -57,6 +58,10 @@ neither is set, the CLI falls back to its appended runtime. Runtime creation is
 an explicit provisioning step; dependencies are never installed during
 inference.
 
+The provided external runtime does not include the repo-local `e2s_zarr_io`
+extension, so its launcher selects the Python Zarr backend by default. Set the
+variable to `rust` only when that extension is installed in the runtime.
+
 ### Install a runtime for one plugin
 
 Build the separate installer binary:
@@ -82,11 +87,14 @@ requiring `sudo` or editing shell startup files:
   --torch-backend cu128
 ```
 
-`--requirements` may be repeated. When it is omitted, the installer uses
-`<plugin>/requirements.txt` if that file exists. Import names in
+`--plugin` may be repeated to create one shared environment and verify the
+readiness imports declared by every included plugin. `--requirements` may also
+be repeated. When it is omitted, the installer uses each
+`<plugin>/requirements.txt` that exists. Import names in
 `plugin.yaml` are used only for verification because a Python import name does
 not reliably identify its installable package. Pass `--uv PATH` to use a
-preinstalled copy in an offline or controlled environment. Use
+preinstalled copy of the installer's pinned `uv` version in an offline or
+controlled environment. Use
 `--skip-import-checks` only when imports require unavailable runtime resources
 such as model assets.
 
@@ -120,6 +128,12 @@ different hashed lock and pass it to `assemble_runtime.py` when the supported
 external plugins require additional packages. Repo-local packages can be
 included with repeated `--extra-python-package PATH` arguments. Dependencies
 are never installed while running inference.
+
+`--python-prefix` accepts only a standalone uv-managed CPython installation
+containing its `BUILD` marker. Venvs are rejected because their interpreter
+symlinks and standard-library configuration commonly refer to the host Python
+installation and are not portable. Absolute or prefix-escaping symlinks are
+also rejected before the runtime is copied.
 
 ## Run
 

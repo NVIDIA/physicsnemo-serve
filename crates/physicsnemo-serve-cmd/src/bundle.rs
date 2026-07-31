@@ -120,6 +120,19 @@ pub fn extract_runtime(executable: &Path, cache_root: &Path) -> Result<PathBuf> 
             cache_root.display()
         )
     })?;
+    let lock_path = cache_root.join(format!(".{cache_key}.lock"));
+    let cache_lock = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .with_context(|| format!("failed to open runtime cache lock: {}", lock_path.display()))?;
+    fs2::FileExt::lock_exclusive(&cache_lock)
+        .with_context(|| format!("failed to lock runtime cache: {}", lock_path.display()))?;
+    if runtime_is_ready(&runtime_root) {
+        return Ok(runtime_root);
+    }
     if runtime_root.exists() {
         fs::remove_dir_all(&runtime_root).with_context(|| {
             format!(
@@ -303,6 +316,48 @@ fn validate_runtime_layout(runtime_dir: &Path) -> Result<()> {
                 relative_path,
                 path.display()
             ));
+        }
+    }
+    let canonical_root = runtime_dir.canonicalize().with_context(|| {
+        format!(
+            "failed to resolve runtime directory: {}",
+            runtime_dir.display()
+        )
+    })?;
+    validate_runtime_symlinks(runtime_dir, &canonical_root)?;
+    Ok(())
+}
+
+fn validate_runtime_symlinks(directory: &Path, canonical_root: &Path) -> Result<()> {
+    for entry in fs::read_dir(directory)
+        .with_context(|| format!("failed to read runtime directory: {}", directory.display()))?
+    {
+        let entry = entry?;
+        let path = entry.path();
+        let file_type = entry.file_type()?;
+        if file_type.is_dir() {
+            validate_runtime_symlinks(&path, canonical_root)?;
+        } else if file_type.is_symlink() {
+            let target = fs::read_link(&path).with_context(|| {
+                format!("failed to read runtime symlink target: {}", path.display())
+            })?;
+            if target.is_absolute() {
+                return Err(anyhow!(
+                    "runtime contains a non-relocatable absolute symlink: {} -> {}",
+                    path.display(),
+                    target.display()
+                ));
+            }
+            let resolved = path.canonicalize().with_context(|| {
+                format!("failed to resolve runtime symlink: {}", path.display())
+            })?;
+            if !resolved.starts_with(canonical_root) {
+                return Err(anyhow!(
+                    "runtime contains a symlink that escapes the runtime: {} -> {}",
+                    path.display(),
+                    target.display()
+                ));
+            }
         }
     }
     Ok(())

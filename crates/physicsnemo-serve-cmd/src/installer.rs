@@ -6,7 +6,7 @@
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs;
-use std::io::{Cursor, Read};
+use std::io::{Cursor, ErrorKind, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
@@ -28,9 +28,10 @@ pub const INSTALLER_USAGE: &str = "\
 physicsnemo-serve-install — create a plugin-specific external runtime
 
 USAGE:
-  physicsnemo-serve-install --plugin PATH --runtime-dir DIR [OPTIONS]
+  physicsnemo-serve-install --plugin PATH [--plugin PATH ...] --runtime-dir DIR [OPTIONS]
 
 OPTIONS:
+  --plugin PATH           Plugin whose readiness imports must pass; may be repeated
   --requirements FILE     Additional requirements file; may be repeated
   --python VERSION        Python version or interpreter for uv (default: 3.12)
   --torch-backend VALUE   uv PyTorch backend (default: auto)
@@ -94,7 +95,7 @@ const SUPPORT_FILES: &[(&str, &[u8])] = &[
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InstallerArgs {
-    pub plugin_root: PathBuf,
+    pub plugin_roots: Vec<PathBuf>,
     pub runtime_dir: PathBuf,
     pub requirements: Vec<PathBuf>,
     pub python: String,
@@ -106,18 +107,23 @@ pub struct InstallerArgs {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InstalledRuntime {
-    pub plugin_id: String,
+    pub plugin_ids: Vec<String>,
     pub runtime_dir: PathBuf,
 }
 
 #[derive(Debug, Serialize)]
 struct RuntimeManifest<'a> {
     schema_version: u8,
-    plugin_id: &'a str,
-    plugin_root: &'a Path,
+    plugin_ids: &'a [String],
     python: &'a str,
-    requirements: &'a [PathBuf],
+    requirements: &'a [String],
     checked_modules: &'a [String],
+}
+
+struct PluginManifest {
+    id: String,
+    root: PathBuf,
+    manifest: Value,
 }
 
 pub fn parse_installer_args<I, S>(args: I) -> Result<InstallerArgs>
@@ -131,7 +137,7 @@ where
         .collect::<Vec<_>>();
     if matches!(args.as_slice(), [arg] if arg == "--help" || arg == "-h") {
         return Ok(InstallerArgs {
-            plugin_root: PathBuf::new(),
+            plugin_roots: Vec::new(),
             runtime_dir: PathBuf::new(),
             requirements: Vec::new(),
             python: "3.12".to_string(),
@@ -143,6 +149,7 @@ where
     }
 
     let mut values = BTreeMap::<String, OsString>::new();
+    let mut plugin_roots = Vec::new();
     let mut requirements = Vec::new();
     let mut skip_import_checks = false;
     let mut index = 0;
@@ -172,7 +179,9 @@ where
         let value = args
             .get(index + 1)
             .ok_or_else(|| anyhow!("missing value for {option}"))?;
-        if option == "--requirements" {
+        if option == "--plugin" {
+            plugin_roots.push(PathBuf::from(value));
+        } else if option == "--requirements" {
             requirements.push(PathBuf::from(value));
         } else if values.insert(option.to_string(), value.clone()).is_some() {
             bail!("duplicate option {option}");
@@ -180,8 +189,11 @@ where
         index += 2;
     }
 
+    if plugin_roots.is_empty() {
+        bail!("missing required option --plugin");
+    }
     Ok(InstallerArgs {
-        plugin_root: required_path(&values, "--plugin")?,
+        plugin_roots,
         runtime_dir: required_path(&values, "--runtime-dir")?,
         requirements,
         python: optional_string(&values, "--python", "3.12")?,
@@ -193,33 +205,36 @@ where
 }
 
 pub fn install_runtime(args: &InstallerArgs) -> Result<InstalledRuntime> {
-    let plugin_root = args.plugin_root.canonicalize().with_context(|| {
-        format!(
-            "plugin directory does not exist: {}",
-            args.plugin_root.display()
-        )
-    })?;
-    if !plugin_root.is_dir() {
-        bail!("plugin path is not a directory: {}", plugin_root.display());
+    let plugins = args
+        .plugin_roots
+        .iter()
+        .map(|root| load_plugin(root))
+        .collect::<Result<Vec<_>>>()?;
+    let plugin_ids = plugins
+        .iter()
+        .map(|plugin| plugin.id.clone())
+        .collect::<Vec<_>>();
+    let mut checked_modules = Vec::new();
+    for plugin in &plugins {
+        for module in readiness_modules(&plugin.manifest)? {
+            if !checked_modules.contains(&module) {
+                checked_modules.push(module);
+            }
+        }
     }
-    let manifest_path = plugin_root.join("plugin.yaml");
-    let manifest_source = fs::read_to_string(&manifest_path).with_context(|| {
-        format!(
-            "plugin manifest does not exist: {}",
-            manifest_path.display()
-        )
-    })?;
-    let manifest: Value = serde_yaml::from_str(&manifest_source)
-        .with_context(|| format!("invalid plugin manifest: {}", manifest_path.display()))?;
-    let plugin_id = manifest
-        .get("metadata")
-        .and_then(|value| value.get("id"))
-        .and_then(Value::as_str)
-        .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| anyhow!("plugin manifest is missing metadata.id"))?
-        .to_string();
-    let checked_modules = readiness_modules(&manifest)?;
-    let requirements = resolve_requirements(args, &plugin_root)?;
+    let plugin_roots = plugins
+        .iter()
+        .map(|plugin| plugin.root.as_path())
+        .collect::<Vec<_>>();
+    let requirements = resolve_requirements(args, &plugin_roots)?;
+    let manifest_requirements = requirements
+        .iter()
+        .map(|path| {
+            path.file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .ok_or_else(|| anyhow!("requirements path has no file name: {}", path.display()))
+        })
+        .collect::<Result<Vec<_>>>()?;
 
     if args.runtime_dir.exists() {
         bail!(
@@ -245,7 +260,9 @@ pub fn install_runtime(args: &InstallerArgs) -> Result<InstalledRuntime> {
             .arg("venv")
             .arg("--python")
             .arg(&args.python)
-            .arg(staging.path()),
+            .arg(staging.path())
+            .arg("--relocatable")
+            .arg("--quiet"),
         "create Python environment",
     )?;
 
@@ -266,6 +283,7 @@ pub fn install_runtime(args: &InstallerArgs) -> Result<InstalledRuntime> {
     for requirement in &requirements {
         install.arg("--requirements").arg(requirement);
     }
+    install.arg("--quiet");
     run(&mut install, "install runtime dependencies")?;
     fs::remove_file(&base_requirements).context("failed to remove temporary requirements file")?;
 
@@ -283,10 +301,9 @@ pub fn install_runtime(args: &InstallerArgs) -> Result<InstalledRuntime> {
     }
     let runtime_manifest = RuntimeManifest {
         schema_version: 1,
-        plugin_id: &plugin_id,
-        plugin_root: &plugin_root,
+        plugin_ids: &plugin_ids,
         python: &args.python,
-        requirements: &requirements,
+        requirements: &manifest_requirements,
         checked_modules: &checked_modules,
     };
     fs::write(
@@ -296,7 +313,15 @@ pub fn install_runtime(args: &InstallerArgs) -> Result<InstalledRuntime> {
 
     let staging_path = staging.keep();
     if let Err(error) = fs::rename(&staging_path, &args.runtime_dir) {
-        let _ = fs::remove_dir_all(&staging_path);
+        if let Err(cleanup_error) = fs::remove_dir_all(&staging_path) {
+            return Err(error).with_context(|| {
+                format!(
+                    "failed to publish runtime at {}; cleanup of staging directory {} also failed: {cleanup_error}",
+                    args.runtime_dir.display(),
+                    staging_path.display()
+                )
+            });
+        }
         return Err(error).with_context(|| {
             format!(
                 "failed to publish runtime at {}",
@@ -305,37 +330,46 @@ pub fn install_runtime(args: &InstallerArgs) -> Result<InstalledRuntime> {
         });
     }
     Ok(InstalledRuntime {
-        plugin_id,
+        plugin_ids,
         runtime_dir: args.runtime_dir.clone(),
     })
 }
 
 fn resolve_uv(explicit: Option<&Path>) -> Result<PathBuf> {
     if let Some(path) = explicit {
-        verify_uv(path).with_context(|| {
+        verify_uv_version(path, UV_VERSION).with_context(|| {
             format!(
-                "the uv executable supplied with --uv is unusable: {}",
+                "the uv executable supplied with --uv must be version {UV_VERSION}: {}",
                 path.display()
             )
         })?;
         return Ok(path.to_path_buf());
     }
-    if verify_uv(Path::new("uv")).is_ok() {
+    if verify_uv_version(Path::new("uv"), UV_VERSION).is_ok() {
         return Ok(PathBuf::from("uv"));
     }
     bootstrap_uv()
 }
 
-fn verify_uv(path: &Path) -> Result<()> {
-    let status = Command::new(path)
+fn verify_uv_version(path: &Path, expected_version: &str) -> Result<()> {
+    let output = Command::new(path)
         .arg("--version")
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
+        .output()
         .with_context(|| format!("failed to start {}", path.display()))?;
-    if !status.success() {
-        bail!("{} --version failed with {status}", path.display());
+    if !output.status.success() {
+        bail!("{} --version failed with {}", path.display(), output.status);
+    }
+    let stdout = std::str::from_utf8(&output.stdout).context("uv --version is not valid UTF-8")?;
+    let mut fields = stdout.split_whitespace();
+    let program = fields.next();
+    let actual_version = fields.next();
+    if program != Some("uv") || actual_version != Some(expected_version) {
+        bail!(
+            "{} has unexpected version output {:?}; expected uv {expected_version}",
+            path.display(),
+            stdout.trim()
+        );
     }
     Ok(())
 }
@@ -346,7 +380,7 @@ fn bootstrap_uv() -> Result<PathBuf> {
         .join("physicsnemo-serve/tools/uv");
     let install_dir = tools_root.join(UV_VERSION);
     let installed_uv = install_dir.join("uv");
-    if verify_uv(&installed_uv).is_ok() {
+    if verify_uv_version(&installed_uv, UV_VERSION).is_ok() {
         return Ok(installed_uv);
     }
 
@@ -356,6 +390,10 @@ fn bootstrap_uv() -> Result<PathBuf> {
             tools_root.display()
         )
     })?;
+    quarantine_invalid_uv_install(&install_dir)?;
+    if verify_uv_version(&installed_uv, UV_VERSION).is_ok() {
+        return Ok(installed_uv);
+    }
     let staging = Builder::new()
         .prefix(".uv-install-")
         .tempdir_in(&tools_root)
@@ -383,18 +421,59 @@ fn bootstrap_uv() -> Result<PathBuf> {
 
     let staged_uv = staging.path().join("uv");
     extract_uv(&archive, &staged_uv)?;
-    verify_uv(&staged_uv).context("the bootstrapped uv executable is unusable")?;
+    verify_uv_version(&staged_uv, UV_VERSION)
+        .context("the bootstrapped uv executable has an unexpected version")?;
 
     let staging_path = staging.keep();
     if let Err(error) = fs::rename(&staging_path, &install_dir) {
         let _ = fs::remove_dir_all(&staging_path);
-        if verify_uv(&installed_uv).is_ok() {
+        if verify_uv_version(&installed_uv, UV_VERSION).is_ok() {
             return Ok(installed_uv);
         }
         return Err(error)
             .with_context(|| format!("failed to publish uv at {}", install_dir.display()));
     }
     Ok(installed_uv)
+}
+
+fn quarantine_invalid_uv_install(install_dir: &Path) -> Result<()> {
+    let installed_uv = install_dir.join("uv");
+    if !install_dir.exists() || verify_uv_version(&installed_uv, UV_VERSION).is_ok() {
+        return Ok(());
+    }
+    let parent = install_dir
+        .parent()
+        .ok_or_else(|| anyhow!("uv installation directory has no parent"))?;
+    let quarantine_root = Builder::new()
+        .prefix(".uv-invalid-")
+        .tempdir_in(parent)
+        .context("failed to create uv quarantine directory")?;
+    let quarantined = quarantine_root.path().join("install");
+    match fs::rename(install_dir, &quarantined) {
+        Ok(()) => {}
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!(
+                    "failed to quarantine invalid uv installation at {}",
+                    install_dir.display()
+                )
+            });
+        }
+    }
+    let metadata = fs::symlink_metadata(&quarantined)?;
+    if metadata.is_dir() {
+        fs::remove_dir_all(&quarantined)
+    } else {
+        fs::remove_file(&quarantined)
+    }
+    .with_context(|| {
+        format!(
+            "failed to remove invalid uv installation from {}",
+            quarantined.display()
+        )
+    })?;
+    Ok(())
 }
 
 fn uv_asset_name() -> Result<&'static str> {
@@ -461,14 +540,39 @@ fn extract_uv(archive: &[u8], destination: &Path) -> Result<()> {
     bail!("uv archive does not contain the uv executable")
 }
 
-fn resolve_requirements(args: &InstallerArgs, plugin_root: &Path) -> Result<Vec<PathBuf>> {
+fn load_plugin(plugin_root: &Path) -> Result<PluginManifest> {
+    let root = plugin_root
+        .canonicalize()
+        .with_context(|| format!("plugin directory does not exist: {}", plugin_root.display()))?;
+    if !root.is_dir() {
+        bail!("plugin path is not a directory: {}", root.display());
+    }
+    let manifest_path = root.join("plugin.yaml");
+    let manifest_source = fs::read_to_string(&manifest_path).with_context(|| {
+        format!(
+            "plugin manifest does not exist: {}",
+            manifest_path.display()
+        )
+    })?;
+    let manifest: Value = serde_yaml::from_str(&manifest_source)
+        .with_context(|| format!("invalid plugin manifest: {}", manifest_path.display()))?;
+    let id = manifest
+        .get("metadata")
+        .and_then(|value| value.get("id"))
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| anyhow!("plugin manifest is missing metadata.id"))?
+        .to_string();
+    Ok(PluginManifest { id, root, manifest })
+}
+
+fn resolve_requirements(args: &InstallerArgs, plugin_roots: &[&Path]) -> Result<Vec<PathBuf>> {
     let candidates = if args.requirements.is_empty() {
-        let default = plugin_root.join("requirements.txt");
-        if default.is_file() {
-            vec![default]
-        } else {
-            Vec::new()
-        }
+        plugin_roots
+            .iter()
+            .map(|root| root.join("requirements.txt"))
+            .filter(|path| path.is_file())
+            .collect()
     } else {
         args.requirements.clone()
     };
@@ -591,6 +695,8 @@ mod tests {
         let args = parse_installer_args([
             "--plugin",
             "plugins/demo",
+            "--plugin",
+            "plugins/other",
             "--runtime-dir",
             "/tmp/demo-runtime",
             "--requirements",
@@ -605,7 +711,13 @@ mod tests {
         ])
         .unwrap();
 
-        assert_eq!(args.plugin_root, Path::new("plugins/demo"));
+        assert_eq!(
+            args.plugin_roots,
+            [
+                PathBuf::from("plugins/demo"),
+                PathBuf::from("plugins/other")
+            ]
+        );
         assert_eq!(args.runtime_dir, Path::new("/tmp/demo-runtime"));
         assert_eq!(
             args.requirements,
@@ -675,6 +787,69 @@ mod tests {
     }
 
     #[test]
+    fn verifies_exact_bootstrapped_uv_version() {
+        let root = tempdir().unwrap();
+        let uv = root.path().join("uv");
+        fs::write(&uv, format!("#!/bin/sh\necho 'uv {UV_VERSION}'\n")).unwrap();
+        fs::set_permissions(&uv, fs::Permissions::from_mode(0o755)).unwrap();
+
+        verify_uv_version(&uv, UV_VERSION).unwrap();
+        let error = verify_uv_version(&uv, "0.0.0").unwrap_err();
+        assert!(error.to_string().contains("unexpected version"));
+    }
+
+    #[test]
+    fn rejects_malformed_uv_version_output() {
+        let root = tempdir().unwrap();
+        let uv = root.path().join("uv");
+        fs::write(&uv, "#!/bin/sh\necho 'not-uv 0.11.16'\n").unwrap();
+        fs::set_permissions(&uv, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let error = verify_uv_version(&uv, UV_VERSION).unwrap_err();
+        assert!(error.to_string().contains("unexpected version"));
+    }
+
+    #[test]
+    fn rejects_explicit_uv_with_an_incompatible_version() {
+        let root = tempdir().unwrap();
+        let uv = root.path().join("uv");
+        fs::write(&uv, "#!/bin/sh\necho 'uv 0.10.0'\n").unwrap();
+        fs::set_permissions(&uv, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let error = resolve_uv(Some(&uv)).unwrap_err();
+
+        assert!(error.to_string().contains("must be version"));
+    }
+
+    #[test]
+    fn removes_corrupt_cached_uv_installation() {
+        let root = tempdir().unwrap();
+        let install_dir = root.path().join(UV_VERSION);
+        fs::create_dir(&install_dir).unwrap();
+        fs::write(install_dir.join("uv"), b"corrupt").unwrap();
+
+        quarantine_invalid_uv_install(&install_dir).unwrap();
+
+        assert!(!install_dir.exists());
+        assert_eq!(fs::read_dir(root.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn preserves_valid_cached_uv_installation() {
+        let root = tempdir().unwrap();
+        let install_dir = root.path().join(UV_VERSION);
+        fs::create_dir(&install_dir).unwrap();
+        let uv = install_dir.join("uv");
+        fs::write(&uv, format!("#!/bin/sh\necho 'uv {UV_VERSION}'\n")).unwrap();
+        fs::set_permissions(&uv, fs::Permissions::from_mode(0o755)).unwrap();
+
+        quarantine_invalid_uv_install(&install_dir).unwrap();
+
+        assert!(install_dir.exists());
+        verify_uv_version(&uv, UV_VERSION).unwrap();
+    }
+
+    #[test]
     fn installs_runtime_with_embedded_support_files() {
         let root = tempdir().unwrap();
         let plugin = root.path().join("plugin");
@@ -684,11 +859,28 @@ mod tests {
             "metadata:\n  id: demo\npipeline:\n  profile: simple\n",
         )
         .unwrap();
+        let second_plugin = root.path().join("second-plugin");
+        fs::create_dir(&second_plugin).unwrap();
+        fs::write(
+            second_plugin.join("plugin.yaml"),
+            "metadata:\n  id: second\ndeveloper:\n  readiness:\n    python_modules:\n      - second_runtime\n",
+        )
+        .unwrap();
+        let requirements = root.path().join("plugin-requirements.txt");
+        fs::write(&requirements, "demo-package==1.0\n").unwrap();
         let fake_uv = root.path().join("uv");
         fs::write(
             &fake_uv,
             "#!/bin/sh\n\
+             if [ \"$1\" = --version ]; then\n\
+               echo 'uv 0.11.16'\n\
+               exit 0\n\
+             fi\n\
              if [ \"$1\" = venv ]; then\n\
+               case \" $* \" in\n\
+                 *\" --relocatable \"*) ;;\n\
+                 *) echo 'missing --relocatable' >&2; exit 9 ;;\n\
+               esac\n\
                runtime=\"$4\"\n\
                mkdir -p \"$runtime/bin\"\n\
                printf '#!/bin/sh\\nexit 0\\n' > \"$runtime/bin/python\"\n\
@@ -699,9 +891,9 @@ mod tests {
         fs::set_permissions(&fake_uv, fs::Permissions::from_mode(0o755)).unwrap();
         let runtime = root.path().join("runtime");
         let args = InstallerArgs {
-            plugin_root: plugin,
+            plugin_roots: vec![plugin, second_plugin],
             runtime_dir: runtime.clone(),
-            requirements: Vec::new(),
+            requirements: vec![requirements],
             python: "3.12".to_string(),
             torch_backend: "auto".to_string(),
             uv: Some(fake_uv),
@@ -711,7 +903,7 @@ mod tests {
 
         let installed = install_runtime(&args).unwrap();
 
-        assert_eq!(installed.plugin_id, "demo");
+        assert_eq!(installed.plugin_ids, ["demo", "second"]);
         assert!(runtime.join("bin/python").is_file());
         assert!(runtime.join("scripts/plugin_direct_runner.py").is_file());
         assert!(
@@ -720,5 +912,22 @@ mod tests {
                 .is_file()
         );
         assert!(runtime.join("runtime-manifest.json").is_file());
+        let manifest: serde_json::Value =
+            serde_json::from_slice(&fs::read(runtime.join("runtime-manifest.json")).unwrap())
+                .unwrap();
+        assert_eq!(
+            manifest["requirements"],
+            serde_json::json!(["plugin-requirements.txt"])
+        );
+        assert_eq!(
+            manifest["plugin_ids"],
+            serde_json::json!(["demo", "second"])
+        );
+        assert!(
+            manifest["checked_modules"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!("second_runtime"))
+        );
     }
 }

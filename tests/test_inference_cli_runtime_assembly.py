@@ -5,8 +5,12 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import shutil
+import subprocess
 import sys
 from pathlib import Path
+
+import pytest
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -34,6 +38,7 @@ def test_assemble_runtime_copies_interpreter_and_runner_support(tmp_path: Path) 
         encoding="utf-8",
     )
     python.chmod(0o755)
+    (python_prefix / "BUILD").write_text("standalone\n", encoding="utf-8")
     output = tmp_path / "runtime"
 
     module.assemble_runtime(
@@ -71,3 +76,141 @@ def test_assemble_runtime_rejects_missing_interpreter(tmp_path: Path) -> None:
         assert "bin/python" in str(exc)
     else:
         raise AssertionError("missing interpreter should be rejected")
+
+
+def test_assemble_runtime_rejects_venv_python_prefix(tmp_path: Path) -> None:
+    module = _load_assembler()
+    python_prefix = tmp_path / "venv-prefix"
+    python = python_prefix / "bin" / "python"
+    python.parent.mkdir(parents=True)
+    python.write_text("#!/bin/sh\n", encoding="utf-8")
+    (python_prefix / "pyvenv.cfg").write_text("home = /test\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="venvs and system Python prefixes"):
+        module.assemble_runtime(
+            repo_root=REPO_ROOT,
+            python_prefix=python_prefix,
+            output=tmp_path / "runtime",
+            requirements=None,
+            wheelhouse=None,
+        )
+
+
+def test_assemble_runtime_rejects_absolute_interpreter_symlink(
+    tmp_path: Path,
+) -> None:
+    module = _load_assembler()
+    python_prefix = tmp_path / "python-prefix"
+    python = python_prefix / "bin" / "python"
+    python.parent.mkdir(parents=True)
+    python.symlink_to(sys.executable)
+    (python_prefix / "BUILD").write_text("standalone\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="non-relocatable absolute symlink"):
+        module.assemble_runtime(
+            repo_root=REPO_ROOT,
+            python_prefix=python_prefix,
+            output=tmp_path / "runtime",
+            requirements=None,
+            wheelhouse=None,
+        )
+
+
+def test_assemble_runtime_does_not_publish_partial_output(
+    monkeypatch, tmp_path: Path
+) -> None:
+    module = _load_assembler()
+    python_prefix = tmp_path / "python-prefix"
+    python = python_prefix / "bin" / "python"
+    python.parent.mkdir(parents=True)
+    python.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    python.chmod(0o755)
+    (python_prefix / "BUILD").write_text("standalone\n", encoding="utf-8")
+    requirements = tmp_path / "requirements.txt"
+    requirements.write_text("", encoding="utf-8")
+    output = tmp_path / "runtime"
+    monkeypatch.setattr(module, "_require_uv", lambda: "uv")
+
+    def fail_install(*_args, **_kwargs) -> None:
+        raise RuntimeError("simulated install failure")
+
+    monkeypatch.setattr(module, "_install_requirements", fail_install)
+
+    with pytest.raises(RuntimeError, match="simulated install failure"):
+        module.assemble_runtime(
+            repo_root=REPO_ROOT,
+            python_prefix=python_prefix,
+            output=output,
+            requirements=requirements,
+            wheelhouse=None,
+        )
+
+    assert not output.exists()
+    assert not list(tmp_path.glob(".physicsnemo-runtime-*"))
+
+
+def test_assemble_runtime_rewrites_staging_entrypoint_shebangs(
+    monkeypatch, tmp_path: Path
+) -> None:
+    module = _load_assembler()
+    python_prefix = tmp_path / "python-prefix"
+    python = python_prefix / "bin" / "python"
+    python.parent.mkdir(parents=True)
+    python.write_text(
+        f'#!/bin/sh\nexec {sys.executable!r} "$@"\n',
+        encoding="utf-8",
+    )
+    python.chmod(0o755)
+    (python_prefix / "BUILD").write_text("standalone\n", encoding="utf-8")
+    requirements = tmp_path / "requirements.txt"
+    requirements.write_text("", encoding="utf-8")
+    output = tmp_path / "runtime"
+    monkeypatch.setattr(module, "_require_uv", lambda: "uv")
+
+    def install_entrypoint(runtime_python, *_args, **_kwargs) -> None:
+        entrypoint = runtime_python.parent / "fixture-command"
+        entrypoint.write_text(
+            f"#!{runtime_python}\nprint('relocatable-entrypoint')\n",
+            encoding="utf-8",
+        )
+        entrypoint.chmod(0o755)
+
+    monkeypatch.setattr(module, "_install_requirements", install_entrypoint)
+
+    module.assemble_runtime(
+        repo_root=REPO_ROOT,
+        python_prefix=python_prefix,
+        output=output,
+        requirements=requirements,
+        wheelhouse=None,
+    )
+
+    result = subprocess.run(
+        [str(output / "bin" / "fixture-command")],
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+    assert result.stdout.strip() == "relocatable-entrypoint"
+    assert ".physicsnemo-runtime-" not in (
+        output / "bin" / "fixture-command"
+    ).read_text(encoding="utf-8")
+
+
+def test_install_requirements_reports_missing_uv(monkeypatch, tmp_path: Path) -> None:
+    module = _load_assembler()
+    monkeypatch.setattr(shutil, "which", lambda executable: None)
+
+    try:
+        module._install_requirements(
+            tmp_path / "python",
+            tmp_path / "requirements.txt",
+            None,
+        )
+    except RuntimeError as exc:
+        assert "uv is required" in str(exc)
+        assert "not found on PATH" in str(exc)
+    else:
+        raise AssertionError(
+            "missing uv should be rejected before subprocess execution"
+        )

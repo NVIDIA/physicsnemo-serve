@@ -16,4 +16,5 @@ if [[ ! -x "${RUNTIME_DIR}/bin/python" ]]; then
     exit 1
 fi
 
+export PHYSICSNEMO_SERVE_E2S_ZARR_BACKEND="${PHYSICSNEMO_SERVE_E2S_ZARR_BACKEND:-python}"
 exec "${SERVE_BINARY}" infer --runtime-dir "${RUNTIME_DIR}" "$@"

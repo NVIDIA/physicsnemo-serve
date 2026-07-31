@@ -423,6 +423,30 @@ mod tests {
     }
 
     #[test]
+    fn from_env_zero_object_limit_falls_back_to_default() {
+        let config = with_env_var(
+            "E2S_PREFETCH_MAX_OBJECT_BYTES",
+            Some("0"),
+            PrefetchConfig::from_env,
+        );
+        assert_eq!(
+            config.max_object_bytes,
+            PrefetchConfig::default().max_object_bytes
+        );
+    }
+
+    #[test]
+    fn from_env_reads_request_byte_limit() {
+        let config = with_env_var(
+            "E2S_PREFETCH_MAX_REQUEST_BYTES",
+            Some("1048576"),
+            PrefetchConfig::from_env,
+        );
+
+        assert_eq!(config.max_request_bytes, 1_048_576);
+    }
+
+    #[test]
     fn from_env_normalizes_exact_https_host_allowlist() {
         let config = with_env_var(
             "E2S_PREFETCH_ALLOWED_HTTPS_HOSTS",

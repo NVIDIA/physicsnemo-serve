@@ -10,7 +10,7 @@ import json
 import os
 import subprocess
 import sys
-from contextlib import redirect_stdout
+from contextlib import contextmanager, redirect_stdout
 from pathlib import Path
 from typing import Any
 
@@ -86,19 +86,51 @@ def main() -> int:
         # Plugin imports and hooks may print progress or library diagnostics.
         # Keep stdout reserved for the single JSON protocol response expected
         # by the Rust caller.
-        with redirect_stdout(sys.stderr):
+        with _redirect_process_stdout_to_stderr():
             result = run_plugin(
                 Path(args.plugin_root).expanduser().resolve(),
                 Path(args.request).expanduser().resolve(),
                 Path(args.output_dir).expanduser().resolve(),
                 args.run_id,
             )
-        json.dump(result, sys.stdout)
-        sys.stdout.write("\n")
+        encoded = json.dumps(result)
+        sys.stdout.write(f"{encoded}\n")
         return 0
     except Exception as exc:
+        error_result = {
+            "run_id": args.run_id,
+            "status": "failed",
+            "workflow": None,
+            "request": None,
+            "execution": {
+                "outputs": [],
+                "output_path": None,
+                "error": str(exc),
+            },
+            "payload": {},
+        }
+        sys.stdout.write(f"{json.dumps(error_result)}\n")
         print(str(exc), file=sys.stderr)
         return 1
+
+
+@contextmanager
+def _redirect_process_stdout_to_stderr():
+    """Reserve stdout for the JSON response, including native and child output."""
+    sys.stdout.flush()
+    saved_stdout: int | None = None
+    try:
+        saved_stdout = os.dup(1)
+        os.dup2(2, 1)
+        with redirect_stdout(sys.stderr):
+            yield
+    finally:
+        if saved_stdout is not None:
+            try:
+                sys.stdout.flush()
+                os.dup2(saved_stdout, 1)
+            finally:
+                os.close(saved_stdout)
 
 
 def run_plugin(
@@ -228,6 +260,11 @@ def run_plugin(
         current_stage = (
             stage_by_id.get(str(next_stage_id)) if next_stage_id is not None else None
         )
+        if next_stage_id is not None and current_stage is None:
+            raise ValueError(
+                f"Pipeline stage '{stage_id}' selects unknown next stage "
+                f"'{next_stage_id}'"
+            )
 
     final_result = payload.get("result")
     if not isinstance(final_result, dict):
@@ -242,14 +279,41 @@ def run_plugin(
 
 
 def _validate_pipeline(stages: list[Any]) -> None:
+    stage_ids: set[str] = set()
+    validated_stages: list[dict[str, Any]] = []
     for raw_stage in stages:
         if not isinstance(raw_stage, dict):
             raise ValueError("Plugin pipeline stages must be objects")
+        stage_id = str(raw_stage.get("id") or "").strip()
+        if not stage_id:
+            raise ValueError("Plugin pipeline stages must have non-empty ids")
+        if stage_id in stage_ids:
+            raise ValueError(
+                f"Plugin pipeline contains duplicate stage id '{stage_id}'"
+            )
+        stage_ids.add(stage_id)
         phase = str(raw_stage.get("phase") or "")
         handler = str(raw_stage.get("handler") or "")
         if (phase, handler) not in SUPPORTED_STAGE_HANDLERS:
             raise ValueError(
                 f"Direct inference does not support pipeline phase '{phase}'"
+            )
+        if phase != "results":
+            next_stage_id = raw_stage.get("next")
+            if not isinstance(next_stage_id, str) or not next_stage_id.strip():
+                raise ValueError(
+                    f"Plugin pipeline stage '{stage_id}' must define a non-empty next stage"
+                )
+        validated_stages.append(raw_stage)
+
+    for stage in validated_stages:
+        if str(stage.get("phase") or "") == "results":
+            continue
+        next_stage_id = str(stage["next"]).strip()
+        if next_stage_id not in stage_ids:
+            raise ValueError(
+                f"Plugin pipeline stage '{stage['id']}' references unknown next stage "
+                f"'{next_stage_id}'"
             )
 
 
@@ -265,18 +329,38 @@ def _normalize_request(
     manifest: dict[str, Any], request: dict[str, Any]
 ) -> tuple[str, dict[str, Any]]:
     ingress = manifest.get("ingress", {})
-    content_types = ingress.get("content_types", [])
+    content_types = ingress.get("content_types")
+    if content_types is not None and not isinstance(content_types, list):
+        raise ValueError("ingress.content_types must be an array")
+    if not content_types:
+        content_type = str(ingress.get("content_type") or "application/json").strip()
+        content_types = [content_type]
     if "application/json" not in content_types:
         raise ValueError(
             "Direct inference currently supports only application/json ingress"
         )
 
-    operations = ingress.get("operations", {})
-    operation = request.get("operation", operations.get("default", "run"))
-    if not isinstance(operation, str) or operation not in operations.get("allowed", []):
+    operations = ingress.get("operations")
+    if not isinstance(operations, (dict, str)):
+        operations = ingress.get("operation", {})
+    if isinstance(operations, str):
+        default_operation = operations
+        allowed_operations = [operations]
+    elif isinstance(operations, dict):
+        default_operation = operations.get("default", "run")
+        allowed = operations.get("allowed", [])
+        allowed_operations = allowed if isinstance(allowed, list) else []
+    else:
+        default_operation = "run"
+        allowed_operations = []
+
+    operation = request.get("operation", default_operation)
+    if not isinstance(operation, str) or (
+        allowed_operations and operation not in allowed_operations
+    ):
         raise ValueError(
             f"Unsupported operation '{operation}'; allowed operations: "
-            f"{operations.get('allowed', [])}"
+            f"{allowed_operations}"
         )
 
     parameters = request.get("parameters")
@@ -366,9 +450,20 @@ def _invoke_phase(
         result.setdefault("artifacts", [])
         result.setdefault("output_path", None)
     elif phase == "postprocess":
+        result_ops = result.pop("result_ops", None)
+        if result_ops:
+            raise ValueError("Direct inference does not support postprocess result_ops")
+        result = merge_registered_outputs_into_result(result, payload["outputs"])
         prior_result = payload.get("result")
         if isinstance(prior_result, dict):
-            for field in ("artifacts", "output_path", "execution_time_seconds"):
+            for field in (
+                "status",
+                "artifacts",
+                "output_path",
+                "error",
+                "error_traceback",
+                "execution_time_seconds",
+            ):
                 if field not in result and field in prior_result:
                     result[field] = prior_result[field]
     return result
@@ -458,6 +553,9 @@ def _build_result_envelope(
         "outputs": artifacts,
         "output_path": result.get("output_path"),
     }
+    for field in ("error", "error_traceback", "execution_time_seconds"):
+        if field in result:
+            execution[field] = result[field]
     if prefetch_stats is not None:
         execution["prefetch"] = prefetch_stats
     plugin_payload = {

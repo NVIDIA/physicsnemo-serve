@@ -22,8 +22,7 @@ pub fn read_prefetch_plan(reader: impl Read) -> Result<Value> {
 pub async fn materialize_direct_plan(plan: Value, cache_dir: &Path, run_id: &str) -> Result<Value> {
     let direct_items: Vec<DirectPlanItem> =
         serde_json::from_value(plan).map_err(|error| anyhow!("invalid prefetch plan: {error}"))?;
-    let worker_items: Vec<PrefetchPlanItem> =
-        direct_items.iter().map(|item| item.plan.clone()).collect();
+    let worker_items: Vec<PrefetchPlanItem> = direct_items.iter().map(worker_plan_item).collect();
     let materialized = materialize_prefetch_plan(&worker_items, cache_dir, run_id).await?;
     if materialized.stats.required_errors > 0 {
         return Err(anyhow!(
@@ -103,6 +102,15 @@ struct DirectPlanItem {
     expected_size_bytes: Option<u64>,
 }
 
+fn worker_plan_item(item: &DirectPlanItem) -> PrefetchPlanItem {
+    let mut plan = item.plan.clone();
+    if plan.effective_kind().as_str() == "http_fetch" {
+        plan.expected_sha256.clone_from(&item.expected_sha256);
+        plan.expected_size_bytes = item.expected_size_bytes;
+    }
+    plan
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -168,6 +176,50 @@ mod tests {
         assert!(error.to_string().contains("SHA-256 mismatch"));
     }
 
+    #[tokio::test]
+    async fn rejects_size_mismatch_and_removes_materialized_artifact() {
+        let temp = tempdir().expect("temp directory should be created");
+        let source = temp.path().join("source.bin");
+        fs::write(&source, b"payload").expect("source should be written");
+        let cache = temp.path().join("cache");
+
+        let error = materialize_direct_plan(
+            json!([{
+                "kind": "file_copy",
+                "source_uri": source,
+                "target_artifact_name": "input",
+                "required": true,
+                "expected_size_bytes": 8
+            }]),
+            &cache,
+            "prefetch-test",
+        )
+        .await
+        .expect_err("size mismatch should fail");
+
+        assert!(error.to_string().contains("size mismatch"));
+        assert_eq!(
+            fs::read_dir(cache.join("prefetch"))
+                .expect("prefetch cache should exist")
+                .count(),
+            0,
+            "the rejected materialized artifact should be removed"
+        );
+    }
+
+    #[tokio::test]
+    async fn rejects_prefetch_json_with_the_wrong_shape() {
+        let plan = read_prefetch_plan(br#"{"source_uri":"file:///tmp/input"}"#.as_slice())
+            .expect("JSON object itself is valid");
+        let temp = tempdir().expect("temp directory should be created");
+
+        let error = materialize_direct_plan(plan, temp.path(), "prefetch-test")
+            .await
+            .expect_err("prefetch plan must be an array");
+
+        assert!(error.to_string().contains("invalid prefetch plan"));
+    }
+
     #[test]
     fn rejects_malformed_prefetch_json() {
         let error = read_prefetch_plan(b"{not-json".as_slice()).unwrap_err();
@@ -176,5 +228,40 @@ mod tests {
                 .to_string()
                 .contains("prefetch plan must be valid JSON")
         );
+    }
+
+    #[test]
+    fn preserves_integrity_fields_for_http_materialization() {
+        let item: DirectPlanItem = serde_json::from_value(json!({
+            "kind": "http_fetch",
+            "source_uri": "https://assets.example.com/input.bin",
+            "target_artifact_name": "input",
+            "expected_sha256": "a".repeat(64),
+            "expected_size_bytes": 1024
+        }))
+        .expect("direct plan should parse");
+
+        assert!(item.plan.expected_sha256.is_none());
+        let worker_item = worker_plan_item(&item);
+        assert_eq!(worker_item.expected_sha256, Some("a".repeat(64)));
+        assert_eq!(worker_item.expected_size_bytes, Some(1024));
+    }
+
+    #[test]
+    fn keeps_local_file_integrity_checks_outside_worker_materialization() {
+        let item: DirectPlanItem = serde_json::from_value(json!({
+            "kind": "file_copy",
+            "source_uri": "/inputs/input.bin",
+            "target_artifact_name": "input",
+            "expected_sha256": "b".repeat(64),
+            "expected_size_bytes": 2048
+        }))
+        .expect("direct plan should parse");
+
+        let worker_item = worker_plan_item(&item);
+        assert!(worker_item.expected_sha256.is_none());
+        assert!(worker_item.expected_size_bytes.is_none());
+        assert_eq!(item.expected_sha256, Some("b".repeat(64)));
+        assert_eq!(item.expected_size_bytes, Some(2048));
     }
 }

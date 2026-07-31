@@ -1,10 +1,11 @@
-# Earth2Studio FCN/DLWP runtime used by the example external-runtime launcher.
+# Earth2Studio FCN/DLWP/FCN3 runtime used by the example external-runtime launcher.
 # PyTorch wheels are selected by uv's --torch-backend policy in setup.sh.
-# Add further packages here for plugins using FCN3, StormCast, or StormScope.
+# Add further packages here for plugins using StormCast or StormScope.
 
-torch
+torch==2.10.0
 torch-harmonics==0.8.1
-earth2studio[dlwp,fcn,data]==0.13.0
+earth2studio[dlwp,fcn,fcn3,data]==0.13.0
+makani @ https://github.com/NVIDIA/makani/archive/b38fcb2799d7dbc146fa60459f3f9823394a8bf1.tar.gz#sha256=023eadd217a830789c78a63a96466f03683722cc12cf2c29543a4e1a2c3c78df
 warp-lang>=1.13.0
 cartopy
 cfgrib

@@ -201,6 +201,8 @@ class PostprocessOutputWorkflow(PluginWorkflow):
         return {"value": 1}
 
     def postprocess(self, result, ctx):
+        explicit_path = ctx.run_dir / "explicit.json"
+        explicit_path.write_text('{"explicit": true}', encoding="utf-8")
         output_path = ctx.outputs.create(
             "postprocessed",
             filename="postprocessed.json",
@@ -208,7 +210,14 @@ class PostprocessOutputWorkflow(PluginWorkflow):
             primary=True,
         )
         output_path.write_text('{"postprocessed": true}', encoding="utf-8")
-        return PostprocessOutcome(payload={"value": 2})
+        return PostprocessOutcome(payload={
+            "value": 2,
+            "artifacts": [{
+                "name": "explicit",
+                "media_type": "application/json",
+                "storage_path": str(explicit_path),
+            }],
+        })
 
 
 WORKFLOW = PostprocessOutputWorkflow
@@ -219,7 +228,10 @@ WORKFLOW = PostprocessOutputWorkflow
 
     assert proc.returncode == 0, proc.stderr
     result = json.loads(proc.stdout)
-    assert result["execution"]["outputs"][0]["name"] == "postprocessed"
+    assert [artifact["name"] for artifact in result["execution"]["outputs"]] == [
+        "explicit",
+        "postprocessed",
+    ]
     assert result["execution"]["output_path"].endswith("postprocessed.json")
     assert result["payload"] == {"value": 2}
 

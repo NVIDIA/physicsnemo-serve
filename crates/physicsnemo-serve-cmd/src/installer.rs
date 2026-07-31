@@ -22,7 +22,14 @@ use tempfile::Builder;
 const UV_VERSION: &str = "0.11.16";
 const UV_RELEASE_ROOT: &str = "https://releases.astral.sh/github/uv/releases/download/0.11.16";
 const MAX_UV_ARCHIVE_BYTES: u64 = 128 * 1024 * 1024;
-const MAX_UV_CHECKSUM_BYTES: u64 = 4096;
+const UV_LINUX_X86_64_SHA256: &str =
+    "74947fe2c03315cf07e82ab3acc703eddef01aba4d5232a98e4c6825ec116131";
+const UV_LINUX_AARCH64_SHA256: &str =
+    "8c9d0f0e00add7cead46d2c3cf8778dd907a0d136bd1611f8580246bcb15c22a";
+const UV_MACOS_X86_64_SHA256: &str =
+    "6b91ae3dd32c9d86bcb87e94259c2f2cd55edc1b1e0a39f81ee25d6bdf517f2e";
+const UV_MACOS_AARCH64_SHA256: &str =
+    "2b25be1a32945fb4239762afee1fb38a9bc923e7f23c26e847ebd37d7ff388fb";
 
 pub const INSTALLER_USAGE: &str = "\
 physicsnemo-serve-install — create a plugin-specific external runtime
@@ -399,7 +406,7 @@ fn bootstrap_uv() -> Result<PathBuf> {
         .tempdir_in(&tools_root)
         .context("failed to create temporary uv installation directory")?;
     eprintln!("uv was not found; installing pinned uv {UV_VERSION}");
-    let asset = uv_asset_name()?;
+    let (asset, expected_sha256) = uv_asset()?;
     let archive_url = format!("{UV_RELEASE_ROOT}/{asset}");
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(120))
@@ -411,13 +418,7 @@ fn bootstrap_uv() -> Result<PathBuf> {
         .context("failed to initialize the uv installer HTTP client")?;
     let archive = download_capped(&client, &archive_url, MAX_UV_ARCHIVE_BYTES)
         .context("failed to download the uv archive")?;
-    let checksum = download_capped(
-        &client,
-        &format!("{archive_url}.sha256"),
-        MAX_UV_CHECKSUM_BYTES,
-    )
-    .context("failed to download the uv archive checksum")?;
-    verify_download_checksum(&archive, &checksum)?;
+    verify_download_checksum(&archive, expected_sha256)?;
 
     let staged_uv = staging.path().join("uv");
     extract_uv(&archive, &staged_uv)?;
@@ -476,12 +477,24 @@ fn quarantine_invalid_uv_install(install_dir: &Path) -> Result<()> {
     Ok(())
 }
 
-fn uv_asset_name() -> Result<&'static str> {
+fn uv_asset() -> Result<(&'static str, &'static str)> {
     match (std::env::consts::OS, std::env::consts::ARCH) {
-        ("linux", "x86_64") => Ok("uv-x86_64-unknown-linux-gnu.tar.gz"),
-        ("linux", "aarch64") => Ok("uv-aarch64-unknown-linux-gnu.tar.gz"),
-        ("macos", "x86_64") => Ok("uv-x86_64-apple-darwin.tar.gz"),
-        ("macos", "aarch64") => Ok("uv-aarch64-apple-darwin.tar.gz"),
+        ("linux", "x86_64") => Ok((
+            "uv-x86_64-unknown-linux-gnu.tar.gz",
+            UV_LINUX_X86_64_SHA256,
+        )),
+        ("linux", "aarch64") => Ok((
+            "uv-aarch64-unknown-linux-gnu.tar.gz",
+            UV_LINUX_AARCH64_SHA256,
+        )),
+        ("macos", "x86_64") => Ok((
+            "uv-x86_64-apple-darwin.tar.gz",
+            UV_MACOS_X86_64_SHA256,
+        )),
+        ("macos", "aarch64") => Ok((
+            "uv-aarch64-apple-darwin.tar.gz",
+            UV_MACOS_AARCH64_SHA256,
+        )),
         (os, arch) => bail!("automatic uv installation is unsupported on {os}/{arch}; use --uv"),
     }
 }
@@ -504,14 +517,10 @@ fn download_capped(client: &reqwest::blocking::Client, url: &str, limit: u64) ->
     Ok(bytes)
 }
 
-fn verify_download_checksum(archive: &[u8], checksum_file: &[u8]) -> Result<()> {
-    let checksum_file =
-        std::str::from_utf8(checksum_file).context("uv checksum is not valid UTF-8")?;
-    let expected = checksum_file
-        .split_whitespace()
-        .next()
-        .filter(|value| value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit()))
-        .ok_or_else(|| anyhow!("uv checksum file does not contain a SHA-256 digest"))?;
+fn verify_download_checksum(archive: &[u8], expected: &str) -> Result<()> {
+    if expected.len() != 64 || !expected.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        bail!("pinned uv checksum is not a SHA-256 digest");
+    }
     let digest = Sha256::digest(archive);
     let actual = crate::digest::hex(digest.as_ref());
     if actual != expected.to_ascii_lowercase() {
@@ -771,8 +780,7 @@ mod tests {
             .unwrap();
         let archive = archive.into_inner().unwrap().finish().unwrap();
         let digest = crate::digest::hex(Sha256::digest(&archive).as_ref());
-        let checksum = format!("{digest}  uv-test-target.tar.gz\n");
-        verify_download_checksum(&archive, checksum.as_bytes()).unwrap();
+        verify_download_checksum(&archive, &digest).unwrap();
 
         let root = tempdir().unwrap();
         let destination = root.path().join("uv");
@@ -783,7 +791,7 @@ mod tests {
             fs::metadata(destination).unwrap().permissions().mode() & 0o111,
             0
         );
-        assert!(verify_download_checksum(&archive, b"not-a-checksum").is_err());
+        assert!(verify_download_checksum(&archive, "not-a-checksum").is_err());
     }
 
     #[test]

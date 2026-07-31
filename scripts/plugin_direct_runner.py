@@ -31,6 +31,7 @@ from plugin_runtime import (  # noqa: E402
     build_prepare_context,
     build_prior_result,
     build_raw_request,
+    legacy_artifacts_from_outputs,
     load_plugin_manifest,
     load_plugin_module,
     merge_registered_outputs_into_result,
@@ -462,6 +463,10 @@ def _invoke_phase(
         if result_ops:
             raise ValueError("Direct inference does not support postprocess result_ops")
         result = merge_registered_outputs_into_result(result, payload["outputs"])
+        result["artifacts"] = _merge_artifact_lists(
+            result.get("artifacts"),
+            legacy_artifacts_from_outputs(payload["outputs"]),
+        )
         prior_result = payload.get("result")
         if isinstance(prior_result, dict):
             result["artifacts"] = _merge_artifact_lists(

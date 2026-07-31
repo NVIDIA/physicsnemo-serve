@@ -15,6 +15,8 @@ ARG DEBIAN_FRONTEND=noninteractive
 ARG RUSTUP_VERSION=1.28.2
 ARG TARGETARCH
 
+ENV RUSTUP_X86_64_SHA256="20a06e644b0d9bd2fbdbfd52d42540bdde820ea7df86e92e533c073da0cdd43c"
+
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
 RUN apt-get update \
@@ -34,15 +36,11 @@ RUN case "${TARGETARCH}" in \
     && rustup_url="https://static.rust-lang.org/rustup/archive/${RUSTUP_VERSION}/${rustup_target}/rustup-init" \
     && curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error \
         --output /tmp/rustup-init "${rustup_url}" \
-    && curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error \
-        --output /tmp/rustup-init.sha256 "${rustup_url}.sha256" \
-    && expected_sha256="$(awk 'NR == 1 { print $1 }' /tmp/rustup-init.sha256)" \
     && actual_sha256="$(sha256sum /tmp/rustup-init | awk '{ print $1 }')" \
-    && test -n "${expected_sha256}" \
-    && test "${actual_sha256}" = "${expected_sha256}" \
+    && test "${actual_sha256}" = "${RUSTUP_X86_64_SHA256}" \
     && chmod +x /tmp/rustup-init \
     && /tmp/rustup-init -y --profile minimal --default-toolchain 1.94.1 \
-    && rm -f /tmp/rustup-init /tmp/rustup-init.sha256
+    && rm -f /tmp/rustup-init
 
 WORKDIR /src/physicsnemo-serve
 COPY . .
@@ -65,7 +63,8 @@ ARG PHYSICSNEMO_SERVE_SHARED_REQUIREMENTS=packaging/physicsnemo-serve-cmd/extern
 ARG UV_VERSION=0.11.16
 ARG TARGETARCH
 
-ENV UV_PYTHON_INSTALL_DIR="/opt/physicsnemo-serve/uv-python"
+ENV UV_PYTHON_INSTALL_DIR="/opt/physicsnemo-serve/uv-python" \
+    UV_X86_64_SHA256="74947fe2c03315cf07e82ab3acc703eddef01aba4d5232a98e4c6825ec116131"
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
@@ -86,17 +85,13 @@ RUN case "${TARGETARCH}" in \
     && uv_url="https://releases.astral.sh/github/uv/releases/download/${UV_VERSION}/${uv_asset}" \
     && curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error \
         --output "/tmp/${uv_asset}" "${uv_url}" \
-    && curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error \
-        --output "/tmp/${uv_asset}.sha256" "${uv_url}.sha256" \
-    && expected_sha256="$(awk 'NR == 1 { print $1 }' "/tmp/${uv_asset}.sha256")" \
     && actual_sha256="$(sha256sum "/tmp/${uv_asset}" | awk '{ print $1 }')" \
-    && test -n "${expected_sha256}" \
-    && test "${actual_sha256}" = "${expected_sha256}" \
+    && test "${actual_sha256}" = "${UV_X86_64_SHA256}" \
     && tar --extract --gzip --file "/tmp/${uv_asset}" \
         --directory /usr/local/bin --strip-components=1 \
         "${uv_asset%.tar.gz}/uv" \
     && test "$(uv --version | awk '{ print $2 }')" = "${UV_VERSION}" \
-    && rm -f "/tmp/${uv_asset}" "/tmp/${uv_asset}.sha256"
+    && rm -f "/tmp/${uv_asset}"
 
 COPY --from=rust-builder \
     /src/physicsnemo-serve/target/release/physicsnemo-serve-install \

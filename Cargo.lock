@@ -2042,6 +2042,7 @@ dependencies = [
  "tar",
  "tempfile",
  "tokio",
+ "tracing-subscriber",
  "worker-runtime",
  "zstd",
 ]

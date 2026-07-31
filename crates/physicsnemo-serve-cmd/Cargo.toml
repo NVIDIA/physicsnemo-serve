@@ -31,5 +31,6 @@ sha2 = "0.11.0"
 tar = "0.4.46"
 tempfile = "3"
 tokio.workspace = true
+tracing-subscriber.workspace = true
 worker-runtime = { path = "../worker-runtime" }
 zstd = "0.13.3"

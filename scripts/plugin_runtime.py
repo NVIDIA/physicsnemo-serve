@@ -371,8 +371,16 @@ def expand_plugin_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
 def _normalize_ingress_aliases(ingress: dict[str, Any]) -> None:
     content_type = str(ingress.get("content_type") or "").strip()
     content_types = ingress.get("content_types")
-    if content_types is not None and not isinstance(content_types, list):
-        raise ValueError("Plugin manifest ingress.content_types must be an array")
+    if content_types is not None:
+        if not isinstance(content_types, list):
+            raise ValueError("Plugin manifest ingress.content_types must be an array")
+        if not all(
+            isinstance(content_type, str) and content_type.strip()
+            for content_type in content_types
+        ):
+            raise ValueError(
+                "Plugin manifest ingress.content_types entries must be non-empty strings"
+            )
     if not content_types:
         if content_type:
             ingress["content_types"] = [content_type]

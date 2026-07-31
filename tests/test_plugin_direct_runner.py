@@ -590,6 +590,76 @@ WORKFLOW = InvalidTransitionWorkflow
     assert message in json.loads(proc.stdout)["execution"]["error"]
 
 
+def test_direct_runner_rejects_transition_after_results(tmp_path: Path) -> None:
+    plugin_root = _write_plugin(
+        tmp_path,
+        plugin_id="direct-results-transition",
+        profile="postprocess",
+        options={},
+        request_schema={"type": "object"},
+        workflow="""
+from plugin_sdk import PluginWorkflow
+
+
+class ResultsTransitionWorkflow(PluginWorkflow):
+    def execute(self, ctx):
+        return {"ok": True}
+
+    def postprocess(self, result, ctx):
+        return {"postprocessed": True}
+
+
+WORKFLOW = ResultsTransitionWorkflow
+""",
+    )
+    manifest_path = plugin_root / "plugin.yaml"
+    manifest = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+    manifest["pipeline"] = {
+        "stages": [
+            {
+                "id": "execute",
+                "phase": "execute",
+                "handler": "plugin_phase",
+                "queue": "execute.python.test",
+                "next": "results",
+            },
+            {
+                "id": "results",
+                "phase": "results",
+                "handler": "persist_results",
+                "queue": "results",
+                "next": "postprocess",
+            },
+            {
+                "id": "postprocess",
+                "phase": "postprocess",
+                "handler": "plugin_phase",
+                "queue": "postprocess",
+                "next": "final-results",
+            },
+            {
+                "id": "final-results",
+                "phase": "results",
+                "handler": "persist_results",
+                "queue": "results",
+                "next": None,
+            },
+        ]
+    }
+    manifest_path.write_text(
+        yaml.safe_dump(manifest, sort_keys=False), encoding="utf-8"
+    )
+
+    proc = _run_direct(plugin_root, {}, tmp_path / "outputs")
+
+    assert proc.returncode == 1
+    assert "results stage 'results' must be terminal" in proc.stderr
+    assert (
+        "results stage 'results' must be terminal"
+        in json.loads(proc.stdout)["execution"]["error"]
+    )
+
+
 def test_direct_runner_defaults_content_type_and_skips_empty_operation_allowlist(
     tmp_path: Path,
 ) -> None:
@@ -632,11 +702,57 @@ WORKFLOW = IngressDefaultsWorkflow
     assert result["payload"]["operation"] == "custom-operation"
 
 
+@pytest.mark.parametrize("operation", ["", "   "])
+def test_direct_runner_rejects_blank_operation_with_empty_allowlist(
+    tmp_path: Path,
+    operation: str,
+) -> None:
+    plugin_root = _write_plugin(
+        tmp_path,
+        plugin_id="direct-blank-operation",
+        profile="simple",
+        options={},
+        request_schema={"type": "object"},
+        workflow="""
+from plugin_sdk import PluginWorkflow
+
+
+class BlankOperationWorkflow(PluginWorkflow):
+    def execute(self, ctx):
+        return {"operation": ctx["operation"]}
+
+
+WORKFLOW = BlankOperationWorkflow
+""",
+    )
+    manifest_path = plugin_root / "plugin.yaml"
+    manifest = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+    manifest["ingress"]["operation"] = {"default": "run", "allowed": []}
+    manifest_path.write_text(
+        yaml.safe_dump(manifest, sort_keys=False), encoding="utf-8"
+    )
+
+    proc = _run_direct(
+        plugin_root,
+        {"operation": operation},
+        tmp_path / "outputs",
+    )
+
+    assert proc.returncode == 1
+    assert "Unsupported operation" in proc.stderr
+    assert "Unsupported operation" in json.loads(proc.stdout)["execution"]["error"]
+
+
 @pytest.mark.parametrize(
     ("content_types", "expected_returncode", "message"),
     [
         (["application/json"], 0, None),
         ("application/json", 1, "ingress.content_types must be an array"),
+        (
+            ["application/json", 42],
+            1,
+            "ingress.content_types entries must be non-empty strings",
+        ),
     ],
 )
 def test_direct_runner_validates_plural_content_types(
@@ -677,6 +793,61 @@ WORKFLOW = ContentTypesWorkflow
     if message is not None:
         assert message in proc.stderr
         assert message in json.loads(proc.stdout)["execution"]["error"]
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("operations", ["run"], "ingress.operations must be a string or object"),
+        (
+            "operation",
+            {"default": "run", "allowed": "run"},
+            "ingress.operations.allowed must be an array of non-empty strings",
+        ),
+        (
+            "operations",
+            {"default": "run", "allowed": ["other"]},
+            "ingress.operations.default must be included in ingress.operations.allowed",
+        ),
+    ],
+)
+def test_direct_runner_rejects_malformed_operation_declarations(
+    tmp_path: Path,
+    field: str,
+    value: object,
+    message: str,
+) -> None:
+    plugin_root = _write_plugin(
+        tmp_path,
+        plugin_id="direct-invalid-operations",
+        profile="simple",
+        options={},
+        request_schema={"type": "object"},
+        workflow="""
+from plugin_sdk import PluginWorkflow
+
+
+class InvalidOperationsWorkflow(PluginWorkflow):
+    def execute(self, ctx):
+        return {"ok": True}
+
+
+WORKFLOW = InvalidOperationsWorkflow
+""",
+    )
+    manifest_path = plugin_root / "plugin.yaml"
+    manifest = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+    manifest["ingress"].pop("operation", None)
+    manifest["ingress"][field] = value
+    manifest_path.write_text(
+        yaml.safe_dump(manifest, sort_keys=False), encoding="utf-8"
+    )
+
+    proc = _run_direct(plugin_root, {}, tmp_path / "outputs")
+
+    assert proc.returncode == 1
+    assert message in proc.stderr
+    assert message in json.loads(proc.stdout)["execution"]["error"]
 
 
 def test_direct_runner_executes_batch_profile_as_one_item(tmp_path: Path) -> None:

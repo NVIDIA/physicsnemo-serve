@@ -150,6 +150,12 @@ weights and downloaded inputs use persistent caches; they are not part of the
 executable. GPU plugins still require a compatible NVIDIA GPU, kernel driver,
 and writable cache/output storage.
 
+Verified HTTPS prefetch is fail-closed. For the bundled CFD examples, set the
+exact source and signed-redirect hosts documented in
+`plugins/physicsnemo-cfd-surface-benchmark/README.md`; the CLI Docker image
+already provides those allowlists for its bundled examples. Customer plugins
+must provide their own `E2S_PREFETCH_ALLOWED_HTTPS_HOSTS` deployment setting.
+
 `--device` accepts CUDA device ordinals, UUIDs, and MIG identifiers and is
 forwarded as `CUDA_VISIBLE_DEVICES`. The CLI executes plugin Python code with
 the invoking user's permissions, so plugin directories must be treated as

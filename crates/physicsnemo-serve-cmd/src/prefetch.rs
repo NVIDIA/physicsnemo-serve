@@ -117,10 +117,8 @@ struct DirectPlanItem {
 
 fn worker_plan_item(item: &DirectPlanItem) -> PrefetchPlanItem {
     let mut plan = item.plan.clone();
-    if plan.effective_kind().as_str() == "http_fetch" {
-        plan.expected_sha256.clone_from(&item.expected_sha256);
-        plan.expected_size_bytes = item.expected_size_bytes;
-    }
+    plan.expected_sha256.clone_from(&item.expected_sha256);
+    plan.expected_size_bytes = item.expected_size_bytes;
     plan
 }
 
@@ -186,11 +184,15 @@ mod tests {
         .await
         .expect_err("checksum mismatch should fail");
 
-        assert!(error.to_string().contains("SHA-256 mismatch"));
+        assert!(
+            error
+                .to_string()
+                .contains("required prefetch operations failed: 1")
+        );
     }
 
     #[tokio::test]
-    async fn rejects_size_mismatch_without_deleting_shared_cache() {
+    async fn rejects_size_mismatch_before_populating_cache() {
         let temp = tempdir().expect("temp directory should be created");
         let source = temp.path().join("source.bin");
         fs::write(&source, b"payload").expect("source should be written");
@@ -210,13 +212,20 @@ mod tests {
         .await
         .expect_err("size mismatch should fail");
 
-        assert!(error.to_string().contains("size mismatch"));
         assert!(
-            fs::read_dir(cache.join("prefetch"))
-                .expect("prefetch cache should exist")
-                .next()
-                .is_some(),
-            "integrity validation must not delete a shared cache entry"
+            error
+                .to_string()
+                .contains("required prefetch operations failed: 1")
+        );
+        let cache_files = fs::read_dir(cache.join("prefetch"))
+            .expect("prefetch cache should exist")
+            .map(|entry| entry.expect("cache entry should be readable").path())
+            .collect::<Vec<_>>();
+        assert!(
+            cache_files.iter().all(|path| path
+                .file_name()
+                .is_some_and(|name| name.to_string_lossy().ends_with(".lock"))),
+            "a size mismatch must not publish cached data"
         );
     }
 
@@ -336,7 +345,7 @@ mod tests {
     }
 
     #[test]
-    fn keeps_local_file_integrity_checks_outside_worker_materialization() {
+    fn preserves_integrity_fields_for_local_materialization() {
         let item: DirectPlanItem = serde_json::from_value(json!({
             "kind": "file_copy",
             "source_uri": "/inputs/input.bin",
@@ -347,9 +356,26 @@ mod tests {
         .expect("direct plan should parse");
 
         let worker_item = worker_plan_item(&item);
-        assert!(worker_item.expected_sha256.is_none());
-        assert!(worker_item.expected_size_bytes.is_none());
+        assert_eq!(worker_item.expected_sha256, Some("b".repeat(64)));
+        assert_eq!(worker_item.expected_size_bytes, Some(2048));
         assert_eq!(item.expected_sha256, Some("b".repeat(64)));
         assert_eq!(item.expected_size_bytes, Some(2048));
+    }
+
+    #[test]
+    fn preserves_integrity_fields_for_object_store_materialization() {
+        let item: DirectPlanItem = serde_json::from_value(json!({
+            "kind": "object_store_fetch",
+            "source_uri": "s3://bucket/input.bin",
+            "target_artifact_name": "input",
+            "expected_sha256": "c".repeat(64),
+            "expected_size_bytes": 4096
+        }))
+        .expect("direct plan should parse");
+
+        let worker_item = worker_plan_item(&item);
+        assert_eq!(worker_item.expected_sha256, Some("c".repeat(64)));
+        assert_eq!(worker_item.expected_size_bytes, Some(4096));
+        assert!(worker_item.effective_cache_key().starts_with("sha256:"));
     }
 }

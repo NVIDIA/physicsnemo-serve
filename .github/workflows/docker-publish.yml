@@ -15,7 +15,8 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  RUNTIME_BASE_TAG: pytorch-26.01-py3-th0.8.0
+  RUNTIME_BASE_TAG: pytorch-26.01-py3-th0.8.1
+  PYTORCH_BASE_IMAGE: nvcr.io/nvidia/pytorch:26.01-py3
 
 jobs:
   docker-publish:
@@ -41,6 +42,21 @@ jobs:
 
       - name: Set up Docker Buildx
         run: docker buildx create --use --name builder
+
+      - name: Ensure runtime base image exists
+        run: |
+          BASE_IMAGE="${{ vars.NGC_REGISTRY }}/${{ secrets.NGC_ORG }}/${{ secrets.NGC_RUNTIME_BASE_IMAGE }}:${{ env.RUNTIME_BASE_TAG }}"
+          if docker buildx imagetools inspect "${BASE_IMAGE}" >/dev/null 2>&1; then
+            echo "Using existing runtime base image: ${BASE_IMAGE}"
+          else
+            echo "Runtime base image is missing; building ${BASE_IMAGE}"
+            docker buildx build \
+              -f Dockerfile.Earth2Studio.runtime-base \
+              --build-arg PYTORCH_BASE_IMAGE=${{ env.PYTORCH_BASE_IMAGE }} \
+              -t "${BASE_IMAGE}" \
+              --push \
+              .
+          fi
 
       - name: Build and push main image
         run: |

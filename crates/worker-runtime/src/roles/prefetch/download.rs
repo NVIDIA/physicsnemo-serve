@@ -58,6 +58,25 @@ fn build_verified_http_client(config: &PrefetchConfig) -> Result<Client, String>
         .map_err(|e| e.to_string())
 }
 
+fn build_verified_object_store_http_client(config: &PrefetchConfig) -> Result<Client, String> {
+    Client::builder()
+        .http2_adaptive_window(true)
+        .pool_max_idle_per_host(config.http_pool_max_idle_per_host)
+        .pool_idle_timeout(config.http_pool_timeout())
+        .timeout(config.http_timeout())
+        .redirect(redirect::Policy::custom(move |attempt| {
+            if attempt.previous().len() >= 10 {
+                return attempt.error("prefetch: too many verified object-store redirects");
+            }
+            match validate_verified_object_store_url(attempt.url()) {
+                Ok(()) => attempt.follow(),
+                Err(error) => attempt.error(error.to_string()),
+            }
+        }))
+        .build()
+        .map_err(|e| e.to_string())
+}
+
 #[derive(Debug, Clone, Default)]
 #[must_use]
 pub struct DownloadStats {
@@ -192,6 +211,7 @@ pub struct HttpDownloader {
     config: PrefetchConfig,
     http_client: Result<Client, String>,
     verified_http_client: Result<Client, String>,
+    verified_object_store_http_client: Result<Client, String>,
 }
 
 impl Default for HttpDownloader {
@@ -208,10 +228,12 @@ impl HttpDownloader {
     pub fn with_config(config: PrefetchConfig) -> Self {
         let http_client = build_http_client(&config);
         let verified_http_client = build_verified_http_client(&config);
+        let verified_object_store_http_client = build_verified_object_store_http_client(&config);
         Self {
             config,
             http_client,
             verified_http_client,
+            verified_object_store_http_client,
         }
     }
 
@@ -246,10 +268,12 @@ impl HttpDownloader {
                 let semaphore = semaphore.clone();
                 let request_budget = request_budget.clone();
                 let config = self.config.clone();
-                let client = if request.is_verified() {
-                    self.verified_http_client.clone()
-                } else {
-                    self.http_client.clone()
+                let client = match (request.is_verified(), request.kind) {
+                    (true, PrefetchOpKind::ObjectStoreFetch) => {
+                        self.verified_object_store_http_client.clone()
+                    }
+                    (true, _) => self.verified_http_client.clone(),
+                    (false, _) => self.http_client.clone(),
                 };
                 tokio::spawn(async move {
                     let _permit = semaphore
@@ -400,6 +424,7 @@ fn build_requests(
                     existing.source_uri != item.source_uri
                         || existing.byte_range != item.byte_range
                         || existing.headers != item.headers
+                        || existing.expected_size_bytes != item.expected_size_bytes
                 };
                 if conflicts {
                     return Err(anyhow!(
@@ -466,52 +491,47 @@ fn validate_plan_item(item: &PrefetchPlanItem, config: &PrefetchConfig) -> Resul
     let verification_requested =
         item.expected_sha256.is_some() || item.expected_size_bytes.is_some();
     if verification_requested {
-        let expected_sha256 = item.expected_sha256.as_deref().ok_or_else(|| {
-            anyhow!(
-                "prefetch: expected_sha256 is required with expected_size_bytes for '{}'",
-                item.target_artifact_name
-            )
-        })?;
-        validate_sha256(expected_sha256)?;
-
-        let expected_size_bytes = item.expected_size_bytes.ok_or_else(|| {
-            anyhow!(
-                "prefetch: expected_size_bytes is required with expected_sha256 for '{}'",
-                item.target_artifact_name
-            )
-        })?;
-        if expected_size_bytes == 0 {
+        if item.effective_kind() != PrefetchOpKind::FileCopy
+            && (item.expected_sha256.is_none() || item.expected_size_bytes.is_none())
+        {
             return Err(anyhow!(
-                "prefetch: expected_size_bytes must be greater than zero for '{}'",
+                "prefetch: remote integrity verification requires both expected_sha256 and expected_size_bytes for '{}'",
                 item.target_artifact_name
             ));
         }
-        if expected_size_bytes > config.max_object_bytes {
+        if let Some(expected_sha256) = item.expected_sha256.as_deref() {
+            validate_sha256(expected_sha256)?;
+        }
+        if let Some(expected_size_bytes) = item.expected_size_bytes {
+            if expected_size_bytes == 0 {
+                return Err(anyhow!(
+                    "prefetch: expected_size_bytes must be greater than zero for '{}'",
+                    item.target_artifact_name
+                ));
+            }
+            if expected_size_bytes > config.max_object_bytes {
+                return Err(anyhow!(
+                    "prefetch: expected object size {} exceeds limit of {} bytes for '{}'",
+                    expected_size_bytes,
+                    config.max_object_bytes,
+                    item.target_artifact_name
+                ));
+            }
+        }
+        if item.effective_kind() != PrefetchOpKind::FileCopy && !item.headers.is_empty() {
             return Err(anyhow!(
-                "prefetch: expected object size {} exceeds limit of {} bytes for '{}'",
-                expected_size_bytes,
-                config.max_object_bytes,
-                item.target_artifact_name
+                "prefetch: custom headers are not allowed for verified remote downloads"
             ));
         }
-        if item.effective_kind() != PrefetchOpKind::HttpFetch {
-            return Err(anyhow!(
-                "prefetch: integrity verification requires an HTTPS http_fetch source for '{}'",
-                item.target_artifact_name
-            ));
+        if item.effective_kind() == PrefetchOpKind::HttpFetch {
+            let url = Url::parse(&item.source_uri).with_context(|| {
+                format!(
+                    "prefetch: invalid verified source_uri '{}'",
+                    item.source_uri
+                )
+            })?;
+            validate_verified_source_url(&url, &config.allowed_https_hosts)?;
         }
-        if !item.headers.is_empty() {
-            return Err(anyhow!(
-                "prefetch: custom headers are not allowed for verified HTTPS downloads"
-            ));
-        }
-        let url = Url::parse(&item.source_uri).with_context(|| {
-            format!(
-                "prefetch: invalid verified source_uri '{}'",
-                item.source_uri
-            )
-        })?;
-        validate_verified_source_url(&url, &config.allowed_https_hosts)?;
     }
 
     match item.effective_kind() {
@@ -519,7 +539,16 @@ fn validate_plan_item(item: &PrefetchPlanItem, config: &PrefetchConfig) -> Resul
             let _ = source_uri_to_url(&item.source_uri)?;
         }
         PrefetchOpKind::ObjectStoreFetch => {
-            let _ = object_store_source_uri_to_url(&item.source_uri)?;
+            let source_url = object_store_source_uri_to_url(&item.source_uri)?;
+            if item.expected_sha256.is_some() || item.expected_size_bytes.is_some() {
+                let url = Url::parse(&source_url).with_context(|| {
+                    format!(
+                        "prefetch: invalid verified object-store source_uri '{}'",
+                        item.source_uri
+                    )
+                })?;
+                validate_verified_object_store_url(&url)?;
+            }
         }
         PrefetchOpKind::FileCopy => {
             let _ = source_uri_to_local_path(&item.source_uri)?;
@@ -551,6 +580,35 @@ fn validate_verified_redirect_url(
 
 fn validate_verified_source_url(url: &Url, allowed_hosts: &BTreeSet<String>) -> Result<()> {
     validate_verified_url(url, allowed_hosts, false)
+}
+
+fn validate_verified_object_store_url(url: &Url) -> Result<()> {
+    let host = url
+        .host_str()
+        .ok_or_else(|| anyhow!("prefetch: verified object-store URL must contain a DNS host"))?
+        .to_ascii_lowercase();
+    if !is_supported_object_store_host(&host) {
+        return Err(anyhow!(
+            "prefetch: object-store redirect host '{}' is not supported",
+            host
+        ));
+    }
+    validate_verified_url(url, &BTreeSet::from([host]), false)
+}
+
+fn is_supported_object_store_host(host: &str) -> bool {
+    if host == "storage.googleapis.com" || host.ends_with(".blob.core.windows.net") {
+        return true;
+    }
+
+    let aws_prefix = host
+        .strip_suffix(".amazonaws.com.cn")
+        .or_else(|| host.strip_suffix(".amazonaws.com"));
+    aws_prefix.is_some_and(|prefix| {
+        prefix
+            .split('.')
+            .any(|label| label == "s3" || label.starts_with("s3-"))
+    })
 }
 
 fn validate_verified_url(
@@ -825,7 +883,9 @@ async fn cached_request_success(
         })?;
     if !file_metadata.file_type().is_file()
         || file_metadata.len() > config.max_object_bytes
-        || Some(file_metadata.len()) != request.expected_size_bytes
+        || request
+            .expected_size_bytes
+            .is_some_and(|expected| file_metadata.len() != expected)
     {
         debug!(path = ?request.local_path, "discarding invalid verified prefetch cache entry");
         invalidate_verified_cache(request).await?;
@@ -833,8 +893,13 @@ async fn cached_request_success(
     }
 
     let (size_bytes, sha256) = hash_file(&request.local_path, config.max_object_bytes).await?;
-    if Some(size_bytes) != request.expected_size_bytes
-        || Some(sha256.as_str()) != request.expected_sha256.as_deref()
+    if request
+        .expected_size_bytes
+        .is_some_and(|expected| size_bytes != expected)
+        || request
+            .expected_sha256
+            .as_deref()
+            .is_some_and(|expected| sha256 != expected)
     {
         debug!(path = ?request.local_path, "discarding verified prefetch cache entry with invalid digest");
         invalidate_verified_cache(request).await?;
@@ -951,7 +1016,7 @@ async fn materialize_request_by_kind(
         PrefetchOpKind::HttpFetch | PrefetchOpKind::ObjectStoreFetch => {
             download_request(request, config, client?, request_budget).await
         }
-        PrefetchOpKind::FileCopy => copy_local_request(request).await,
+        PrefetchOpKind::FileCopy => copy_local_request(request, config, request_budget).await,
     }
 }
 
@@ -1166,8 +1231,31 @@ async fn publish_cache_file(
     Ok(())
 }
 
-async fn copy_local_request(request: &DownloadRequest) -> Result<(u64, Option<String>)> {
+async fn copy_local_request(
+    request: &DownloadRequest,
+    config: &PrefetchConfig,
+    request_budget: &RequestBudget,
+) -> Result<(u64, Option<String>)> {
     let source_path = source_uri_to_local_path(&request.source_uri)?;
+    if request.is_verified() {
+        let metadata = fs::metadata(&source_path).await?;
+        if metadata.len() > config.max_object_bytes {
+            return Err(anyhow!(
+                "prefetch: local object size {} exceeds object limit of {} bytes",
+                metadata.len(),
+                config.max_object_bytes
+            ));
+        }
+        if let Some(expected_size_bytes) = request.expected_size_bytes
+            && metadata.len() != expected_size_bytes
+        {
+            return Err(anyhow!(
+                "prefetch: local object size {} does not match expected size {}",
+                metadata.len(),
+                expected_size_bytes
+            ));
+        }
+    }
     let temporary_path = unique_temporary_path(&request.local_path, "part");
     let mut source = fs::File::open(&source_path).await?;
     let mut destination = fs::OpenOptions::new()
@@ -1179,6 +1267,7 @@ async fn copy_local_request(request: &DownloadRequest) -> Result<(u64, Option<St
     let result = async {
         let mut buffer = vec![0u8; 64 * 1024];
         let mut size_bytes = 0u64;
+        let mut hasher = Sha256::new();
         loop {
             let read = source.read(&mut buffer).await?;
             if read == 0 {
@@ -1187,13 +1276,35 @@ async fn copy_local_request(request: &DownloadRequest) -> Result<(u64, Option<St
             size_bytes = size_bytes
                 .checked_add(read as u64)
                 .ok_or_else(|| anyhow!("prefetch: local object size overflow"))?;
+            if request.is_verified() {
+                if size_bytes > config.max_object_bytes {
+                    return Err(anyhow!(
+                        "prefetch: local object exceeds object limit of {} bytes",
+                        config.max_object_bytes
+                    ));
+                }
+                if let Some(expected_size_bytes) = request.expected_size_bytes
+                    && size_bytes > expected_size_bytes
+                {
+                    return Err(anyhow!(
+                        "prefetch: local object exceeds expected size of {} bytes",
+                        expected_size_bytes
+                    ));
+                }
+                request_budget.charge(read as u64)?;
+                hasher.update(&buffer[..read]);
+            }
             destination.write_all(&buffer[..read]).await?;
         }
         destination.flush().await?;
         destination.sync_all().await?;
         drop(destination);
-        publish_cache_file(request, &temporary_path, size_bytes, None).await?;
-        Ok((size_bytes, None))
+        let sha256 = request
+            .is_verified()
+            .then(|| format!("{:x}", hasher.finalize()));
+        verify_download(request, size_bytes, sha256.as_deref())?;
+        publish_cache_file(request, &temporary_path, size_bytes, sha256.as_deref()).await?;
+        Ok((size_bytes, sha256))
     }
     .await;
     if result.is_err() {
@@ -2086,6 +2197,33 @@ mod tests {
     }
 
     #[test]
+    fn verified_object_store_policy_allows_provider_regional_hosts_only() {
+        for accepted in [
+            "https://bucket.s3.amazonaws.com/object",
+            "https://bucket.s3.us-west-2.amazonaws.com/object",
+            "https://bucket.s3-us-gov-west-1.amazonaws.com/object",
+            "https://bucket.s3.cn-north-1.amazonaws.com.cn/object",
+            "https://storage.googleapis.com/bucket/object",
+            "https://account.blob.core.windows.net/container/object",
+        ] {
+            validate_verified_object_store_url(&Url::parse(accepted).unwrap()).unwrap();
+        }
+
+        for rejected in [
+            "http://bucket.s3.us-west-2.amazonaws.com/object",
+            "https://bucket.s3.evil.example/object",
+            "https://ec2.us-west-2.amazonaws.com/object",
+            "https://user@bucket.s3.amazonaws.com/object",
+            "https://bucket.s3.amazonaws.com/object?X-Amz-Signature=secret",
+        ] {
+            assert!(
+                validate_verified_object_store_url(&Url::parse(rejected).unwrap()).is_err(),
+                "object-store URL should be rejected: {rejected}"
+            );
+        }
+    }
+
+    #[test]
     fn signed_queries_are_allowed_only_on_explicit_redirect_hosts() {
         let allowed = BTreeSet::from([
             "assets.example.com".to_string(),
@@ -2148,15 +2286,108 @@ mod tests {
     }
 
     #[test]
-    fn verified_plan_rejects_partial_integrity_fields_and_custom_headers() {
+    fn verified_remote_plan_requires_complete_integrity_fields_and_rejects_custom_headers() {
         let config = verified_config("assets.example.com");
         let mut item = verified_item("https://assets.example.com/mesh.vtp", b"mesh");
         item.expected_size_bytes = None;
         assert!(validate_plan_item(&item, &config).is_err());
 
+        item.expected_sha256 = None;
         item.expected_size_bytes = Some(4);
+        assert!(validate_plan_item(&item, &config).is_err());
+
+        item.expected_sha256 = Some(format!("{:x}", Sha256::digest(b"mesh")));
         item.headers.insert("authorization".into(), "secret".into());
         assert!(validate_plan_item(&item, &config).is_err());
+
+        item.kind = Some(PrefetchOpKind::ObjectStoreFetch);
+        item.source_uri = "s3://bucket/mesh.vtp".to_string();
+        assert!(validate_plan_item(&item, &config).is_err());
+    }
+
+    #[test]
+    fn verified_local_plan_accepts_independent_integrity_fields() {
+        let config = PrefetchConfig::default();
+        let mut item = verified_item("/inputs/mesh.vtp", b"mesh");
+        item.kind = Some(PrefetchOpKind::FileCopy);
+        item.expected_size_bytes = None;
+        assert!(validate_plan_item(&item, &config).is_ok());
+
+        item.expected_sha256 = None;
+        item.expected_size_bytes = Some(4);
+        assert!(validate_plan_item(&item, &config).is_ok());
+    }
+
+    #[tokio::test]
+    async fn verified_local_copy_uses_content_addressed_cache_and_digest() {
+        let dir = tempdir().unwrap();
+        let source_path = dir.path().join("verified-local.bin");
+        let contents = b"verified-local-copy";
+        fs::write(&source_path, contents).await.unwrap();
+        let digest = format!("{:x}", Sha256::digest(contents));
+        let item = PrefetchPlanItem {
+            kind: Some(PrefetchOpKind::FileCopy),
+            source_uri: source_path.display().to_string(),
+            target_artifact_name: "verified-local".to_string(),
+            required: true,
+            byte_range: None,
+            cache_key: None,
+            media_type: Some("application/octet-stream".to_string()),
+            expected_sha256: Some(digest.clone()),
+            expected_size_bytes: Some(contents.len() as u64),
+            headers: BTreeMap::new(),
+        };
+        let config = PrefetchConfig {
+            max_object_bytes: 1024,
+            max_request_bytes: 1024,
+            ..PrefetchConfig::default()
+        };
+
+        let result = HttpDownloader::with_config(config)
+            .materialize_plan(std::slice::from_ref(&item), dir.path(), "verified-local")
+            .await
+            .unwrap();
+
+        assert_eq!(result.stats.downloaded, 1);
+        assert_eq!(result.artifacts[0].sha256.as_deref(), Some(digest.as_str()));
+        assert_eq!(
+            Path::new(&result.artifacts[0].storage_path),
+            dir.path().join("prefetch/sha256").join(&digest)
+        );
+        assert_eq!(
+            fs::read(&result.artifacts[0].storage_path).await.unwrap(),
+            contents
+        );
+    }
+
+    #[tokio::test]
+    async fn verified_local_copy_rejects_size_before_populating_cache() {
+        let dir = tempdir().unwrap();
+        let source_path = dir.path().join("oversized-local.bin");
+        let contents = b"too-large";
+        fs::write(&source_path, contents).await.unwrap();
+        let digest = format!("{:x}", Sha256::digest(contents));
+        let item = PrefetchPlanItem {
+            kind: Some(PrefetchOpKind::FileCopy),
+            source_uri: source_path.display().to_string(),
+            target_artifact_name: "oversized-local".to_string(),
+            required: true,
+            byte_range: None,
+            cache_key: None,
+            media_type: None,
+            expected_sha256: Some(digest.clone()),
+            expected_size_bytes: Some(contents.len() as u64 - 1),
+            headers: BTreeMap::new(),
+        };
+
+        let result = HttpDownloader::with_config(PrefetchConfig::default())
+            .materialize_plan(&[item], dir.path(), "oversized-local")
+            .await
+            .unwrap();
+
+        assert_eq!(result.stats.required_errors, 1);
+        assert!(result.artifacts.is_empty());
+        assert!(!dir.path().join("prefetch/sha256").join(digest).exists());
     }
 
     #[test]

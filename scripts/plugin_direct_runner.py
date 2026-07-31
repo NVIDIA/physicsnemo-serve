@@ -307,7 +307,12 @@ def _validate_pipeline(stages: list[Any]) -> None:
             raise ValueError(
                 f"Direct inference does not support pipeline phase '{phase}'"
             )
-        if phase != "results":
+        if phase == "results":
+            if raw_stage.get("next") is not None:
+                raise ValueError(
+                    f"Plugin pipeline results stage '{stage_id}' must be terminal"
+                )
+        else:
             next_stage_id = raw_stage.get("next")
             if not isinstance(next_stage_id, str) or not next_stage_id.strip():
                 raise ValueError(
@@ -341,6 +346,11 @@ def _normalize_request(
     content_types = ingress.get("content_types")
     if content_types is not None and not isinstance(content_types, list):
         raise ValueError("ingress.content_types must be an array")
+    if isinstance(content_types, list) and not all(
+        isinstance(content_type, str) and content_type.strip()
+        for content_type in content_types
+    ):
+        raise ValueError("ingress.content_types entries must be non-empty strings")
     if not content_types:
         content_type = str(ingress.get("content_type") or "application/json").strip()
         content_types = [content_type]
@@ -349,23 +359,42 @@ def _normalize_request(
             "Direct inference currently supports only application/json ingress"
         )
 
-    operations = ingress.get("operations")
-    if not isinstance(operations, (dict, str)):
+    if "operations" in ingress:
+        operations = ingress["operations"]
+        operations_field = "ingress.operations"
+    else:
         operations = ingress.get("operation", {})
+        operations_field = "ingress.operation"
+    if not isinstance(operations, (dict, str)):
+        raise ValueError(f"{operations_field} must be a string or object")
     if isinstance(operations, str):
+        if not operations.strip():
+            raise ValueError(f"{operations_field} must be non-empty")
         default_operation = operations
         allowed_operations = [operations]
-    elif isinstance(operations, dict):
-        default_operation = operations.get("default", "run")
-        allowed = operations.get("allowed", [])
-        allowed_operations = allowed if isinstance(allowed, list) else []
     else:
-        default_operation = "run"
-        allowed_operations = []
+        default_operation = operations.get("default", "run")
+        if not isinstance(default_operation, str) or not default_operation.strip():
+            raise ValueError(f"{operations_field}.default must be a non-empty string")
+        allowed = operations.get("allowed", [])
+        if not isinstance(allowed, list) or not all(
+            isinstance(value, str) and value.strip() for value in allowed
+        ):
+            raise ValueError(
+                f"{operations_field}.allowed must be an array of non-empty strings"
+            )
+        allowed_operations = allowed
+        if allowed_operations and default_operation not in allowed_operations:
+            raise ValueError(
+                f"{operations_field}.default must be included in "
+                f"{operations_field}.allowed"
+            )
 
     operation = request.get("operation", default_operation)
-    if not isinstance(operation, str) or (
-        allowed_operations and operation not in allowed_operations
+    if (
+        not isinstance(operation, str)
+        or not operation.strip()
+        or (allowed_operations and operation not in allowed_operations)
     ):
         raise ValueError(
             f"Unsupported operation '{operation}'; allowed operations: "

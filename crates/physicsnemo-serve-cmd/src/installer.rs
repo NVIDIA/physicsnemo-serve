@@ -25,11 +25,11 @@ const MAX_UV_ARCHIVE_BYTES: u64 = 128 * 1024 * 1024;
 const UV_LINUX_X86_64_SHA256: &str =
     "74947fe2c03315cf07e82ab3acc703eddef01aba4d5232a98e4c6825ec116131";
 const UV_LINUX_AARCH64_SHA256: &str =
-    "8c9d0f0e00add7cead46d2c3cf8778dd907a0d136bd1611f8580246bcb15c22a";
+    "8c9d0f0ee98166ae6ab198747519ba6f25db29d185bd2ae5960ecebc91a5c22a";
 const UV_MACOS_X86_64_SHA256: &str =
-    "6b91ae3dd32c9d86bcb87e94259c2f2cd55edc1b1e0a39f81ee25d6bdf517f2e";
+    "6b91ae3de155f51bd1f5b74814821c79f016a176561f252cd9ddfb976939af2e";
 const UV_MACOS_AARCH64_SHA256: &str =
-    "2b25be1a32945fb4239762afee1fb38a9bc923e7f23c26e847ebd37d7ff388fb";
+    "2b25be1af546be330b340b0a76b99f989daa6d92678fdffb87438e661e9d88fb";
 
 pub const INSTALLER_USAGE: &str = "\
 physicsnemo-serve-install — create a plugin-specific external runtime

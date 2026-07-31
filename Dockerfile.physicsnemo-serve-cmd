@@ -142,6 +142,9 @@ ENV PHYSICSNEMO_SERVE_PLUGIN_ROOT="/opt/physicsnemo-serve/plugins/${PHYSICSNEMO_
     PHYSICSNEMO_SERVE_E2S_RUNTIME_DIR="/opt/physicsnemo-serve/runtimes/${PHYSICSNEMO_SERVE_RUNTIME_NAME}" \
     PHYSICSNEMO_SERVE_CFD_RUNTIME_DIR="/opt/physicsnemo-serve/runtimes/${PHYSICSNEMO_SERVE_RUNTIME_NAME}" \
     PHYSICSNEMO_SERVE_E2S_ZARR_BACKEND="python" \
+    E2S_PREFETCH_ALLOWED_HTTPS_HOSTS="huggingface.co,us.aws.cdn.hf.co,cas-bridge.xethub.hf.co,raw.githubusercontent.com" \
+    E2S_PREFETCH_ALLOWED_SIGNED_REDIRECT_HOSTS="us.aws.cdn.hf.co,cas-bridge.xethub.hf.co" \
+    E2S_DOWNLOAD_TIMEOUT_SECS="1800" \
     UV_PYTHON_INSTALL_DIR="/opt/physicsnemo-serve/uv-python" \
     PATH="/usr/local/bin:${PATH}"
 

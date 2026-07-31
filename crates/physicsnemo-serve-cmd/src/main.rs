@@ -103,6 +103,11 @@ fn package_runtime(args: PackageArgs) -> Result<()> {
 }
 
 async fn run_prefetch(args: PrefetchArgs) -> Result<()> {
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(tracing_subscriber::filter::LevelFilter::ERROR)
+        .with_ansi(false)
+        .with_writer(io::stderr)
+        .try_init();
     let plan: Value = read_prefetch_plan(io::stdin().lock())?;
     let result = materialize_direct_plan(plan, &args.cache_dir, &args.run_id).await?;
     serde_json::to_writer(io::stdout().lock(), &result)?;

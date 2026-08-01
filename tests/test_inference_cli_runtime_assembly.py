@@ -149,6 +149,91 @@ def test_assemble_runtime_does_not_publish_partial_output(
     assert not list(tmp_path.glob(".physicsnemo-runtime-*"))
 
 
+def test_assemble_runtime_rejects_output_inside_python_prefix(tmp_path: Path) -> None:
+    module = _load_assembler()
+    python_prefix = tmp_path / "python-prefix"
+    python = python_prefix / "bin" / "python"
+    python.parent.mkdir(parents=True)
+    python.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    python.chmod(0o755)
+    (python_prefix / "BUILD").write_text("standalone\n", encoding="utf-8")
+    output = python_prefix / "nested" / "runtime"
+
+    with pytest.raises(ValueError, match="must not be inside the Python prefix"):
+        module.assemble_runtime(
+            repo_root=REPO_ROOT,
+            python_prefix=python_prefix,
+            output=output,
+            requirements=None,
+            wheelhouse=None,
+        )
+
+    assert not (python_prefix / "nested").exists()
+
+
+def test_assemble_runtime_rejects_output_inside_symlinked_python_prefix(
+    tmp_path: Path,
+) -> None:
+    module = _load_assembler()
+    python_prefix = tmp_path / "python-prefix"
+    python = python_prefix / "bin" / "python"
+    python.parent.mkdir(parents=True)
+    python.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    python.chmod(0o755)
+    (python_prefix / "BUILD").write_text("standalone\n", encoding="utf-8")
+    prefix_alias = tmp_path / "python-prefix-alias"
+    prefix_alias.symlink_to(python_prefix, target_is_directory=True)
+    output = prefix_alias / "nested" / ".." / "runtime"
+
+    with pytest.raises(ValueError, match="must not be inside the Python prefix"):
+        module.assemble_runtime(
+            repo_root=REPO_ROOT,
+            python_prefix=python_prefix,
+            output=output,
+            requirements=None,
+            wheelhouse=None,
+        )
+
+    assert not (python_prefix / "runtime").exists()
+
+
+def test_assemble_runtime_verification_ignores_python_environment_overrides(
+    monkeypatch, tmp_path: Path
+) -> None:
+    module = _load_assembler()
+    python_prefix = tmp_path / "python-prefix"
+    python = python_prefix / "bin" / "python"
+    python.parent.mkdir(parents=True)
+    python.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    python.chmod(0o755)
+    (python_prefix / "BUILD").write_text("standalone\n", encoding="utf-8")
+    calls: list[tuple[list[str], dict[str, str]]] = []
+
+    def capture_run(command, *, env, **_kwargs):
+        calls.append((command, env))
+        return subprocess.CompletedProcess(
+            command, 0, stdout="Python 3.12.0\n", stderr=""
+        )
+
+    monkeypatch.setenv("PYTHONPATH", str(tmp_path / "host-modules"))
+    monkeypatch.setenv("PYTHONHOME", str(tmp_path / "host-python"))
+    monkeypatch.setattr(module.subprocess, "run", capture_run)
+
+    module.assemble_runtime(
+        repo_root=REPO_ROOT,
+        python_prefix=python_prefix,
+        output=tmp_path / "runtime",
+        requirements=None,
+        wheelhouse=None,
+    )
+
+    assert len(calls) == 2
+    for command, environment in calls:
+        assert command[1] == "-I"
+        assert "PYTHONPATH" not in environment
+        assert "PYTHONHOME" not in environment
+
+
 def test_assemble_runtime_rewrites_staging_entrypoint_shebangs(
     monkeypatch, tmp_path: Path
 ) -> None:
@@ -214,3 +299,49 @@ def test_install_requirements_reports_missing_uv(monkeypatch, tmp_path: Path) ->
         raise AssertionError(
             "missing uv should be rejected before subprocess execution"
         )
+
+
+@pytest.mark.parametrize(
+    "target",
+    ["build-serve-cmd-linux-amd64", "build-serve-installer-linux-amd64"],
+)
+def test_cross_build_targets_install_pinned_toolchain_before_target(
+    target: str,
+) -> None:
+    makefile = (REPO_ROOT / "Makefile").read_text(encoding="utf-8")
+    recipe = makefile.split(f"{target}:\n", maxsplit=1)[1].split("\n\n", maxsplit=1)[0]
+
+    install_position = recipe.index(
+        "rustup toolchain install $(SERVE_CMD_RUST_TOOLCHAIN) --profile minimal"
+    )
+    cmake_position = recipe.index("command -v cmake")
+    target_position = recipe.index(
+        "rustup target add --toolchain $(SERVE_CMD_RUST_TOOLCHAIN)"
+    )
+    build_position = recipe.index("cargo +$(SERVE_CMD_RUST_TOOLCHAIN) zigbuild")
+
+    assert cmake_position < install_position < target_position < build_position
+    assert "rustup which" not in recipe
+
+
+def test_cross_build_documentation_uses_the_pinned_toolchain() -> None:
+    readme = (REPO_ROOT / "crates/physicsnemo-serve-cmd/README.md").read_text(
+        encoding="utf-8"
+    )
+
+    assert "rustup toolchain install 1.94.1 --profile minimal" in readme
+    assert "rustup target add --toolchain 1.94.1 x86_64-unknown-linux-gnu" in readme
+    assert "brew install zig cmake" in readme
+
+
+def test_cli_docker_rust_builder_installs_cmake() -> None:
+    dockerfile = (REPO_ROOT / "Dockerfile.physicsnemo-serve-cmd").read_text(
+        encoding="utf-8"
+    )
+    rust_builder = dockerfile.split(
+        "FROM ${PHYSICSNEMO_SERVE_UBUNTU_IMAGE} AS rust-builder", maxsplit=1
+    )[1].split("FROM ${PHYSICSNEMO_SERVE_UBUNTU_IMAGE} AS runtime-builder", maxsplit=1)[
+        0
+    ]
+
+    assert "        cmake \\\n" in rust_builder

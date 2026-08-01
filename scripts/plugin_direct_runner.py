@@ -293,9 +293,11 @@ def _validate_pipeline(stages: list[Any]) -> None:
     for raw_stage in stages:
         if not isinstance(raw_stage, dict):
             raise ValueError("Plugin pipeline stages must be objects")
-        stage_id = str(raw_stage.get("id") or "").strip()
-        if not stage_id:
+        raw_stage_id = raw_stage.get("id")
+        if not isinstance(raw_stage_id, str) or not raw_stage_id.strip():
             raise ValueError("Plugin pipeline stages must have non-empty ids")
+        stage_id = raw_stage_id.strip()
+        raw_stage["id"] = stage_id
         if stage_id in stage_ids:
             raise ValueError(
                 f"Plugin pipeline contains duplicate stage id '{stage_id}'"
@@ -318,6 +320,7 @@ def _validate_pipeline(stages: list[Any]) -> None:
                 raise ValueError(
                     f"Plugin pipeline stage '{stage_id}' must define a non-empty next stage"
                 )
+            raw_stage["next"] = next_stage_id.strip()
         validated_stages.append(raw_stage)
 
     for stage in validated_stages:
@@ -329,6 +332,23 @@ def _validate_pipeline(stages: list[Any]) -> None:
                 f"Plugin pipeline stage '{stage['id']}' references unknown next stage "
                 f"'{next_stage_id}'"
             )
+
+    stage_by_id = {str(stage["id"]): stage for stage in validated_stages}
+    fully_visited: set[str] = set()
+    for start_stage_id in stage_by_id:
+        current_stage_id = start_stage_id
+        current_path: set[str] = set()
+        while current_stage_id not in fully_visited:
+            if current_stage_id in current_path:
+                raise ValueError(
+                    f"Plugin pipeline contains a cycle at stage '{current_stage_id}'"
+                )
+            current_path.add(current_stage_id)
+            current_stage = stage_by_id[current_stage_id]
+            if str(current_stage.get("phase") or "") == "results":
+                break
+            current_stage_id = str(current_stage["next"]).strip()
+        fully_visited.update(current_path)
 
 
 def _read_request(request_path: Path) -> dict[str, Any]:

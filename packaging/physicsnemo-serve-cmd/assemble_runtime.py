@@ -78,6 +78,15 @@ def assemble_runtime(
             "containing BUILD; venvs and system Python prefixes are not relocatable"
         )
     _validate_relocatable_symlinks(python_prefix)
+    resolved_python_prefix = python_prefix.resolve(strict=True)
+    resolved_output = output.resolve()
+    if (
+        resolved_output == resolved_python_prefix
+        or resolved_python_prefix in resolved_output.parents
+    ):
+        raise ValueError(
+            f"Runtime output must not be inside the Python prefix: {output}"
+        )
     if output.exists():
         raise ValueError(f"Runtime output already exists: {output}")
     if requirements is not None and not requirements.is_file():
@@ -126,15 +135,17 @@ def assemble_runtime(
 
         environment = os.environ.copy()
         environment["PYTHONNOUSERSITE"] = "1"
+        environment.pop("PYTHONPATH", None)
+        environment.pop("PYTHONHOME", None)
         version = subprocess.run(
-            [str(runtime_python), "--version"],
+            [str(runtime_python), "-I", "--version"],
             env=environment,
             text=True,
             capture_output=True,
             check=True,
         )
         subprocess.run(
-            [str(runtime_python), "-c", "import jsonschema, yaml"],
+            [str(runtime_python), "-I", "-c", "import jsonschema, yaml"],
             env=environment,
             text=True,
             capture_output=True,

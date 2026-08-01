@@ -623,6 +623,38 @@ mod tests {
     }
 
     #[test]
+    fn package_rejects_output_inside_runtime() {
+        let temp = tempdir().expect("temp directory should be created");
+        let base = temp.path().join("physicsnemo-serve");
+        fs::write(&base, b"fake-elf").expect("base executable should be written");
+        let runtime = create_runtime(temp.path());
+        let output = runtime.join("nested/dist/physicsnemo-serve");
+
+        let error = package_executable(&base, &runtime, &output)
+            .expect_err("output inside the runtime must be rejected");
+
+        assert!(error.to_string().contains("inside the runtime directory"));
+        assert!(!runtime.join("nested").exists());
+    }
+
+    #[test]
+    fn package_rejects_output_inside_runtime_through_symlink() {
+        let temp = tempdir().expect("temp directory should be created");
+        let base = temp.path().join("physicsnemo-serve");
+        fs::write(&base, b"fake-elf").expect("base executable should be written");
+        let runtime = create_runtime(temp.path());
+        let runtime_alias = temp.path().join("runtime-alias");
+        symlink(&runtime, &runtime_alias).expect("runtime alias should be created");
+        let output = runtime_alias.join("nested/../physicsnemo-serve-packaged");
+
+        let error = package_executable(&base, &runtime, &output)
+            .expect_err("symlinked output inside the runtime must be rejected");
+
+        assert!(error.to_string().contains("inside the runtime directory"));
+        assert!(!runtime.join("physicsnemo-serve-packaged").exists());
+    }
+
+    #[test]
     fn package_preserves_runtime_symlinks() {
         let temp = tempdir().expect("temp directory should be created");
         let base = temp.path().join("physicsnemo-serve");

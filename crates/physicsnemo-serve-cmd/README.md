@@ -36,9 +36,10 @@ export PHYSICSNEMO_SERVE_E2S_ZARR_BACKEND=python
 On an Apple Silicon Mac, build a thin Linux x86_64 executable with:
 
 ```bash
-brew install zig
+brew install zig cmake
 cargo install cargo-zigbuild --locked
-rustup target add x86_64-unknown-linux-gnu
+rustup toolchain install 1.94.1 --profile minimal
+rustup target add --toolchain 1.94.1 x86_64-unknown-linux-gnu
 make build-serve-cmd-linux-amd64
 ```
 

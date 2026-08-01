@@ -660,6 +660,105 @@ WORKFLOW = ResultsTransitionWorkflow
     )
 
 
+def test_direct_runner_rejects_static_cycle_before_loading_plugin(
+    tmp_path: Path,
+) -> None:
+    plugin_root = _write_plugin(
+        tmp_path,
+        plugin_id="direct-cycle",
+        profile="simple",
+        options={},
+        request_schema={"type": "object"},
+        workflow="raise RuntimeError('plugin module must not be loaded')",
+    )
+    manifest_path = plugin_root / "plugin.yaml"
+    manifest = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+    manifest["pipeline"] = {
+        "stages": [
+            {
+                "id": "prepare",
+                "phase": "prepare",
+                "handler": "plugin_phase",
+                "queue": "prepare",
+                "next": "execute",
+            },
+            {
+                "id": "execute",
+                "phase": "execute",
+                "handler": "plugin_phase",
+                "queue": "execute.python.test",
+                "next": "prepare",
+            },
+        ]
+    }
+    manifest_path.write_text(
+        yaml.safe_dump(manifest, sort_keys=False), encoding="utf-8"
+    )
+
+    proc = _run_direct(plugin_root, {}, tmp_path / "outputs")
+
+    assert proc.returncode == 1
+    assert "contains a cycle at stage 'prepare'" in proc.stderr
+    assert "plugin module must not be loaded" not in proc.stderr
+    assert (
+        "contains a cycle at stage 'prepare'"
+        in json.loads(proc.stdout)["execution"]["error"]
+    )
+
+
+def test_direct_runner_normalizes_static_stage_identifiers(tmp_path: Path) -> None:
+    plugin_root = _write_plugin(
+        tmp_path,
+        plugin_id="direct-trimmed-stages",
+        profile="simple",
+        options={},
+        request_schema={"type": "object"},
+        workflow="""
+def prepare(ctx):
+    return {"parameters": ctx["parameters"]}
+
+
+def execute(ctx):
+    return {"ok": True}
+""",
+    )
+    manifest_path = plugin_root / "plugin.yaml"
+    manifest = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+    manifest["pipeline"] = {
+        "stages": [
+            {
+                "id": " prepare ",
+                "phase": "prepare",
+                "handler": "plugin_phase",
+                "queue": "prepare",
+                "next": " execute ",
+            },
+            {
+                "id": " execute ",
+                "phase": "execute",
+                "handler": "plugin_phase",
+                "queue": "execute.python.test",
+                "next": " results ",
+            },
+            {
+                "id": " results ",
+                "phase": "results",
+                "handler": "persist_results",
+                "queue": "results",
+                "next": None,
+            },
+        ]
+    }
+    manifest_path.write_text(
+        yaml.safe_dump(manifest, sort_keys=False), encoding="utf-8"
+    )
+
+    proc = _run_direct(plugin_root, {}, tmp_path / "outputs")
+
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout)["payload"] == {"ok": True}
+
+
 def test_direct_runner_defaults_content_type_and_skips_empty_operation_allowlist(
     tmp_path: Path,
 ) -> None:

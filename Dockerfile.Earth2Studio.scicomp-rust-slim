@@ -92,7 +92,8 @@ ENV CARGO_BUILD_JOBS=16 \
     CARGO_INCREMENTAL=0 \
     RUSTFLAGS="-C target-cpu=x86-64-v3"
 
-# Install build dependencies: python3-dev (for PyO3), cmake (for aws-lc-sys), sccache, maturin
+# Install build dependencies: Python headers for PyO3, CMake for aws-lc-sys,
+# and OpenSSL headers for inference_server's native-tls dependency.
 RUN apt-get clean \
  && rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/* \
  && find /etc/apt -type f \( -name '*.list' -o -name '*.sources' \) -print0 | xargs -0 sed -i \
@@ -102,7 +103,7 @@ RUN apt-get clean \
     -e 's|http://security.ubuntu.com|https://security.ubuntu.com|g' \
  && apt-get update -o Acquire::Retries=3 \
  && apt-get install -y --no-install-recommends \
-    python3-dev cmake curl ca-certificates \
+    python3-dev cmake libssl-dev curl ca-certificates \
  && rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/* \
  && curl -L https://github.com/mozilla/sccache/releases/download/v0.8.2/sccache-v0.8.2-x86_64-unknown-linux-musl.tar.gz | tar xz -C /tmp \
  && mv /tmp/sccache-v0.8.2-x86_64-unknown-linux-musl/sccache /usr/local/bin/ \
@@ -147,7 +148,8 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     if [ "$SCCACHE_DISABLE" = "1" ]; then unset RUSTC_WRAPPER; fi; \
     cargo chef cook --release --locked --recipe-path recipe.json \
         --package inference_server \
-        --package worker-runtime
+        --package worker-runtime \
+        --package physicsnemo-serve-cmd
 
 # Cook the Python-extension dependency graph separately so maturin rebuilds are
 # mostly limited to scicomp-rq when only local source changes.

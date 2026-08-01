@@ -130,17 +130,7 @@ pub async fn hmaxby_incr(
     floor: i64,
     delta: i64,
 ) -> Result<i64> {
-    validate_hash_args(key, Some(field), "hmaxby_incr")?;
-    if floor < 0 {
-        return Err(QueueError::Config(
-            "hmaxby_incr: floor must be non-negative".to_string(),
-        ));
-    }
-    if delta < 0 {
-        return Err(QueueError::Config(
-            "hmaxby_incr: delta must be non-negative".to_string(),
-        ));
-    }
+    validate_hmaxby_incr_args(key, field, floor, delta)?;
 
     let script = Script::new(
         r#"
@@ -168,6 +158,21 @@ return updated
         .invoke_async(conn)
         .await?;
     Ok(updated)
+}
+
+fn validate_hmaxby_incr_args(key: &str, field: &str, floor: i64, delta: i64) -> Result<()> {
+    validate_hash_args(key, Some(field), "hmaxby_incr")?;
+    if floor < 0 {
+        return Err(QueueError::Config(
+            "hmaxby_incr: floor must be non-negative".to_string(),
+        ));
+    }
+    if delta < 0 {
+        return Err(QueueError::Config(
+            "hmaxby_incr: delta must be non-negative".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 /// Decrement a numeric hash field, clamping to zero and deleting empty fields.
@@ -214,7 +219,7 @@ return updated
 mod tests {
     use super::{
         hdecrby_clamp_zero_and_delete, hdel, hget, hgetall, hincrby, hmaxby_incr, hmget, hset,
-        validate_hash_args, validate_hash_fields,
+        validate_hash_args, validate_hash_fields, validate_hmaxby_incr_args,
     };
     use crate::QueueManager;
     use std::collections::HashMap;
@@ -449,14 +454,9 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn hmaxby_incr_rejects_negative_floor_and_delta() {
-        let (_server, qm) = spawn_test_queue_manager("hash-ops-hmaxby-errors").await;
-        let mut conn = qm.connection();
-
-        let floor_error = hmaxby_incr(&mut conn, "run:6", "reserved_mb", -1, 1)
-            .await
-            .unwrap_err();
+    #[test]
+    fn hmaxby_incr_rejects_negative_floor_and_delta() {
+        let floor_error = validate_hmaxby_incr_args("run:6", "reserved_mb", -1, 1).unwrap_err();
         assert!(
             floor_error
                 .to_string()
@@ -464,9 +464,7 @@ mod tests {
             "unexpected error: {floor_error}"
         );
 
-        let delta_error = hmaxby_incr(&mut conn, "run:6", "reserved_mb", 1, -1)
-            .await
-            .unwrap_err();
+        let delta_error = validate_hmaxby_incr_args("run:6", "reserved_mb", 1, -1).unwrap_err();
         assert!(
             delta_error
                 .to_string()

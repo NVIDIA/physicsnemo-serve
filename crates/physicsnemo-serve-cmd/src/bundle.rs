@@ -7,7 +7,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow};
 use tar::{Archive, Builder, EntryType, Header, HeaderMode};
@@ -63,6 +63,19 @@ pub fn package_executable_with_compression(
     if output.exists() {
         return Err(anyhow!(
             "packaged output already exists: {}",
+            output.display()
+        ));
+    }
+    let canonical_runtime = runtime_dir.canonicalize().with_context(|| {
+        format!(
+            "failed to resolve runtime directory: {}",
+            runtime_dir.display()
+        )
+    })?;
+    let resolved_output = resolve_candidate_path(output)?;
+    if resolved_output.starts_with(&canonical_runtime) {
+        return Err(anyhow!(
+            "packaged output must not be inside the runtime directory: {}",
             output.display()
         ));
     }
@@ -213,6 +226,43 @@ fn build_runtime_archive(
         .finish()
         .context("failed to finish compressed runtime archive")?;
     Ok(archive_file)
+}
+
+fn resolve_candidate_path(path: &Path) -> Result<PathBuf> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(path)
+    };
+    let mut normalized = PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            _ => normalized.push(component.as_os_str()),
+        }
+    }
+
+    let mut existing_ancestor = normalized.as_path();
+    let mut missing_components = Vec::new();
+    while !existing_ancestor.exists() {
+        let name = existing_ancestor
+            .file_name()
+            .ok_or_else(|| anyhow!("failed to resolve packaged output path: {}", path.display()))?;
+        missing_components.push(name.to_owned());
+        existing_ancestor = existing_ancestor
+            .parent()
+            .ok_or_else(|| anyhow!("failed to resolve packaged output path: {}", path.display()))?;
+    }
+    let mut resolved = existing_ancestor
+        .canonicalize()
+        .with_context(|| format!("failed to resolve packaged output path: {}", path.display()))?;
+    for component in missing_components.iter().rev() {
+        resolved.push(component);
+    }
+    Ok(resolved)
 }
 
 fn append_tree_sorted<W: Write>(

@@ -5,9 +5,11 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -188,8 +190,15 @@ def test_binary_runs_external_plugin_from_explicit_runtime_dir(tmp_path: Path) -
     runtime = _create_fixture_runtime(tmp_path)
     plugin_root, request_path = _create_plugin(tmp_path)
     cache_dir = tmp_path / "unused-runtime-cache"
+    hostile_python_path = tmp_path / "host-python-path"
+    _write(
+        hostile_python_path / "bundled_runtime_fixture.py",
+        "BUNDLED_MULTIPLIER = 99",
+    )
     env = os.environ.copy()
     env["PHYSICSNEMO_SERVE_CLI_CACHE_DIR"] = str(cache_dir)
+    env["PYTHONPATH"] = str(hostile_python_path)
+    env["PYTHONHOME"] = str(tmp_path / "invalid-python-home")
 
     proc = _run_infer(
         binary,
@@ -204,3 +213,126 @@ def test_binary_runs_external_plugin_from_explicit_runtime_dir(tmp_path: Path) -
     result = json.loads(proc.stdout)
     assert result["payload"] == {"value": 18}
     assert not cache_dir.exists()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="requires Unix process signals")
+def test_binary_termination_stops_python_runner_process_group(tmp_path: Path) -> None:
+    binary = _build_binary()
+    runtime = _create_fixture_runtime(tmp_path)
+    plugin_root, request_path = _create_plugin(tmp_path)
+    runner_pid_path = tmp_path / "runner.pid"
+    manifest_path = plugin_root / "plugin.yaml"
+    manifest = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+    manifest["ingress"]["json_schema_inline"] = {
+        "type": "object",
+        "required": ["runner_pid_path"],
+        "properties": {"runner_pid_path": {"type": "string"}},
+    }
+    manifest_path.write_text(
+        yaml.safe_dump(manifest, sort_keys=False), encoding="utf-8"
+    )
+    _write(
+        plugin_root / "workflow.py",
+        """
+import os
+import json
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+
+def prepare(ctx):
+    return {"parameters": ctx["parameters"]}
+
+
+def execute(ctx):
+    ready_path = Path(ctx["parameters"]["runner_pid_path"] + ".descendant-ready")
+    descendant = subprocess.Popen([
+        sys.executable,
+        "-c",
+        (
+            "import signal, time; from pathlib import Path; "
+            "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+            f"Path({str(ready_path)!r}).write_text('ready'); "
+            "time.sleep(60)"
+        ),
+    ])
+    while not ready_path.is_file():
+        time.sleep(0.01)
+    Path(ctx["parameters"]["runner_pid_path"]).write_text(
+        json.dumps({"runner": os.getpid(), "descendant": descendant.pid})
+    )
+    time.sleep(60)
+    return {"unexpected": True}
+""",
+    )
+    request_path.write_text(
+        json.dumps({"runner_pid_path": str(runner_pid_path)}), encoding="utf-8"
+    )
+    command = [
+        str(binary),
+        "infer",
+        "--runtime-dir",
+        str(runtime),
+        "--plugin",
+        str(plugin_root),
+        "--request",
+        str(request_path),
+        "--output-dir",
+        str(tmp_path / "outputs"),
+        "--run-id",
+        "termination-test",
+    ]
+    proc = subprocess.Popen(
+        command,
+        cwd=REPO_ROOT,
+        env=os.environ.copy(),
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    process_ids: list[int] = []
+    try:
+        deadline = time.monotonic() + 15
+        while not runner_pid_path.is_file() and time.monotonic() < deadline:
+            if proc.poll() is not None:
+                stdout, stderr = proc.communicate()
+                pytest.fail(
+                    f"CLI exited before starting its runner: {stdout=} {stderr=}"
+                )
+            time.sleep(0.05)
+        assert runner_pid_path.is_file(), "Python runner did not publish its PID"
+        recorded_processes = json.loads(runner_pid_path.read_text(encoding="utf-8"))
+        process_ids = [
+            int(recorded_processes["runner"]),
+            int(recorded_processes["descendant"]),
+        ]
+
+        proc.terminate()
+        proc.communicate(timeout=15)
+
+        deadline = time.monotonic() + 5
+        while (
+            any(_process_exists(pid) for pid in process_ids)
+            and time.monotonic() < deadline
+        ):
+            time.sleep(0.05)
+        assert not [pid for pid in process_ids if _process_exists(pid)], (
+            "Python process tree survived CLI termination"
+        )
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.communicate()
+        for pid in process_ids:
+            if _process_exists(pid):
+                os.kill(pid, signal.SIGKILL)
+
+
+def _process_exists(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True

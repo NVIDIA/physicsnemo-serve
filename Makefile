@@ -18,7 +18,6 @@ SERVE_INSTALLER_LINUX_AMD64_OUTPUT ?= $(SERVE_CMD_DIST_DIR)/physicsnemo-serve-in
 SERVE_CMD_LINUX_AMD64_TARGET ?= x86_64-unknown-linux-gnu.2.17
 SERVE_CMD_LINUX_AMD64_TARGET_DIR ?= x86_64-unknown-linux-gnu
 SERVE_CMD_RUST_TOOLCHAIN ?= 1.94.1
-SERVE_CMD_RUST_BIN = $(dir $(shell rustup which --toolchain $(SERVE_CMD_RUST_TOOLCHAIN) cargo))
 
 .PHONY: image runtime-base-image build build-serve-cmd build-serve-cmd-linux-amd64 build-serve-installer build-serve-installer-linux-amd64 clean clean-all experiments observe stress
 
@@ -43,9 +42,11 @@ build-serve-cmd:
 
 build-serve-cmd-linux-amd64:
 	@command -v zig >/dev/null 2>&1 || (echo "zig is required; install it with: brew install zig" && exit 1)
+	@command -v cmake >/dev/null 2>&1 || (echo "cmake is required by aws-lc-sys; install it with: brew install cmake" && exit 1)
 	@command -v cargo-zigbuild >/dev/null 2>&1 || (echo "cargo-zigbuild is required; install it with: cargo install cargo-zigbuild --locked" && exit 1)
+	rustup toolchain install $(SERVE_CMD_RUST_TOOLCHAIN) --profile minimal
 	rustup target add --toolchain $(SERVE_CMD_RUST_TOOLCHAIN) $(SERVE_CMD_LINUX_AMD64_TARGET_DIR)
-	PATH="$(SERVE_CMD_RUST_BIN):$(PATH)" cargo zigbuild --locked --release --target $(SERVE_CMD_LINUX_AMD64_TARGET) --package physicsnemo-serve-cmd --bin physicsnemo-serve
+	cargo +$(SERVE_CMD_RUST_TOOLCHAIN) zigbuild --locked --release --target $(SERVE_CMD_LINUX_AMD64_TARGET) --package physicsnemo-serve-cmd --bin physicsnemo-serve
 	mkdir -p $(SERVE_CMD_DIST_DIR)
 	cp target/$(SERVE_CMD_LINUX_AMD64_TARGET_DIR)/release/physicsnemo-serve $(SERVE_CMD_LINUX_AMD64_OUTPUT)
 	chmod +x $(SERVE_CMD_LINUX_AMD64_OUTPUT)
@@ -61,13 +62,22 @@ build-serve-installer:
 
 build-serve-installer-linux-amd64:
 	@command -v zig >/dev/null 2>&1 || (echo "zig is required; install it with: brew install zig" && exit 1)
+	@command -v cmake >/dev/null 2>&1 || (echo "cmake is required by aws-lc-sys; install it with: brew install cmake" && exit 1)
 	@command -v cargo-zigbuild >/dev/null 2>&1 || (echo "cargo-zigbuild is required; install it with: cargo install cargo-zigbuild --locked" && exit 1)
+	rustup toolchain install $(SERVE_CMD_RUST_TOOLCHAIN) --profile minimal
 	rustup target add --toolchain $(SERVE_CMD_RUST_TOOLCHAIN) $(SERVE_CMD_LINUX_AMD64_TARGET_DIR)
-	PATH="$(SERVE_CMD_RUST_BIN):$(PATH)" cargo zigbuild --locked --release --target $(SERVE_CMD_LINUX_AMD64_TARGET) --package physicsnemo-serve-cmd --bin physicsnemo-serve-install
+	cargo +$(SERVE_CMD_RUST_TOOLCHAIN) zigbuild --locked --release --target $(SERVE_CMD_LINUX_AMD64_TARGET) --package physicsnemo-serve-cmd --bin physicsnemo-serve-install
 	mkdir -p $(SERVE_CMD_DIST_DIR)
 	cp target/$(SERVE_CMD_LINUX_AMD64_TARGET_DIR)/release/physicsnemo-serve-install $(SERVE_INSTALLER_LINUX_AMD64_OUTPUT)
 	chmod +x $(SERVE_INSTALLER_LINUX_AMD64_OUTPUT)
 	@echo "Linux x86_64 runtime installer built: $(SERVE_INSTALLER_LINUX_AMD64_OUTPUT)"
+
+test-rust:
+	cargo test -p physicsnemo-serve-cmd --lib
+	cargo test -p worker-runtime --lib
+	cargo test -p e2s_zarr_io --lib
+	cargo test -p inference_server --lib
+	cargo test -p scicomp-rq --lib
 
 clean:
 	cargo clean

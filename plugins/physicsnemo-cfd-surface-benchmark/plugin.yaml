@@ -52,7 +52,7 @@ ingress:
           properties:
             case_id:
               type: string
-              pattern: '^run_[0-9]+$'
+              pattern: '^run_[1-9][0-9]*$'
               maxLength: 64
             mesh_uri:
               type: string
@@ -102,7 +102,7 @@ ingress:
         uniqueItems: true
         items:
           type: string
-          pattern: '^run_[0-9]+$'
+          pattern: '^run_[1-9][0-9]*$'
           maxLength: 64
 
 pipeline:
@@ -153,7 +153,7 @@ outputs:
         items: {type: string}
       case_ids:
         type: array
-        items: {type: string, pattern: '^run_[0-9]+$', maxLength: 64}
+        items: {type: string, pattern: '^run_[1-9][0-9]*$', maxLength: 64}
       duration_seconds:
         type: number
         minimum: 0
@@ -192,7 +192,7 @@ outputs:
             - geometry_sha256
             - geometry_size_bytes
           properties:
-            case_id: {type: string, pattern: '^run_[0-9]+$', maxLength: 64}
+            case_id: {type: string, pattern: '^run_[1-9][0-9]*$', maxLength: 64}
             sha256: {type: string, pattern: '^[0-9a-f]{64}$'}
             size_bytes: {type: integer, minimum: 1}
             geometry_sha256: {type: string, pattern: '^[0-9a-f]{64}$'}

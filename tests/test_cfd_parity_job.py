@@ -57,12 +57,12 @@ def test_job_runner_executes_independent_config_and_compares_reports(
     _write_json(rest_report, _report())
     report_digest = hashlib.sha256(rest_report.read_bytes()).hexdigest()
     handoff = {
-        "schema_version": 1,
+        "schema_version": 2,
         "parity_run_id": "run-1",
         "profile_id": profile["profile_id"],
         "workflow_id": profile["workflow_id"],
         "domain": profile["domain"],
-        "image": "registry/image:tag",
+        "image": "registry/image@sha256:" + ("d" * 64),
         "mount_target": str(mount),
         "rest_run_id": "rest-run",
         "request": {
@@ -81,7 +81,29 @@ def test_job_runner_executes_independent_config_and_compares_reports(
             "save_inference_mesh": False,
             "visual_case_ids": [],
         },
-        "provenance": {},
+        "provenance": {
+            "provider": {
+                key: profile["provider"][key]
+                for key in (
+                    "repository",
+                    "tag",
+                    "version",
+                    "commit",
+                    "physicsnemo_version",
+                    "python_version",
+                )
+            },
+            "preset_sha256": profile["preset_sha256"],
+            "case_digests": [
+                {
+                    "case_id": "run_1",
+                    "sha256": "a" * 64,
+                    "size_bytes": 1,
+                    "geometry_sha256": "b" * 64,
+                    "geometry_size_bytes": 1,
+                }
+            ],
+        },
         "rest": {
             "input_root_relpath": "rest/inputs",
             "report_relpath": "rest/benchmark_results.json",

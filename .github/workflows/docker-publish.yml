@@ -15,7 +15,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  RUNTIME_BASE_TAG: pytorch-26.01-py3-th0.8.0
+  RUNTIME_BASE_TAG: pytorch-26.01-py3-th0.8.1
 
 jobs:
   docker-publish:

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Run REST PhysicsNeMo-CFD QA, then compare with a direct Lepton batch job."""
+"""Compare a PhysicsNeMo-CFD wrapper with a direct Lepton batch job."""
 
 from __future__ import annotations
 
@@ -27,7 +27,9 @@ from cfd_parity_contract import (
     ParityContractError,
     build_handoff,
     read_json_object,
+    validate_image_digest_reference,
     validate_profile,
+    validate_request,
     write_json_atomic,
 )
 
@@ -37,6 +39,7 @@ QA_ROOT = SCRIPTS_DIR.parent
 REPO_ROOT = QA_ROOT.parent
 RUN_QA_SCRIPT = SCRIPTS_DIR / "run_qa.py"
 JOB_RUNNER = SCRIPTS_DIR / "run_cfd_parity_job.py"
+INFER_JOB_RUNNER = SCRIPTS_DIR / "run_cfd_infer_parity_job.py"
 CONTRACT_MODULE = SCRIPTS_DIR / "cfd_parity_contract.py"
 DEFAULT_PROFILE = QA_ROOT / "inference" / "cfd_parity_surface_run1.json"
 SUMMARY_BEGIN = "PHYSICSNEMO_CFD_PARITY_SUMMARY_BEGIN"
@@ -72,11 +75,12 @@ def resolve_path(path: str) -> Path:
 
 
 def image_full_reference(image_tag: str, image_name: str) -> str:
-    last_slash = image_tag.rfind("/")
-    last_colon = image_tag.rfind(":")
-    if last_colon > last_slash:
-        return image_tag
-    return f"{image_name}:{image_tag}"
+    image = (
+        f"{image_name}@{image_tag}"
+        if re.fullmatch(r"sha256:[0-9a-f]{64}", image_tag)
+        else image_tag
+    )
+    return validate_image_digest_reference(image, "--image-tag")
 
 
 def shell_join(args: list[str]) -> str:
@@ -273,6 +277,11 @@ def job_name(profile: Mapping[str, Any], run_id: str) -> str:
     return _lepton_job_name(f"pn-cfd-parity-{domain}", run_id)
 
 
+def infer_job_name(profile: Mapping[str, Any], run_id: str) -> str:
+    domain = re.sub(r"[^a-z0-9]+", "-", str(profile["domain"]).lower()).strip("-")
+    return _lepton_job_name(f"pn-cfd-infer-parity-{domain}", run_id)
+
+
 def build_remote_command(
     *,
     profile: Mapping[str, Any],
@@ -312,7 +321,84 @@ def build_remote_command(
         root,
     ]
     return (
-        "set -o pipefail; "
+        "set -euo pipefail; "
+        + "; ".join(setup)
+        + "; "
+        + f"{shell_join(command)} 2>&1 | tee {shlex.quote(log_path)}; "
+        + "rc=${PIPESTATUS[0]}; exit $rc"
+    )
+
+
+def build_infer_remote_command(
+    *,
+    profile_text: str,
+    request_text: str,
+    mount_target: str,
+    run_id: str,
+    image: str,
+    infer_binary: str,
+    infer_runtime_dir: str,
+    infer_plugin: str,
+    device: str,
+    infer_timeout_seconds: int,
+    download_timeout_seconds: int,
+) -> str:
+    root = remote_root(mount_target, run_id)
+    parent = str(Path(root).parent)
+    contract_path = f"{root}/cfd_parity_contract.py"
+    direct_runner_path = f"{root}/run_cfd_parity_job.py"
+    infer_runner_path = f"{root}/run_cfd_infer_parity_job.py"
+    profile_path = f"{root}/profile.json"
+    request_path = f"{root}/request.json"
+    log_path = f"{root}/job-output.log"
+    setup = [
+        f"mkdir -p {shlex.quote(parent)}",
+        f"test ! -e {shlex.quote(root)}",
+        f"mkdir {shlex.quote(root)}",
+        base64_write_command(
+            contract_path, CONTRACT_MODULE.read_text(encoding="utf-8")
+        ),
+        base64_write_command(
+            direct_runner_path, JOB_RUNNER.read_text(encoding="utf-8")
+        ),
+        base64_write_command(
+            infer_runner_path, INFER_JOB_RUNNER.read_text(encoding="utf-8")
+        ),
+        base64_write_command(profile_path, profile_text),
+        base64_write_command(request_path, request_text),
+    ]
+    command = [
+        f"{infer_runtime_dir.rstrip('/')}/bin/python",
+        infer_runner_path,
+        "--profile",
+        profile_path,
+        "--request",
+        request_path,
+        "--mount-target",
+        mount_target,
+        "--work-dir",
+        root,
+        "--parity-run-id",
+        run_id,
+        "--infer-run-id",
+        f"infer-{run_id}",
+        "--image",
+        image,
+        "--infer-binary",
+        infer_binary,
+        "--runtime-dir",
+        infer_runtime_dir,
+        "--plugin",
+        infer_plugin,
+        "--device",
+        device,
+        "--infer-timeout-seconds",
+        str(infer_timeout_seconds),
+        "--download-timeout-seconds",
+        str(download_timeout_seconds),
+    ]
+    return (
+        "set -euo pipefail; "
         + "; ".join(setup)
         + "; "
         + f"{shell_join(command)} 2>&1 | tee {shlex.quote(log_path)}; "
@@ -350,6 +436,46 @@ def build_job_args(
             handoff_text=handoff_text,
             mount_target=args.mount_target,
             run_id=run_id,
+        ),
+    ]
+
+
+def build_infer_job_args(
+    args: argparse.Namespace,
+    *,
+    profile: Mapping[str, Any],
+    profile_text: str,
+    request_text: str,
+    image: str,
+    nfs_path: str,
+    run_id: str,
+) -> list[str]:
+    return [
+        "--name",
+        infer_job_name(profile, run_id),
+        "--container-image",
+        image,
+        "--node-group",
+        args.node_group,
+        "--resource-shape",
+        args.resource_shape,
+        "--image-pull-secrets",
+        args.pull_secret,
+        "--mount",
+        f"{nfs_path}:{args.mount_target}:node-nfs:{args.lustre_storage}",
+        "--command",
+        build_infer_remote_command(
+            profile_text=profile_text,
+            request_text=request_text,
+            mount_target=args.mount_target,
+            run_id=run_id,
+            image=image,
+            infer_binary=args.infer_binary,
+            infer_runtime_dir=args.infer_runtime_dir,
+            infer_plugin=args.infer_plugin,
+            device=args.device,
+            infer_timeout_seconds=args.infer_timeout,
+            download_timeout_seconds=args.download_timeout,
         ),
     ]
 
@@ -401,11 +527,7 @@ def run_rest_qa(
     env: dict[str, str],
 ) -> Path:
     rest = profile["rest"]
-    request_path = Path(args.rest_request_path or str(rest["request_path"]))
-    if not request_path.is_absolute():
-        request_path = REPO_ROOT / request_path
-    if not request_path.is_file():
-        raise ParityContractError(f"REST parity request does not exist: {request_path}")
+    request_path = resolve_request_path(args, profile)
     command = [
         sys.executable,
         "-u",
@@ -438,6 +560,18 @@ def run_rest_qa(
     return discover_rest_evidence(artifact_dir / str(rest["evidence_subdir"]))
 
 
+def resolve_request_path(
+    args: argparse.Namespace,
+    profile: Mapping[str, Any],
+) -> Path:
+    request_path = Path(args.rest_request_path or str(profile["rest"]["request_path"]))
+    if not request_path.is_absolute():
+        request_path = REPO_ROOT / request_path
+    if not request_path.is_file():
+        raise ParityContractError(f"parity request does not exist: {request_path}")
+    return request_path
+
+
 def _load_remote_summary_if_available(
     nfs_path: str, run_id: str
 ) -> dict[str, Any] | None:
@@ -456,10 +590,11 @@ def fetch_summary_via_reader_job(
     run_id: str,
     env: dict[str, str],
     artifact_dir: Path,
+    reader_python: str = "python3",
 ) -> dict[str, Any] | None:
     summary_path = f"{remote_root(args.mount_target, run_id)}/summary.json"
     reader_name = _lepton_job_name("pn-cfd-parity-read", run_id)
-    reader_python = (
+    reader_script = (
         "import base64\n"
         "from pathlib import Path\n"
         f"text = Path({summary_path!r}).read_text(encoding='utf-8')\n"
@@ -467,8 +602,11 @@ def fetch_summary_via_reader_job(
         "print(base64.b64encode(text.encode('utf-8')).decode('ascii'), flush=True)\n"
         f"print({SUMMARY_END!r}, flush=True)\n"
     )
-    encoded = base64.b64encode(reader_python.encode("utf-8")).decode("ascii")
-    reader_command = f"printf %s {shlex.quote(encoded)} | base64 -d | python3; sleep 30"
+    encoded = base64.b64encode(reader_script.encode("utf-8")).decode("ascii")
+    reader_command = (
+        f"printf %s {shlex.quote(encoded)} | base64 -d | "
+        f"{shlex.quote(reader_python)}; sleep 30"
+    )
     reader_args = [
         "--name",
         reader_name,
@@ -520,7 +658,8 @@ def run(args: argparse.Namespace) -> int:
     validate_profile(profile)
 
     run_id = validate_run_id(args.run_id or generate_run_id())
-    image = image_full_reference(args.image_tag, args.image_name)
+    image_name = args.infer_image_name if args.candidate == "infer" else args.image_name
+    image = image_full_reference(args.image_tag, image_name)
     nfs_path = f"{args.nfs_mount_base.rstrip('/')}/{args.lustre_dir}"
     artifact_root = resolve_path(args.artifact_dir)
     run_artifact_dir = artifact_root / "cfd-parity" / run_id
@@ -532,6 +671,7 @@ def run(args: argparse.Namespace) -> int:
         "final_result": "failed",
         "run_id": run_id,
         "profile_id": profile["profile_id"],
+        "candidate": args.candidate,
         "image": image,
         "mount": {
             "nfs_path": nfs_path,
@@ -583,47 +723,78 @@ def run(args: argparse.Namespace) -> int:
     signal.signal(signal.SIGTERM, handle_signal)
 
     try:
-        if args.rest_evidence_dir:
-            evidence_dir = resolve_path(args.rest_evidence_dir)
-        else:
-            if args.dry_run:
-                raise ParityContractError("--dry-run requires --rest-evidence-dir")
-            evidence_dir = run_rest_qa(
+        if args.candidate == "infer":
+            request_path = resolve_request_path(args, profile)
+            request = read_json_object(request_path)
+            validate_request(profile, request)
+            request_snapshot = run_artifact_dir / "request.json"
+            write_json_atomic(request_snapshot, request)
+            summary["artifacts"]["request"] = str(request_snapshot)
+            request_text = json.dumps(request, indent=2, sort_keys=True) + "\n"
+            job_args = build_infer_job_args(
                 args,
                 profile=profile,
+                profile_text=profile_text,
+                request_text=request_text,
                 image=image,
-                artifact_dir=run_artifact_dir / "rest-qa",
-                env=env,
+                nfs_path=nfs_path,
+                run_id=run_id,
             )
-        summary["artifacts"]["rest_evidence_dir"] = str(evidence_dir)
+        else:
+            if args.rest_evidence_dir:
+                evidence_dir = resolve_path(args.rest_evidence_dir)
+            else:
+                if args.dry_run:
+                    raise ParityContractError(
+                        "--dry-run requires --rest-evidence-dir for the REST candidate"
+                    )
+                evidence_dir = run_rest_qa(
+                    args,
+                    profile=profile,
+                    image=image,
+                    artifact_dir=run_artifact_dir / "rest-qa",
+                    env=env,
+                )
+            summary["artifacts"]["rest_evidence_dir"] = str(evidence_dir)
 
-        handoff = build_handoff(
-            evidence_dir=evidence_dir,
-            profile=profile,
-            parity_run_id=run_id,
-            image=image,
-            mount_target=args.mount_target,
-        )
-        handoff_path = run_artifact_dir / "parity-handoff.json"
-        write_json_atomic(handoff_path, handoff)
-        summary["rest_run_id"] = handoff["rest_run_id"]
-        summary["artifacts"]["handoff"] = str(handoff_path)
-        handoff_text = json.dumps(handoff, indent=2, sort_keys=True) + "\n"
-        job_args = build_job_args(
-            args,
-            profile=profile,
-            profile_text=profile_text,
-            handoff_text=handoff_text,
-            image=image,
-            nfs_path=nfs_path,
-            run_id=run_id,
-        )
+            handoff = build_handoff(
+                evidence_dir=evidence_dir,
+                profile=profile,
+                parity_run_id=run_id,
+                image=image,
+                mount_target=args.mount_target,
+            )
+            handoff_path = run_artifact_dir / "parity-handoff.json"
+            write_json_atomic(handoff_path, handoff)
+            summary["rest_run_id"] = handoff["rest_run_id"]
+            summary["artifacts"]["handoff"] = str(handoff_path)
+            handoff_text = json.dumps(handoff, indent=2, sort_keys=True) + "\n"
+            job_args = build_job_args(
+                args,
+                profile=profile,
+                profile_text=profile_text,
+                handoff_text=handoff_text,
+                image=image,
+                nfs_path=nfs_path,
+                run_id=run_id,
+            )
         remote_command = job_args[-1]
+        selected_job_name = (
+            infer_job_name(profile, run_id)
+            if args.candidate == "infer"
+            else job_name(profile, run_id)
+        )
+        effective_job_timeout = args.job_timeout or (
+            (args.infer_timeout + int(profile["runner"]["timeout_seconds"]) + 1_800)
+            if args.candidate == "infer"
+            else 23_400
+        )
         summary["job"] = {
-            "name": job_name(profile, run_id),
+            "name": selected_job_name,
             "image": image,
             "node_group": args.node_group,
             "resource_shape": args.resource_shape,
+            "timeout_seconds": effective_job_timeout,
             "pull_secret": args.pull_secret,
             "mount": (f"{nfs_path}:{args.mount_target}:node-nfs:{args.lustre_storage}"),
             "remote_command_sha256": hashlib.sha256(
@@ -665,7 +836,7 @@ def run(args: argparse.Namespace) -> int:
         job_returncode = poll_job(
             job_id=job_id,
             env=env,
-            timeout_seconds=args.job_timeout,
+            timeout_seconds=effective_job_timeout,
             interval_seconds=args.job_poll_interval,
         )
         job_finished = True
@@ -676,26 +847,36 @@ def run(args: argparse.Namespace) -> int:
             env=env,
             artifact_path=run_artifact_dir / "job.log",
         )
-        direct_summary = _load_remote_summary_if_available(nfs_path, run_id)
-        if direct_summary is None:
-            direct_summary = extract_marked_summary(job_output)
-        if direct_summary is None:
-            direct_summary = fetch_summary_via_reader_job(
+        parity_summary = _load_remote_summary_if_available(nfs_path, run_id)
+        if parity_summary is None:
+            parity_summary = extract_marked_summary(job_output)
+        if parity_summary is None:
+            parity_summary = fetch_summary_via_reader_job(
                 args,
                 image=image,
                 nfs_path=nfs_path,
                 run_id=run_id,
                 env=env,
                 artifact_dir=run_artifact_dir,
+                reader_python=(
+                    f"{args.infer_runtime_dir.rstrip('/')}/bin/python"
+                    if args.candidate == "infer"
+                    else "python3"
+                ),
             )
-        if direct_summary is None:
-            raise RuntimeError("direct parity job produced no readable summary")
-        write_json_atomic(run_artifact_dir / "direct-summary.json", direct_summary)
+        if parity_summary is None:
+            raise RuntimeError("parity job produced no readable summary")
+        summary_filename = (
+            "infer-summary.json" if args.candidate == "infer" else "direct-summary.json"
+        )
+        write_json_atomic(run_artifact_dir / summary_filename, parity_summary)
         summary["job"]["exit_code"] = job_returncode
-        summary["direct_summary"] = direct_summary
+        summary["infer_summary" if args.candidate == "infer" else "direct_summary"] = (
+            parity_summary
+        )
         summary["final_result"] = (
             "passed"
-            if job_returncode == 0 and direct_summary.get("final_result") == "passed"
+            if job_returncode == 0 and parity_summary.get("final_result") == "passed"
             else "failed"
         )
     except Exception as exc:
@@ -713,20 +894,54 @@ def run(args: argparse.Namespace) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--image-tag", required=True)
+    parser.add_argument(
+        "--image-tag",
+        required=True,
+        help=(
+            "Immutable image reference ending in @sha256:<digest>, or a bare "
+            "sha256:<digest> combined with the selected image name."
+        ),
+    )
     registry = _DEPLOY_CONFIG.get("docker_registry", "")
     default_image = (
         f"{registry}/{_DEPLOY_CONFIG.get('image_name', 'physicsnemo-serve')}"
         if registry
         else _DEPLOY_CONFIG.get("image_name", "physicsnemo-serve")
     )
+    default_infer_image = (
+        f"{registry}/physicsnemo-serve-cmd" if registry else "physicsnemo-serve-cmd"
+    )
     parser.add_argument("--image-name", default=default_image)
+    parser.add_argument("--infer-image-name", default=default_infer_image)
+    parser.add_argument(
+        "--candidate",
+        choices=("rest", "infer"),
+        default="rest",
+        help="Wrapper to compare with direct PhysicsNeMo-CFD (default: rest).",
+    )
     parser.add_argument("--profile", default=str(DEFAULT_PROFILE))
     parser.add_argument(
+        "--request-path",
         "--rest-request-path",
-        help="Override the profile's REST request fixture without changing its direct config.",
+        dest="rest_request_path",
+        help="Override the profile's request fixture without changing its direct config.",
     )
     parser.add_argument("--rest-evidence-dir")
+    parser.add_argument(
+        "--infer-binary",
+        default="/usr/local/bin/physicsnemo-serve",
+    )
+    parser.add_argument(
+        "--infer-runtime-dir",
+        default="/opt/physicsnemo-serve/runtimes/shared",
+    )
+    parser.add_argument(
+        "--infer-plugin",
+        default=("/opt/physicsnemo-serve/plugins/physicsnemo-cfd-surface-benchmark"),
+    )
+    parser.add_argument("--device", default="0")
+    parser.add_argument("--infer-timeout", type=int, default=23_400)
+    parser.add_argument("--download-timeout", type=int, default=1_800)
     parser.add_argument("--run-id")
     parser.add_argument(
         "--artifact-dir",
@@ -771,7 +986,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=os.environ.get("LEPTON_LUSTRE_STORAGE", "lustre"),
     )
     parser.add_argument("--mount-target", default="/outputs")
-    parser.add_argument("--job-timeout", type=int, default=23_400)
+    parser.add_argument("--job-timeout", type=int)
     parser.add_argument("--job-poll-interval", type=int, default=20)
     parser.add_argument("--reader-resource-shape", default="cpu.small")
     parser.add_argument("--keep-job", action="store_true")
@@ -783,12 +998,24 @@ def validate_args(args: argparse.Namespace) -> None:
     for name in ("workspace_id", "node_group", "pull_secret", "nfs_mount_base"):
         if not getattr(args, name):
             raise ValueError(f"--{name.replace('_', '-')} is required")
-    if not args.rest_evidence_dir and not args.workspace_token:
+    if (
+        args.candidate == "rest"
+        and not args.rest_evidence_dir
+        and not args.workspace_token
+    ):
         raise ValueError(
             "--workspace-token is required when the REST QA phase is enabled"
         )
-    if args.job_timeout <= 0 or args.job_poll_interval <= 0:
-        raise ValueError("job timeout and poll interval must be positive")
+    if args.job_timeout is not None and args.job_timeout <= 0:
+        raise ValueError("job timeout must be positive")
+    if (
+        args.job_poll_interval <= 0
+        or args.infer_timeout <= 0
+        or args.download_timeout <= 0
+    ):
+        raise ValueError(
+            "job poll interval, infer timeout, and download timeout must be positive"
+        )
 
 
 def main() -> None:

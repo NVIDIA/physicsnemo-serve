@@ -10,7 +10,8 @@ The upstream v0.0.2 runner does not apply a public benchmark batch-size
 override, so this plugin exposes no `batch_size` request field and pins
 `run.batch_size` to `1` in its immutable preset.
 
-Each case must be named `run_<number>` (at most 64 characters) and provide
+Each case must be named `run_<positive integer>` without leading zeros (at most
+64 characters) and provide
 allowlisted HTTPS URIs, SHA-256 digests, and exact byte sizes for both the
 boundary VTP and the companion DrivAer STL geometry. Prefetch verifies every
 object before execution. The adapter materializes the files as

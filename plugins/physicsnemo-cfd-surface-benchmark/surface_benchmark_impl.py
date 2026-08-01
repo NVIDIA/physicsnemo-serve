@@ -62,7 +62,7 @@ from plugin_sdk import (
     model_to_jsonable,
 )
 
-_CASE_ID_RE = re.compile(r"^run_([0-9]+)$")
+_CASE_ID_RE = re.compile(r"^run_([1-9][0-9]*)$")
 _MAX_CASE_ID_LENGTH = 64
 _SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 _SECRET_QUERY_KEYS = {
@@ -344,7 +344,10 @@ def normalize_surface_request(
                 f"{max_case_id_length} characters"
             )
         if _CASE_ID_RE.fullmatch(case_id) is None:
-            raise ValueError(f"cases[{index}].case_id must match run_<number>")
+            raise ValueError(
+                f"cases[{index}].case_id must match run_<positive integer> "
+                "without leading zeros"
+            )
         mesh_uri = _validate_mesh_uri(raw_case.get("mesh_uri"), index=index)
         geometry_uri = _validate_mesh_uri(
             raw_case.get("geometry_uri"), index=index, field_name="geometry_uri"

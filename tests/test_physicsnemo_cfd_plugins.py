@@ -34,6 +34,10 @@ PLUGIN_ROOT = REPO_ROOT / "plugins" / "physicsnemo-cfd-surface-benchmark"
 MANIFEST_PATH = PLUGIN_ROOT / "plugin.yaml"
 FIXTURE_PATH = PLUGIN_ROOT / "fixtures" / "tiny_surface.vtp"
 PUBLIC_E2E_REQUEST_PATH = PLUGIN_ROOT / "examples" / "public_run_1_request.json"
+PARITY_PROFILE_PATHS = (
+    REPO_ROOT / "qa" / "inference" / "cfd_parity_surface_run1.json",
+    REPO_ROOT / "qa" / "inference" / "cfd_parity_surface_run1_full_matrix.json",
+)
 TINY_STL_BYTES = b"solid drivaer\nendsolid drivaer\n"
 
 
@@ -170,6 +174,10 @@ def test_manifest_contains_complete_pinned_surface_contract():
     assert (
         request_properties["cases"]["items"]["properties"]["case_id"]["maxLength"] == 64
     )
+    assert (
+        request_properties["cases"]["items"]["properties"]["case_id"]["pattern"]
+        == "^run_[1-9][0-9]*$"
+    )
     assert request_properties["visual_case_ids"]["items"]["maxLength"] == 64
     result_properties = manifest["outputs"]["result_schema_inline"]["properties"]
     assert result_properties["case_ids"]["items"]["maxLength"] == 64
@@ -184,6 +192,14 @@ def test_manifest_contains_complete_pinned_surface_contract():
     )
     for key, value in provider.items():
         assert provider_lock[key] == value
+
+
+@pytest.mark.parametrize("profile_path", PARITY_PROFILE_PATHS)
+def test_parity_profiles_anchor_the_plugin_preset(profile_path: Path):
+    profile = json.loads(profile_path.read_text(encoding="utf-8"))
+
+    assert profile["schema_version"] == 2
+    assert profile["preset_sha256"] == surface.preset_sha256(_config())
 
 
 def test_public_run_1_e2e_request_is_schema_valid_and_content_pinned():
@@ -333,7 +349,15 @@ def test_normalize_surface_request_applies_defaults_and_allowlists():
         ({"cases": []}, "between 1 and 8"),
         (
             {"cases": [_case_fields(case_id="../escape")]},
-            "must match run_<number>",
+            "must match run_<positive integer>",
+        ),
+        (
+            {"cases": [_case_fields(case_id="run_0")]},
+            "must match run_<positive integer>",
+        ),
+        (
+            {"cases": [_case_fields(case_id="run_01")]},
+            "must match run_<positive integer>",
         ),
         (
             {"cases": [_case_fields(mesh_uri="http://assets.example.com/file.vtp")]},

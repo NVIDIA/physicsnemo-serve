@@ -32,6 +32,7 @@ TWO_CASE_REQUEST_PATH = (
     / "examples"
     / "public_run_1_11_full_matrix_request.json"
 )
+IMAGE_DIGEST = "registry/image@sha256:" + ("d" * 64)
 sys.path.insert(0, str(SCRIPTS_DIR))
 
 import cfd_parity_contract as contract  # noqa: E402
@@ -154,7 +155,7 @@ def _build_evidence(tmp_path: Path) -> tuple[Path, Path, dict[str, object]]:
                 "model_names": request["models"],
                 "case_ids": ["run_1"],
                 "selected_metrics": request["metrics"],
-                "preset_sha256": "a" * 64,
+                "preset_sha256": profile["preset_sha256"],
                 "case_digests": [
                     {
                         key: request["cases"][0][key]
@@ -182,7 +183,7 @@ def test_handoff_persists_mount_relative_paths_and_verified_inputs(
         evidence_dir=evidence,
         profile=profile,
         parity_run_id="parity-1",
-        image="registry/image@sha256:abc",
+        image=IMAGE_DIGEST,
         mount_target=str(mount),
     )
 
@@ -199,13 +200,62 @@ def test_handoff_persists_mount_relative_paths_and_verified_inputs(
     assert [item["size_bytes"] for item in verified] == [4, 8]
 
 
+def test_uppercase_request_digests_are_compared_canonically(tmp_path: Path) -> None:
+    evidence, mount, profile = _build_evidence(tmp_path)
+    request = contract.read_json_object(evidence / "request.json")
+    request["cases"][0]["sha256"] = request["cases"][0]["sha256"].upper()
+    request["cases"][0]["geometry_sha256"] = request["cases"][0][
+        "geometry_sha256"
+    ].upper()
+    _write_json(evidence / "request.json", request)
+
+    handoff = contract.build_handoff(
+        evidence_dir=evidence,
+        profile=profile,
+        parity_run_id="parity-uppercase",
+        image=IMAGE_DIGEST,
+        mount_target=str(mount),
+    )
+
+    assert handoff["provenance"]["case_digests"][0]["sha256"] == _digest(b"mesh")
+    input_root = contract.resolve_existing_mount_path(
+        str(mount),
+        handoff["rest"]["input_root_relpath"],
+    )
+    assert (
+        len(
+            contract.verify_staged_inputs(
+                profile,
+                handoff,
+                input_root=input_root,
+            )
+        )
+        == 2
+    )
+
+
+def test_handoff_revalidates_provenance(tmp_path: Path) -> None:
+    evidence, mount, profile = _build_evidence(tmp_path)
+    handoff = contract.build_handoff(
+        evidence_dir=evidence,
+        profile=profile,
+        parity_run_id="parity-provenance",
+        image=IMAGE_DIGEST,
+        mount_target=str(mount),
+    )
+    handoff["provenance"]["provider"]["commit"] = "0" * 40
+
+    with pytest.raises(contract.ParityContractError, match="provider commit"):
+        contract.validate_handoff(profile, handoff)
+
+
 def test_direct_config_is_profile_driven_not_rest_config(tmp_path: Path) -> None:
     evidence, mount, profile = _build_evidence(tmp_path)
     handoff = contract.build_handoff(
         evidence_dir=evidence,
         profile=profile,
         parity_run_id="parity-1",
-        image="registry/image:tag",
+        image=IMAGE_DIGEST,
         mount_target=str(mount),
     )
 
@@ -227,6 +277,83 @@ def test_direct_config_is_profile_driven_not_rest_config(tmp_path: Path) -> None
     ]
     assert direct["benchmark"]["datasets"][0]["case_ids"] == ["run_1"]
     assert direct["run"]["metrics_cache"]["enabled"] is False
+
+
+def test_infer_result_reuses_execution_contract_and_source_labels(
+    tmp_path: Path,
+) -> None:
+    evidence, _mount, profile = _build_evidence(tmp_path)
+    request = contract.read_json_object(evidence / "request.json")
+    rest_result = contract.read_json_object(evidence / "results.json")
+
+    validated = contract.validate_execution_result(
+        profile,
+        request,
+        source_label="infer",
+        run_id="infer-run",
+        workflow=profile["workflow_id"],
+        status="succeeded",
+        payload=rest_result["payload"],
+    )
+    assert validated["run_id"] == "infer-run"
+    assert validated["provider"]["commit"] == profile["provider"]["commit"]
+    mismatched_preset = copy.deepcopy(rest_result["payload"])
+    mismatched_preset["preset_sha256"] = "0" * 64
+    with pytest.raises(contract.ParityContractError, match="preset SHA-256"):
+        contract.validate_execution_result(
+            profile,
+            request,
+            source_label="infer",
+            run_id="infer-run",
+            workflow=profile["workflow_id"],
+            status="succeeded",
+            payload=mismatched_preset,
+        )
+    duplicate_payload = copy.deepcopy(rest_result["payload"])
+    duplicate_payload["case_digests"].append(
+        copy.deepcopy(duplicate_payload["case_digests"][0])
+    )
+    with pytest.raises(contract.ParityContractError, match="duplicate case digests"):
+        contract.validate_execution_result(
+            profile,
+            request,
+            source_label="infer",
+            run_id="infer-run",
+            workflow=profile["workflow_id"],
+            status="succeeded",
+            payload=duplicate_payload,
+        )
+
+    comparison = contract.compare_reports(
+        rest_report=_report(),
+        direct_report=_report(),
+        comparison=profile["comparison"],
+        rest_label="infer",
+        direct_label="physicsnemo_cfd",
+    )
+    assert comparison["status"] == "passed"
+    assert "infer_structure" in comparison
+    assert "physicsnemo_cfd_structure" in comparison
+    assert (
+        comparison["metrics"][0]["infer"] == comparison["metrics"][0]["physicsnemo_cfd"]
+    )
+
+
+def test_report_coverage_rejects_identically_incomplete_reports(
+    tmp_path: Path,
+) -> None:
+    evidence, _mount, profile = _build_evidence(tmp_path)
+    request = contract.read_json_object(evidence / "request.json")
+
+    assert contract.validate_report_coverage(profile, request, _report()) == 2
+    with pytest.raises(contract.ParityContractError, match="models"):
+        contract.validate_report_coverage(profile, request, [])
+
+    missing_metric = _report()
+    missing_metric[0]["metrics"] = {"unexpected": 1.0}
+    missing_metric[0]["per_case"][0]["metrics"] = {"unexpected": 1.0}
+    with pytest.raises(contract.ParityContractError, match="summary metrics"):
+        contract.validate_report_coverage(profile, request, missing_metric)
 
 
 def test_report_comparison_is_symmetric_and_structure_aware() -> None:
@@ -275,6 +402,30 @@ def test_report_comparison_supports_bounded_per_model_nondeterminism() -> None:
 
     assert result["status"] == "passed"
     assert all(metric["rtol"] == 0.001 for metric in result["metrics"])
+
+
+def test_report_comparison_maps_expanded_outputs_to_requested_metric() -> None:
+    rest = _report(1.0)
+    direct = _report(1.005)
+    for report in (rest, direct):
+        report[0]["metrics"] = {"drag_error": report[0]["metrics"].pop("l2_pressure")}
+        report[0]["per_case"][0]["metrics"] = {
+            "drag_error": report[0]["per_case"][0]["metrics"].pop("l2_pressure")
+        }
+
+    result = contract.compare_reports(
+        rest_report=rest,
+        direct_report=direct,
+        comparison={
+            "default_rtol": 0.0,
+            "default_atol": 0.0,
+            "metrics": {"drag": {"rtol": 0.01, "atol": 0.0}},
+        },
+        metric_outputs={"drag": ["drag_error"]},
+    )
+
+    assert result["status"] == "passed"
+    assert all(metric["rtol"] == 0.01 for metric in result["metrics"])
 
 
 def test_zero_baseline_relative_difference_is_json_null(tmp_path: Path) -> None:
@@ -329,7 +480,7 @@ def test_same_contract_builds_future_volume_direct_config(tmp_path: Path) -> Non
         evidence_dir=evidence,
         profile=surface_profile,
         parity_run_id="parity-1",
-        image="registry/image:tag",
+        image=IMAGE_DIGEST,
         mount_target=str(mount),
     )
     volume_profile = copy.deepcopy(surface_profile)
@@ -338,6 +489,10 @@ def test_same_contract_builds_future_volume_direct_config(tmp_path: Path) -> Non
     volume_profile["domain"] = "volume"
     volume_profile["request"]["models"] = ["domino_volume"]
     volume_profile["request"]["metrics"] = ["l2_pressure", "l2_velocity"]
+    volume_profile["report_metric_outputs"] = {
+        "l2_pressure": ["l2_pressure"],
+        "l2_velocity": ["l2_velocity"],
+    }
     volume_profile["runner"]["module"] = (
         "physicsnemo_cfd_runtime.volume_benchmark_runner"
     )
@@ -390,6 +545,10 @@ def test_full_surface_profile_covers_25_model_metric_tuples() -> None:
         * len(request["cases"])
         == 25
     )
+    scalar_outputs = sum(
+        len(outputs) for outputs in profile["report_metric_outputs"].values()
+    )
+    assert len(profile["request"]["models"]) * 2 * scalar_outputs == 110
     assert [model["name"] for model in profile["config"]["models"]] == request["models"]
     assert profile["rest"]["request_path"].endswith(
         "public_run_1_full_matrix_request.json"

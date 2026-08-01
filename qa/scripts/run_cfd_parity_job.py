@@ -26,6 +26,7 @@ from cfd_parity_contract import (
     sha256_file,
     validate_handoff,
     validate_profile,
+    validate_report_coverage,
     verify_staged_inputs,
     write_json_atomic,
 )
@@ -72,12 +73,22 @@ def _verify_provider(provider: Mapping[str, Any]) -> dict[str, str]:
         raise RuntimeError(
             f"Python version mismatch: {actual_python!r} != {expected_python!r}"
         )
+    expected_physicsnemo = provider.get("physicsnemo_version")
+    actual_physicsnemo = importlib.metadata.version("nvidia-physicsnemo")
+    if expected_physicsnemo is not None and actual_physicsnemo != str(
+        expected_physicsnemo
+    ):
+        raise RuntimeError(
+            "PhysicsNeMo version mismatch: "
+            f"{actual_physicsnemo!r} != {expected_physicsnemo!r}"
+        )
     return {
         "distribution": distribution_name,
         "module": module_name,
         "version": actual_version,
         "commit": actual_commit,
         "python_version": actual_python,
+        "physicsnemo_version": actual_physicsnemo,
     }
 
 
@@ -223,10 +234,21 @@ def run(args: argparse.Namespace) -> int:
             )
         rest_report = _load_json(rest_report_path)
         direct_report = _load_json(direct_report_path)
+        expected_metric_values = validate_report_coverage(
+            profile,
+            handoff["request"],
+            rest_report,
+        )
+        validate_report_coverage(
+            profile,
+            handoff["request"],
+            direct_report,
+        )
         comparison = compare_reports(
             rest_report=rest_report,
             direct_report=direct_report,
             comparison=profile["comparison"],
+            metric_outputs=profile["report_metric_outputs"],
         )
         comparison.update(
             {
@@ -234,6 +256,7 @@ def run(args: argparse.Namespace) -> int:
                 "rest_report_sha256": rest["report_sha256"],
                 "direct_report": str(direct_report_path),
                 "direct_report_sha256": sha256_file(direct_report_path),
+                "metric_values_per_report": expected_metric_values,
             }
         )
         comparison_path = work_dir / "comparison.json"

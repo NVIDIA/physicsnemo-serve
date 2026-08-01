@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "profile_id": "physicsnemo-cfd-surface-full-v1",
   "workflow_id": "physicsnemo-cfd-surface-benchmark",
   "domain": "surface",
@@ -13,6 +13,7 @@
     "physicsnemo_version": "2.1.1",
     "python_version": "3.12"
   },
+  "preset_sha256": "8a29d8fc4c9caa8a332224d07adea4c498a8bd9f06a2f94a928bdfbf40586a26",
   "rest": {
     "service": "rust",
     "suite": "cfd_e2e",
@@ -38,6 +39,29 @@
     "save_inference_mesh": false,
     "visual_case_ids": [],
     "case_id_pattern": "^run_(?P<case_number>[1-9][0-9]*)$"
+  },
+  "report_metric_outputs": {
+    "l2_pressure": [
+      "l2_pressure"
+    ],
+    "l2_shear_stress": [
+      "l2_shear_stress_wall_shear_stress_true_x_l2_error",
+      "l2_shear_stress_wall_shear_stress_true_y_l2_error",
+      "l2_shear_stress_wall_shear_stress_true_z_l2_error"
+    ],
+    "l2_pressure_area_weighted": [
+      "l2_pressure_area_weighted"
+    ],
+    "drag": [
+      "drag_error",
+      "drag_true",
+      "drag_pred"
+    ],
+    "lift": [
+      "lift_error",
+      "lift_true",
+      "lift_pred"
+    ]
   },
   "input_layout": [
     {

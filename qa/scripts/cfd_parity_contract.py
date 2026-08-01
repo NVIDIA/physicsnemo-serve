@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Shared contract for REST-to-direct PhysicsNeMo-CFD parity QA."""
+"""Shared contract for PhysicsNeMo-CFD wrapper-to-provider parity QA."""
 
 from __future__ import annotations
 
@@ -16,9 +16,17 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Mapping
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 JsonObject = dict[str, Any]
 MetricKey = tuple[str, str, str, str, str]
+PROVIDER_PROVENANCE_FIELDS = (
+    "repository",
+    "tag",
+    "version",
+    "commit",
+    "physicsnemo_version",
+    "python_version",
+)
 
 
 class ParityContractError(ValueError):
@@ -81,6 +89,23 @@ def _string(value: object, label: str) -> str:
     return value
 
 
+def _sha256(value: object, label: str) -> str:
+    digest = _string(value, label)
+    if re.fullmatch(r"[0-9a-fA-F]{64}", digest) is None:
+        raise ParityContractError(f"{label} must be a SHA-256 digest")
+    return digest.lower()
+
+
+def validate_image_digest_reference(value: object, label: str = "image") -> str:
+    image = _string(value, label)
+    if re.fullmatch(r"[^@\s]+@sha256:[0-9a-f]{64}", image) is None:
+        raise ParityContractError(
+            f"{label} must be an immutable image reference ending in "
+            "@sha256:<64 lowercase hex characters>"
+        )
+    return image
+
+
 def _number(value: object, label: str) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise ParityContractError(f"{label} must be a number")
@@ -97,8 +122,9 @@ def validate_profile(profile: Mapping[str, Any]) -> None:
         _string(profile.get(key), f"profile.{key}")
 
     provider = _mapping(profile.get("provider"), "profile.provider")
-    for key in ("distribution", "module", "version", "commit"):
+    for key in ("distribution", "module", *PROVIDER_PROVENANCE_FIELDS):
         _string(provider.get(key), f"profile.provider.{key}")
+    _sha256(profile.get("preset_sha256"), "profile.preset_sha256")
 
     rest = _mapping(profile.get("rest"), "profile.rest")
     for key in ("service", "suite", "evidence_subdir", "request_path"):
@@ -128,6 +154,25 @@ def validate_profile(profile: Mapping[str, Any]) -> None:
         raise ParityContractError(
             f"profile.request.case_id_pattern is invalid: {exc}"
         ) from exc
+    report_metric_outputs = _mapping(
+        profile.get("report_metric_outputs"),
+        "profile.report_metric_outputs",
+    )
+    if set(report_metric_outputs) != set(request["metrics"]):
+        raise ParityContractError(
+            "profile.report_metric_outputs must cover every requested metric exactly"
+        )
+    for metric, outputs in report_metric_outputs.items():
+        names = _list(outputs, f"profile.report_metric_outputs.{metric}")
+        if (
+            not names
+            or any(not isinstance(name, str) or not name for name in names)
+            or len(names) != len(set(names))
+        ):
+            raise ParityContractError(
+                f"profile.report_metric_outputs.{metric} must contain "
+                "unique non-empty strings"
+            )
 
     layout = _list(profile.get("input_layout"), "profile.input_layout")
     if not layout:
@@ -234,17 +279,17 @@ def validate_request(profile: Mapping[str, Any], request: Mapping[str, Any]) -> 
     ):
         if request.get(key) != expected.get(key):
             raise ParityContractError(
-                f"REST request {key!r} does not match parity profile: "
+                f"parity request {key!r} does not match parity profile: "
                 f"{request.get(key)!r} != {expected.get(key)!r}"
             )
-    cases = _list(request.get("cases"), "REST request cases")
+    cases = _list(request.get("cases"), "parity request cases")
     if not cases:
-        raise ParityContractError("REST request cases must not be empty")
+        raise ParityContractError("parity request cases must not be empty")
     pattern = re.compile(str(expected["case_id_pattern"]))
     seen: set[str] = set()
     for index, value in enumerate(cases):
-        case = _mapping(value, f"REST request cases[{index}]")
-        case_id = _string(case.get("case_id"), f"REST request cases[{index}].case_id")
+        case = _mapping(value, f"parity request cases[{index}]")
+        case_id = _string(case.get("case_id"), f"parity request cases[{index}].case_id")
         if pattern.fullmatch(case_id) is None:
             raise ParityContractError(
                 f"case_id {case_id!r} does not match {pattern.pattern!r}"
@@ -252,6 +297,31 @@ def validate_request(profile: Mapping[str, Any], request: Mapping[str, Any]) -> 
         if case_id in seen:
             raise ParityContractError(f"duplicate case_id {case_id!r}")
         seen.add(case_id)
+        for layout_index, layout_value in enumerate(
+            _list(profile.get("input_layout"), "profile.input_layout")
+        ):
+            entry = _mapping(
+                layout_value,
+                f"profile.input_layout[{layout_index}]",
+            )
+            digest_field = _string(
+                entry.get("digest_field"),
+                f"profile.input_layout[{layout_index}].digest_field",
+            )
+            size_field = _string(
+                entry.get("size_field"),
+                f"profile.input_layout[{layout_index}].size_field",
+            )
+            _sha256(
+                case.get(digest_field),
+                f"parity request cases[{index}].{digest_field}",
+            )
+            size = case.get(size_field)
+            if isinstance(size, bool) or not isinstance(size, int) or size <= 0:
+                raise ParityContractError(
+                    f"parity request cases[{index}].{size_field} "
+                    "must be a positive integer"
+                )
 
 
 def mount_relative_path(path: str, mount_target: str) -> str:
@@ -287,7 +357,7 @@ def resolve_existing_mount_path(mount_target: str, relative_path: str) -> Path:
     return candidate
 
 
-def _output_by_name(results: Mapping[str, Any], name: str) -> Mapping[str, Any]:
+def output_by_name(results: Mapping[str, Any], name: str) -> Mapping[str, Any]:
     execution = _mapping(results.get("execution"), "results.execution")
     outputs = _list(execution.get("outputs"), "results.execution.outputs")
     matches = [
@@ -302,9 +372,7 @@ def _output_by_name(results: Mapping[str, Any], name: str) -> Mapping[str, Any]:
     return matches[0]
 
 
-def _resolved_dataset_root(
-    resolved_config: Mapping[str, Any], dataset_name: str
-) -> str:
+def resolved_dataset_root(resolved_config: Mapping[str, Any], dataset_name: str) -> str:
     benchmark = _mapping(resolved_config.get("benchmark"), "resolved_config.benchmark")
     datasets = _list(benchmark.get("datasets"), "resolved_config.benchmark.datasets")
     matches = [
@@ -317,6 +385,144 @@ def _resolved_dataset_root(
             f"resolved config must contain one {dataset_name!r} dataset"
         )
     return _string(matches[0].get("root"), "resolved dataset root")
+
+
+def _validate_provenance(
+    profile: Mapping[str, Any],
+    request: Mapping[str, Any],
+    value: object,
+    *,
+    source: str,
+) -> JsonObject:
+    provenance = _mapping(value, f"{source} provenance")
+    provider = _mapping(
+        provenance.get("provider"),
+        f"{source} provenance.provider",
+    )
+    expected_provider = _mapping(profile.get("provider"), "profile.provider")
+    for key in PROVIDER_PROVENANCE_FIELDS:
+        if provider.get(key) != expected_provider.get(key):
+            raise ParityContractError(
+                f"{source} provider {key} does not match the parity profile"
+            )
+
+    preset_sha256 = _sha256(
+        provenance.get("preset_sha256"),
+        f"{source} provenance.preset_sha256",
+    )
+    expected_preset_sha256 = _sha256(
+        profile.get("preset_sha256"),
+        "profile.preset_sha256",
+    )
+    if preset_sha256 != expected_preset_sha256:
+        raise ParityContractError(
+            f"{source} preset SHA-256 does not match the parity profile"
+        )
+
+    expected_cases = [
+        _mapping(case, "parity request case")
+        for case in _list(request.get("cases"), "parity request cases")
+    ]
+    expected_case_ids = [str(case["case_id"]) for case in expected_cases]
+    case_digests = _list(
+        provenance.get("case_digests"),
+        f"{source} provenance.case_digests",
+    )
+    digests_by_case: dict[str, Mapping[str, Any]] = {}
+    for item in case_digests:
+        digest = _mapping(item, f"{source} provenance case digest")
+        case_id = _string(
+            digest.get("case_id"),
+            f"{source} provenance case digest case_id",
+        )
+        if case_id in digests_by_case:
+            raise ParityContractError(f"{source} contains duplicate case digests")
+        digests_by_case[case_id] = digest
+    if set(digests_by_case) != set(expected_case_ids):
+        raise ParityContractError(f"{source} case digests do not match request cases")
+
+    normalized_case_digests: list[JsonObject] = []
+    for case in expected_cases:
+        case_id = str(case["case_id"])
+        digest = digests_by_case[case_id]
+        normalized: JsonObject = {"case_id": case_id}
+        for key in ("size_bytes", "geometry_size_bytes"):
+            if key in case:
+                if digest.get(key) != case.get(key):
+                    raise ParityContractError(
+                        f"{source} case digest field {key} does not match the request"
+                    )
+                normalized[key] = digest[key]
+        for key in ("sha256", "geometry_sha256"):
+            if key in case:
+                actual = _sha256(
+                    digest.get(key),
+                    f"{source} case digest field {key}",
+                )
+                expected = _sha256(
+                    case.get(key),
+                    f"parity request case field {key}",
+                )
+                if actual != expected:
+                    raise ParityContractError(
+                        f"{source} case digest field {key} does not match the request"
+                    )
+                normalized[key] = actual
+        normalized_case_digests.append(normalized)
+    return {
+        "provider": dict(provider),
+        "preset_sha256": preset_sha256,
+        "case_digests": normalized_case_digests,
+    }
+
+
+def validate_execution_result(
+    profile: Mapping[str, Any],
+    request: Mapping[str, Any],
+    *,
+    source_label: str,
+    run_id: object,
+    workflow: object,
+    status: object,
+    payload: object,
+) -> JsonObject:
+    """Validate provenance and selections reported by one wrapper execution."""
+
+    validate_profile(profile)
+    validate_request(profile, request)
+    source = _string(source_label, "execution result source label")
+    result_run_id = _string(run_id, f"{source} result run_id")
+    if status != "succeeded":
+        raise ParityContractError(f"{source} execution did not succeed")
+    if workflow != profile.get("workflow_id"):
+        raise ParityContractError(
+            f"{source} workflow does not match the parity profile"
+        )
+
+    result_payload = _mapping(payload, f"{source} result payload")
+    expected_case_ids = [
+        _mapping(case, "parity request case")["case_id"]
+        for case in _list(request.get("cases"), "parity request cases")
+    ]
+    for key, expected in (
+        ("model_names", request["models"]),
+        ("case_ids", expected_case_ids),
+        ("selected_metrics", request["metrics"]),
+    ):
+        if result_payload.get(key) != expected:
+            raise ParityContractError(
+                f"{source} result {key} does not match the submitted request"
+            )
+    provenance = _validate_provenance(
+        profile,
+        request,
+        result_payload,
+        source=f"{source} result",
+    )
+    return {
+        "run_id": result_run_id,
+        **provenance,
+    }
 
 
 def build_handoff(
@@ -332,74 +538,19 @@ def build_handoff(
     request = read_json_object(evidence / "request.json")
     results = read_json_object(evidence / "results.json")
     resolved_config = read_json_object(evidence / "resolved_config.json")
-    validate_request(profile, request)
 
     execution = _mapping(results.get("execution"), "results.execution")
-    if execution.get("status") != "succeeded":
-        raise ParityContractError("REST execution did not succeed")
-    if execution.get("workflow") != profile.get("workflow_id"):
-        raise ParityContractError("REST workflow does not match parity profile")
-
-    payload = _mapping(results.get("payload"), "results.payload")
-    provider = _mapping(payload.get("provider"), "results.payload.provider")
-    expected_provider = _mapping(profile.get("provider"), "profile.provider")
-    for key in (
-        "repository",
-        "tag",
-        "version",
-        "commit",
-        "physicsnemo_version",
-        "python_version",
-    ):
-        if provider.get(key) != expected_provider.get(key):
-            raise ParityContractError(
-                f"REST provider {key} does not match parity profile"
-            )
-    expected_case_ids = [
-        _mapping(case, "REST request case")["case_id"]
-        for case in _list(request.get("cases"), "REST request cases")
-    ]
-    for key, expected in (
-        ("model_names", request["models"]),
-        ("case_ids", expected_case_ids),
-        ("selected_metrics", request["metrics"]),
-    ):
-        if payload.get(key) != expected:
-            raise ParityContractError(
-                f"REST result {key} does not match the submitted request"
-            )
-    preset_sha256 = payload.get("preset_sha256")
-    if (
-        not isinstance(preset_sha256, str)
-        or re.fullmatch(r"[0-9a-f]{64}", preset_sha256) is None
-    ):
-        raise ParityContractError("REST result has no valid preset SHA-256")
-    case_digests = _list(payload.get("case_digests"), "results.payload.case_digests")
-    digests_by_case = {
-        _string(
-            _mapping(item, "results payload case digest").get("case_id"),
-            "results payload case digest case_id",
-        ): _mapping(item, "results payload case digest")
-        for item in case_digests
-    }
-    if set(digests_by_case) != set(expected_case_ids):
-        raise ParityContractError("REST case digests do not match request cases")
-    for case_value in request["cases"]:
-        case = _mapping(case_value, "REST request case")
-        digest = digests_by_case[str(case["case_id"])]
-        for key in (
-            "sha256",
-            "size_bytes",
-            "geometry_sha256",
-            "geometry_size_bytes",
-        ):
-            if key in case and digest.get(key) != case.get(key):
-                raise ParityContractError(
-                    f"REST case digest field {key} does not match request"
-                )
-
-    report_output = _output_by_name(results, "benchmark_results.json")
-    config_output = _output_by_name(results, "resolved_config.json")
+    validated_result = validate_execution_result(
+        profile,
+        request,
+        source_label="REST",
+        run_id=execution.get("run_id"),
+        workflow=execution.get("workflow"),
+        status=execution.get("status"),
+        payload=results.get("payload"),
+    )
+    report_output = output_by_name(results, "benchmark_results.json")
+    config_output = output_by_name(results, "resolved_config.json")
     report_path = evidence / "benchmark_results.json"
     if not report_path.is_file():
         raise ParityContractError(f"missing downloaded REST report: {report_path}")
@@ -408,24 +559,23 @@ def build_handoff(
         _mapping(profile.get("config"), "profile.config").get("dataset"),
         "profile.config.dataset",
     )
-    input_root = _resolved_dataset_root(
+    input_root = resolved_dataset_root(
         resolved_config, _string(dataset.get("name"), "profile dataset name")
     )
-    rest_run_id = _string(execution.get("run_id"), "results.execution.run_id")
     handoff: JsonObject = {
         "schema_version": SCHEMA_VERSION,
         "parity_run_id": _string(parity_run_id, "parity run ID"),
         "profile_id": profile["profile_id"],
         "workflow_id": profile["workflow_id"],
         "domain": profile["domain"],
-        "image": _string(image, "image"),
+        "image": validate_image_digest_reference(image),
         "mount_target": _string(mount_target, "mount target"),
-        "rest_run_id": rest_run_id,
+        "rest_run_id": validated_result["run_id"],
         "request": request,
         "provenance": {
-            "provider": dict(provider),
-            "preset_sha256": preset_sha256,
-            "case_digests": case_digests,
+            "provider": validated_result["provider"],
+            "preset_sha256": validated_result["preset_sha256"],
+            "case_digests": validated_result["case_digests"],
         },
         "rest": {
             "input_root_relpath": mount_relative_path(input_root, mount_target),
@@ -454,16 +604,22 @@ def validate_handoff(profile: Mapping[str, Any], handoff: Mapping[str, Any]) -> 
         "profile_id",
         "workflow_id",
         "domain",
-        "image",
         "mount_target",
         "rest_run_id",
     ):
         _string(handoff.get(key), f"handoff.{key}")
+    validate_image_digest_reference(handoff.get("image"), "handoff.image")
     for key in ("profile_id", "workflow_id", "domain"):
         if handoff.get(key) != profile.get(key):
             raise ParityContractError(f"handoff {key} does not match profile")
     request = _mapping(handoff.get("request"), "handoff.request")
     validate_request(profile, request)
+    _validate_provenance(
+        profile,
+        request,
+        handoff.get("provenance"),
+        source="handoff",
+    )
     rest = _mapping(handoff.get("rest"), "handoff.rest")
     for key in (
         "input_root_relpath",
@@ -493,6 +649,23 @@ def build_direct_config(
 ) -> JsonObject:
     validate_handoff(profile, handoff)
     request = _mapping(handoff.get("request"), "handoff.request")
+    return build_direct_config_for_request(
+        profile,
+        request,
+        input_root=input_root,
+        output_dir=output_dir,
+    )
+
+
+def build_direct_config_for_request(
+    profile: Mapping[str, Any],
+    request: Mapping[str, Any],
+    *,
+    input_root: str | Path,
+    output_dir: str | Path,
+) -> JsonObject:
+    validate_profile(profile)
+    validate_request(profile, request)
     config = _mapping(profile.get("config"), "profile.config")
     run = copy.deepcopy(dict(_mapping(config.get("run"), "profile.config.run")))
     run.update(
@@ -552,6 +725,22 @@ def verify_staged_inputs(
     input_root: str | Path,
 ) -> list[JsonObject]:
     validate_handoff(profile, handoff)
+    request = _mapping(handoff.get("request"), "handoff.request")
+    return verify_staged_inputs_for_request(
+        profile,
+        request,
+        input_root=input_root,
+    )
+
+
+def verify_staged_inputs_for_request(
+    profile: Mapping[str, Any],
+    request: Mapping[str, Any],
+    *,
+    input_root: str | Path,
+) -> list[JsonObject]:
+    validate_profile(profile)
+    validate_request(profile, request)
     root = Path(input_root).resolve(strict=True)
     if not root.is_dir():
         raise ParityContractError(f"input root is not a directory: {root}")
@@ -560,9 +749,9 @@ def verify_staged_inputs(
     )
     layout = _list(profile.get("input_layout"), "profile.input_layout")
     verified: list[JsonObject] = []
-    for case_value in _list(handoff["request"]["cases"], "handoff request cases"):
-        case = _mapping(case_value, "handoff request case")
-        case_id = _string(case.get("case_id"), "handoff request case_id")
+    for case_value in _list(request["cases"], "parity request cases"):
+        case = _mapping(case_value, "parity request case")
+        case_id = _string(case.get("case_id"), "parity request case_id")
         match = pattern.fullmatch(case_id)
         if match is None:
             raise ParityContractError(f"invalid case_id {case_id!r}")
@@ -600,12 +789,10 @@ def verify_staged_inputs(
                 raise ParityContractError(
                     f"size mismatch for {path}: {actual_size} != {expected_size}"
                 )
-            expected_digest = case.get(entry["digest_field"])
-            if (
-                not isinstance(expected_digest, str)
-                or re.fullmatch(r"[0-9a-f]{64}", expected_digest) is None
-            ):
-                raise ParityContractError(f"invalid expected SHA-256 for {case_id}")
+            expected_digest = _sha256(
+                case.get(entry["digest_field"]),
+                f"expected SHA-256 for {case_id}",
+            )
             actual_digest = sha256_file(path)
             if actual_digest != expected_digest:
                 raise ParityContractError(
@@ -727,35 +914,157 @@ def normalize_report(report: object) -> tuple[list[JsonObject], dict[MetricKey, 
     return structure, values
 
 
+def validate_report_coverage(
+    profile: Mapping[str, Any],
+    request: Mapping[str, Any],
+    report: object,
+) -> int:
+    """Require the report to cover every configured model, case, and metric."""
+
+    validate_profile(profile)
+    validate_request(profile, request)
+    structure, values = normalize_report(report)
+    expected_models = list(request["models"])
+    expected_case_ids = [
+        _mapping(case, "parity request case")["case_id"]
+        for case in _list(request.get("cases"), "parity request cases")
+    ]
+    config = _mapping(profile.get("config"), "profile.config")
+    dataset = _mapping(config.get("dataset"), "profile.config.dataset")
+    expected_dataset = _string(dataset.get("name"), "profile dataset name")
+    metric_outputs = _mapping(
+        profile.get("report_metric_outputs"),
+        "profile.report_metric_outputs",
+    )
+    expected_metric_keys = sorted(
+        {
+            name
+            for requested_metric in request["metrics"]
+            for name in _list(
+                metric_outputs[requested_metric],
+                f"profile.report_metric_outputs.{requested_metric}",
+            )
+        }
+    )
+    rows_by_model = {str(row["model"]): row for row in structure}
+    if set(rows_by_model) != set(expected_models):
+        raise ParityContractError(
+            "benchmark report models do not match the parity request"
+        )
+    for model in expected_models:
+        row = rows_by_model[model]
+        if row["dataset"] != expected_dataset:
+            raise ParityContractError(
+                f"benchmark report dataset for {model} does not match "
+                f"{expected_dataset!r}"
+            )
+        if row["cases"] != expected_case_ids:
+            raise ParityContractError(
+                f"benchmark report cases for {model} do not match the parity request"
+            )
+        if row["summary_metric_keys"] != expected_metric_keys:
+            raise ParityContractError(
+                f"benchmark summary metrics for {model} do not match the profile"
+            )
+        per_case = {
+            str(case["case_id"]): case
+            for case in _list(row["per_case"], "normalized report per_case")
+        }
+        if set(per_case) != set(expected_case_ids):
+            raise ParityContractError(
+                f"benchmark per-case IDs for {model} do not match the parity request"
+            )
+        for case_id in expected_case_ids:
+            if per_case[case_id]["metric_keys"] != expected_metric_keys:
+                raise ParityContractError(
+                    f"benchmark metrics for {model}/{case_id} do not match the profile"
+                )
+
+    expected_value_count = (
+        len(expected_models) * (1 + len(expected_case_ids)) * len(expected_metric_keys)
+    )
+    if len(values) != expected_value_count:
+        raise ParityContractError(
+            "benchmark report scalar metric count does not match the profile: "
+            f"{len(values)} != {expected_value_count}"
+        )
+    return expected_value_count
+
+
 def compare_reports(
     *,
     rest_report: object,
     direct_report: object,
     comparison: Mapping[str, Any],
+    rest_label: str = "rest",
+    direct_label: str = "direct",
+    metric_outputs: Mapping[str, Any] | None = None,
 ) -> JsonObject:
+    for value, name in (
+        (rest_label, "rest_label"),
+        (direct_label, "direct_label"),
+    ):
+        if (
+            not isinstance(value, str)
+            or re.fullmatch(r"[a-z][a-z0-9_]*", value) is None
+        ):
+            raise ParityContractError(
+                f"{name} must be a lowercase JSON field identifier"
+            )
+    if rest_label == direct_label:
+        raise ParityContractError("report comparison labels must be distinct")
+    rest_display = "REST" if rest_label == "rest" else rest_label.replace("_", "-")
+    direct_display = direct_label.replace("_", "-")
+
     rest_structure, rest_values = normalize_report(rest_report)
     direct_structure, direct_values = normalize_report(direct_report)
     errors: list[str] = []
     if rest_structure != direct_structure:
-        errors.append("REST and direct report structures differ")
+        errors.append(f"{rest_display} and {direct_display} report structures differ")
 
     rest_keys = set(rest_values)
     direct_keys = set(direct_values)
     if missing := sorted(rest_keys - direct_keys):
-        errors.append(f"direct report is missing {len(missing)} metric value(s)")
+        errors.append(
+            f"{direct_display} report is missing {len(missing)} metric value(s)"
+        )
     if extra := sorted(direct_keys - rest_keys):
-        errors.append(f"direct report has {len(extra)} unexpected metric value(s)")
+        errors.append(
+            f"{direct_display} report has {len(extra)} unexpected metric value(s)"
+        )
 
     default_rtol = _number(comparison.get("default_rtol"), "comparison.default_rtol")
     default_atol = _number(comparison.get("default_atol"), "comparison.default_atol")
     overrides = _mapping(comparison.get("metrics", {}), "comparison.metrics")
     model_overrides = _mapping(comparison.get("models", {}), "comparison.models")
+    output_metric_owners: dict[str, str] = {}
+    for requested_metric, output_names in _mapping(
+        metric_outputs or {},
+        "metric_outputs",
+    ).items():
+        requested_name = _string(requested_metric, "requested metric name")
+        for output_name_value in _list(
+            output_names,
+            f"metric_outputs.{requested_name}",
+        ):
+            output_name = _string(
+                output_name_value,
+                f"metric_outputs.{requested_name} output",
+            )
+            prior = output_metric_owners.setdefault(output_name, requested_name)
+            if prior != requested_name:
+                raise ParityContractError(
+                    f"report metric {output_name!r} belongs to multiple "
+                    "requested metrics"
+                )
     metric_results: list[JsonObject] = []
     for key in sorted(rest_keys & direct_keys):
         model, dataset, scope, case_id, metric = key
         root_metric = metric.split(".", 1)[0]
+        requested_metric = output_metric_owners.get(root_metric, root_metric)
         metric_override = _mapping(
-            overrides.get(root_metric, {}), f"comparison metric {root_metric}"
+            overrides.get(requested_metric, {}),
+            f"comparison metric {requested_metric}",
         )
         model_override = _mapping(
             model_overrides.get(model, {}), f"comparison model {model}"
@@ -765,7 +1074,10 @@ def compare_reports(
             f"comparison model {model} metrics",
         )
         model_metric_override = _mapping(
-            model_metric_overrides.get(root_metric, {}),
+            model_metric_overrides.get(
+                root_metric,
+                model_metric_overrides.get(requested_metric, {}),
+            ),
             f"comparison model {model} metric {root_metric}",
         )
         rtol = _number(
@@ -820,8 +1132,8 @@ def compare_reports(
                 "scope": scope,
                 "case_id": case_id or None,
                 "metric": metric,
-                "rest": rest_value,
-                "direct": direct_value,
+                rest_label: rest_value,
+                direct_label: direct_value,
                 "absolute_difference": absolute_difference,
                 "relative_difference": relative_difference,
                 "rtol": rtol,
@@ -832,7 +1144,7 @@ def compare_reports(
     return {
         "status": "passed" if not errors else "failed",
         "errors": errors,
-        "rest_structure": rest_structure,
-        "direct_structure": direct_structure,
+        f"{rest_label}_structure": rest_structure,
+        f"{direct_label}_structure": direct_structure,
         "metrics": metric_results,
     }

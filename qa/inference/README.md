@@ -90,20 +90,23 @@ writable persistent `/outputs`, and outbound Hugging Face access.
 
 The opt-in parity orchestrator first runs `cfd_e2e` through REST and persists a
 versioned handoff containing mount-relative input and report paths plus their
-digests. After the endpoint is torn down, it starts one same-image Lepton batch
-job. The job re-verifies the staged inputs, builds the checked-in provider
-configuration independently of the plugin's resolved config, invokes
-PhysicsNeMo-CFD directly, and compares the report structures and finite metric
-values symmetrically.
+digests. The profile anchors the canonical plugin preset SHA-256, and handoff
+validation rechecks provider, preset, and case-digest provenance. After the
+endpoint is torn down, it starts one same-image Lepton batch job. The job
+re-verifies the staged inputs, builds the checked-in provider configuration
+independently of the plugin's resolved config, invokes PhysicsNeMo-CFD directly,
+and compares the report structures and finite metric values symmetrically.
 
 ```bash
 python -u qa/scripts/run_lepton_cfd_parity.py \
-  --image-tag <already-pushed-tag>
+  --image-tag <registry>/<image>@sha256:<digest>
 ```
 
 The endpoint and batch job run sequentially, so peak allocation remains one
-H100. Local evidence is under `qa/artifacts/cfd-parity/<run-id>` and remote
-evidence is under `/outputs/cfd-parity/<run-id>`. The default profile is
+H100. Parity requires an immutable image digest so the endpoint and follow-up
+batch job cannot resolve a mutable tag to different images. Local evidence is
+under `qa/artifacts/cfd-parity/<run-id>` and remote evidence is under
+`/outputs/cfd-parity/<run-id>`. The default profile is
 `cfd_parity_surface_run1.json`; future surface or volume coverage is added by
 supplying another profile with its REST suite, direct runner module, input
 layout, provider config, and per-metric tolerances.
@@ -118,7 +121,7 @@ Add the pinned `run_11` case without duplicating the model profile:
 
 ```bash
 python -u qa/scripts/run_lepton_cfd_parity.py \
-  --image-tag <already-pushed-tag> \
+  --image-tag <registry>/<image>@sha256:<digest> \
   --profile qa/inference/cfd_parity_surface_run1_full_matrix.json \
   --rest-request-path plugins/physicsnemo-cfd-surface-benchmark/examples/public_run_1_11_full_matrix_request.json
 ```
@@ -130,6 +133,35 @@ Pass `--rest-evidence-dir <completed-cfd-e2e-run>` to reuse a completed REST
 run and launch only the direct comparison job. The handoff stores no tokens and
 uses only mount-relative paths; the job rechecks report and input digests before
 execution.
+
+### Direct CLI parity
+
+The same orchestrator can compare `physicsnemo-serve infer` with the original
+PhysicsNeMo-CFD benchmark runner. Both executions run sequentially in one CLI
+runtime image and reuse the staged, digest-verified inputs. The test validates
+the CLI result envelope and provider provenance, then compares the structure
+and finite values in `benchmark_results.json` with the profile tolerances.
+
+```bash
+python -u qa/scripts/run_lepton_cfd_parity.py \
+  --candidate infer \
+  --image-tag <registry>/physicsnemo-serve-cmd@sha256:<digest>
+```
+
+Use the existing full-matrix profile and request override to cover both
+`run_1` and `run_11`:
+
+```bash
+python -u qa/scripts/run_lepton_cfd_parity.py \
+  --candidate infer \
+  --image-tag <registry>/physicsnemo-serve-cmd@sha256:<digest> \
+  --profile qa/inference/cfd_parity_surface_run1_full_matrix.json \
+  --request-path plugins/physicsnemo-cfd-surface-benchmark/examples/public_run_1_11_full_matrix_request.json
+```
+
+The infer candidate job defaults to a 13-hour overall timeout because it runs
+the wrapper and baseline benchmarks sequentially. Its local and remote evidence
+uses the same `cfd-parity/<run-id>` locations as REST parity.
 
 ## Multi-GPU CI/CD Check
 

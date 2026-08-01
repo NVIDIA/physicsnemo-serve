@@ -15,6 +15,8 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS_DIR = REPO_ROOT / "qa" / "scripts"
 PROFILE_PATH = REPO_ROOT / "qa" / "inference" / "cfd_parity_surface_run1.json"
+IMAGE_DIGEST = "registry/image@sha256:" + ("d" * 64)
+INFER_IMAGE_DIGEST = "registry/physicsnemo-serve-cmd@sha256:" + ("e" * 64)
 sys.path.insert(0, str(SCRIPTS_DIR))
 
 import cfd_parity_contract as contract  # noqa: E402
@@ -113,7 +115,7 @@ def _evidence(tmp_path: Path) -> Path:
                 "model_names": request["models"],
                 "case_ids": ["run_1"],
                 "selected_metrics": request["metrics"],
-                "preset_sha256": "c" * 64,
+                "preset_sha256": profile["preset_sha256"],
                 "case_digests": [
                     {
                         key: request["cases"][0][key]
@@ -134,11 +136,21 @@ def _evidence(tmp_path: Path) -> Path:
 
 def _args(tmp_path: Path, evidence: Path) -> argparse.Namespace:
     return argparse.Namespace(
-        image_tag="registry/image:tag",
+        image_tag=IMAGE_DIGEST,
         image_name="ignored",
+        infer_image_name="registry/physicsnemo-serve-cmd",
+        candidate="rest",
         profile=str(PROFILE_PATH),
         rest_request_path=None,
         rest_evidence_dir=str(evidence),
+        infer_binary="/usr/local/bin/physicsnemo-serve",
+        infer_runtime_dir="/opt/physicsnemo-serve/runtimes/shared",
+        infer_plugin=(
+            "/opt/physicsnemo-serve/plugins/physicsnemo-cfd-surface-benchmark"
+        ),
+        device="0",
+        infer_timeout=60,
+        download_timeout=60,
         run_id="parity-test",
         artifact_dir=str(tmp_path / "artifacts"),
         workspace_id="workspace",
@@ -205,7 +217,7 @@ def test_rest_qa_uses_request_path_override(tmp_path: Path, monkeypatch) -> None
         orchestrator.run_rest_qa(
             args,
             profile=profile,
-            image="registry/image:tag",
+            image=IMAGE_DIGEST,
             artifact_dir=artifact_dir,
             env={},
         )
@@ -228,7 +240,48 @@ def test_remote_command_creates_fresh_root_and_uses_profile_runner() -> None:
     assert "test ! -e /outputs/cfd-parity/abc123" in command
     assert "/opt/physicsnemo-cfd-venv/bin/python" in command
     assert "run_cfd_parity_job.py" in command
+    assert command.startswith("set -euo pipefail;")
     assert "PIPESTATUS[0]" in command
+
+
+def test_infer_dry_run_injects_cli_candidate_job(tmp_path: Path) -> None:
+    evidence = _evidence(tmp_path)
+    args = _args(tmp_path, evidence)
+    args.candidate = "infer"
+    args.rest_evidence_dir = None
+    args.image_tag = INFER_IMAGE_DIGEST
+
+    assert orchestrator.run(args) == 0
+
+    run_dir = tmp_path / "artifacts" / "cfd-parity" / "parity-test"
+    summary = contract.read_json_object(run_dir / "summary.json")
+    assert summary["candidate"] == "infer"
+    assert summary["final_result"] == "dry-run"
+    assert summary["job"]["name"].startswith("pn-cfd-infer-parity")
+    assert summary["job"]["timeout_seconds"] == 60
+    assert (run_dir / "request.json").is_file()
+
+    profile_text = PROFILE_PATH.read_text(encoding="utf-8")
+    command = orchestrator.build_infer_remote_command(
+        profile_text=profile_text,
+        request_text=(run_dir / "request.json").read_text(encoding="utf-8"),
+        mount_target="/outputs",
+        run_id="abc123",
+        image=INFER_IMAGE_DIGEST,
+        infer_binary="/usr/local/bin/physicsnemo-serve",
+        infer_runtime_dir="/opt/physicsnemo-serve/runtimes/shared",
+        infer_plugin=(
+            "/opt/physicsnemo-serve/plugins/physicsnemo-cfd-surface-benchmark"
+        ),
+        device="0",
+        infer_timeout_seconds=60,
+        download_timeout_seconds=60,
+    )
+    assert "run_cfd_infer_parity_job.py" in command
+    assert command.startswith("set -euo pipefail;")
+    assert "/opt/physicsnemo-serve/runtimes/shared/bin/python" in command
+    assert "/usr/local/bin/physicsnemo-serve" in command
+    assert "--infer-run-id infer-abc123" in command
 
 
 def test_run_ids_are_path_safe_and_long_job_names_keep_unique_suffixes() -> None:
@@ -246,6 +299,19 @@ def test_run_ids_are_path_safe_and_long_job_names_keep_unique_suffixes() -> None
     assert len(first) <= 36
     assert len(second) <= 36
     assert first != second
+
+
+def test_parity_requires_an_immutable_image_reference() -> None:
+    bare_digest = "sha256:" + ("f" * 64)
+    assert (
+        orchestrator.image_full_reference(bare_digest, "registry/image")
+        == f"registry/image@{bare_digest}"
+    )
+    assert orchestrator.image_full_reference(IMAGE_DIGEST, "ignored") == IMAGE_DIGEST
+
+    for mutable in ("latest", "registry/image:latest"):
+        with pytest.raises(contract.ParityContractError, match="immutable image"):
+            orchestrator.image_full_reference(mutable, "registry/image")
 
 
 def test_discover_rest_evidence_requires_exactly_one_run(tmp_path: Path) -> None:
@@ -326,7 +392,7 @@ def test_reader_job_fetches_remote_summary_and_cleans_up(
 
     result = orchestrator.fetch_summary_via_reader_job(
         args,
-        image="registry/image:tag",
+        image=IMAGE_DIGEST,
         nfs_path="/shared/user",
         run_id="run-1",
         env={},

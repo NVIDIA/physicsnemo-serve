@@ -248,6 +248,7 @@ fn artifact(name: &str, storage_path: &str, size_bytes: u64) -> MaterializedArti
         size_bytes,
         media_type: Some("application/octet-stream".to_string()),
         sha256: None,
+        downloaded: false,
     }
 }
 
@@ -600,6 +601,7 @@ async fn fail_open_mode_preserves_legacy_failure_in_mixed_verified_plan() {
             size_bytes: 4,
             media_type: None,
             sha256: Some(expected_sha256.to_string()),
+            downloaded: true,
         }],
     }));
     let role = PrefetchRole::from_env(&env_with_fail_closed(false), Some(mat))

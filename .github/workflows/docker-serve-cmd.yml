@@ -1,0 +1,94 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: PhysicsNeMo Serve CLI Docker
+
+on:
+  push:
+    branches:
+      - main
+      - "pull-request/[0-9]+"
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build & Push CLI Runtime Image
+    runs-on: linux-amd64-cpu16
+    timeout-minutes: 120
+    env:
+      IMAGE: ${{ format('{0}/{1}/physicsnemo-serve-cmd', vars.NGC_REGISTRY, secrets.NGC_ORG) }}
+      BUILDER_NAME: physicsnemo-serve-cmd-${{ github.run_id }}-${{ github.run_attempt }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve image tag
+        id: tag
+        run: |
+          set -euo pipefail
+
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            TAG="${GITHUB_REF#refs/tags/}"
+          elif [[ "$GITHUB_REF" == refs/heads/pull-request/* ]]; then
+            PR_NUMBER="${GITHUB_REF#refs/heads/pull-request/}"
+            TAG="pr-${PR_NUMBER}-$(git rev-parse --short HEAD)"
+          else
+            TAG="sha-$(git rev-parse --short HEAD)"
+          fi
+
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to NGC registry
+        env:
+          NGC_PASSWORD: ${{ secrets.NGC_REGISTRY_PASSWORD }}
+        run: |
+          echo "$NGC_PASSWORD" \
+            | docker login "${{ vars.NGC_REGISTRY }}" \
+                --username '$oauthtoken' \
+                --password-stdin
+
+      - name: Set up Docker Buildx
+        run: docker buildx create --use --name "$BUILDER_NAME"
+
+      # The shared CFD runtime pins torch-scatter==2.1.2, which currently has
+      # no Linux arm64 wheel. Keep the published image on amd64 until that
+      # dependency can resolve without an unsupported source build.
+      - name: Build and push Linux amd64 image
+        run: |
+          docker buildx build \
+            --platform linux/amd64 \
+            --file Dockerfile.physicsnemo-serve-cmd \
+            --tag "${IMAGE}:${{ steps.tag.outputs.tag }}" \
+            --tag "${IMAGE}:buildcache" \
+            --cache-from "type=registry,ref=${IMAGE}:buildcache" \
+            --cache-to type=inline \
+            --provenance=false \
+            --push \
+            .
+
+      - name: Verify pushed image
+        run: |
+          docker buildx imagetools inspect "${IMAGE}:${{ steps.tag.outputs.tag }}"
+
+      - name: Publish workflow summary
+        run: |
+          {
+            echo "## PhysicsNeMo Serve CLI image"
+            echo
+            echo "- Image: \`${IMAGE}:${{ steps.tag.outputs.tag }}\`"
+            echo "- Platform: \`linux/amd64\`"
+            echo "- Shared Earth2Studio/CFD runtime: \`/opt/physicsnemo-serve/runtimes/shared\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Remove Buildx builder
+        if: always()
+        run: docker buildx rm "$BUILDER_NAME" || true

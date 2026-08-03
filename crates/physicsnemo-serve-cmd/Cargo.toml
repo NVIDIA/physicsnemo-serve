@@ -1,0 +1,37 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "physicsnemo-serve-cmd"
+version = "0.1.0"
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Self-contained direct PhysicsNeMo inference CLI for manifest-driven plugins"
+readme = "README.md"
+
+[[bin]]
+name = "physicsnemo-serve"
+path = "src/main.rs"
+
+[[bin]]
+name = "physicsnemo-serve-install"
+path = "src/runtime_installer_main.rs"
+
+[dependencies]
+anyhow.workspace = true
+dirs = "6.0.0"
+flate2 = "1"
+fs2 = "0.4"
+libc = "0.2"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls-native-roots"] }
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml = "0.9"
+sha2 = "0.11.0"
+tar = "0.4.46"
+tempfile = "3"
+tokio.workspace = true
+tracing-subscriber.workspace = true
+worker-runtime = { path = "../worker-runtime" }
+zstd = "0.13.3"

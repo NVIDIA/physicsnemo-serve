@@ -27,6 +27,16 @@ def _load_runtime_env_launcher():
     return module
 
 
+def test_rust_builder_installs_native_build_dependencies() -> None:
+    dockerfile = DOCKERFILE.read_text(encoding="utf-8")
+    builder = dockerfile.split("FROM chef AS builder", maxsplit=1)[1].split(
+        "FROM --platform=${PHYSICSNEMO_SERVE_PLATFORM}", maxsplit=1
+    )[0]
+
+    assert "cmake" in builder
+    assert "libssl-dev" in builder
+
+
 def test_cfd_image_uses_pinned_isolated_runtime_and_packages_plugins() -> None:
     dockerfile = DOCKERFILE.read_text(encoding="utf-8")
 

@@ -29,6 +29,19 @@ pub use self::download::{DownloadStats, MaterializationResult, MaterializedArtif
 pub use self::materializer::PlanMaterializer;
 pub use self::plan::{ByteRange, PrefetchPlanItem};
 
+/// Materialize a plugin prefetch plan without queue or role infrastructure.
+///
+/// This queue-independent boundary is used by one-shot direct inference.
+pub async fn materialize_prefetch_plan(
+    plan: &[PrefetchPlanItem],
+    cache_root: &std::path::Path,
+    run_id: &str,
+) -> Result<MaterializationResult> {
+    HttpPlanMaterializer::new(PrefetchConfig::from_env())
+        .materialize(plan, cache_root, run_id)
+        .await
+}
+
 #[derive(Debug, Clone, Deserialize)]
 struct PrefetchPayload {
     workflow_id: String,

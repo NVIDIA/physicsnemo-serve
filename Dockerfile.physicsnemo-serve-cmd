@@ -1,0 +1,155 @@
+# The shared CFD runtime currently supports only linux/amd64 because its
+# torch-scatter dependency has no Linux arm64 wheel. Build with:
+#   docker buildx build --platform linux/amd64 --load \
+#     -f Dockerfile.physicsnemo-serve-cmd \
+#     -t physicsnemo-serve-cmd:latest .
+#
+# Earth2Studio and PhysicsNeMo CFD share one CUDA 13 runtime. All plugin
+# definitions are copied into the image.
+
+ARG PHYSICSNEMO_SERVE_UBUNTU_IMAGE=nvcr.io/nvidia/base/ubuntu:jammy-20260217
+
+FROM ${PHYSICSNEMO_SERVE_UBUNTU_IMAGE} AS rust-builder
+
+ARG DEBIAN_FRONTEND=noninteractive
+ARG RUSTUP_VERSION=1.28.2
+ARG TARGETARCH
+
+ENV RUSTUP_X86_64_SHA256="20a06e644b0d9bd2fbdbfd52d42540bdde820ea7df86e92e533c073da0cdd43c"
+
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends \
+        build-essential \
+        ca-certificates \
+        cmake \
+        curl \
+        pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV PATH="/root/.cargo/bin:${PATH}"
+
+RUN case "${TARGETARCH}" in \
+        amd64) rustup_target="x86_64-unknown-linux-gnu" ;; \
+        *) echo "unsupported target architecture: ${TARGETARCH}; this image currently supports only amd64" >&2; exit 1 ;; \
+        esac \
+    && rustup_url="https://static.rust-lang.org/rustup/archive/${RUSTUP_VERSION}/${rustup_target}/rustup-init" \
+    && curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error \
+        --output /tmp/rustup-init "${rustup_url}" \
+    && actual_sha256="$(sha256sum /tmp/rustup-init | awk '{ print $1 }')" \
+    && test "${actual_sha256}" = "${RUSTUP_X86_64_SHA256}" \
+    && chmod +x /tmp/rustup-init \
+    && /tmp/rustup-init -y --profile minimal --default-toolchain 1.94.1 \
+    && rm -f /tmp/rustup-init
+
+WORKDIR /src/physicsnemo-serve
+COPY . .
+
+RUN cargo build --locked --release \
+        --package physicsnemo-serve-cmd \
+        --bin physicsnemo-serve \
+        --bin physicsnemo-serve-install
+
+
+FROM ${PHYSICSNEMO_SERVE_UBUNTU_IMAGE} AS runtime-builder
+
+ARG DEBIAN_FRONTEND=noninteractive
+ARG PHYSICSNEMO_SERVE_PYTHON=3.12
+ARG PHYSICSNEMO_SERVE_RUNTIME_NAME=shared
+ARG PHYSICSNEMO_SERVE_TORCH_BACKEND=cu130
+ARG PHYSICSNEMO_SERVE_E2S_PLUGIN=e2s-deterministic
+ARG PHYSICSNEMO_SERVE_CFD_PLUGIN=physicsnemo-cfd-surface-benchmark
+ARG PHYSICSNEMO_SERVE_SHARED_REQUIREMENTS=packaging/physicsnemo-serve-cmd/external-runtime/requirements-shared.lock
+ARG UV_VERSION=0.11.16
+ARG TARGETARCH
+
+ENV UV_PYTHON_INSTALL_DIR="/opt/physicsnemo-serve/uv-python" \
+    UV_X86_64_SHA256="74947fe2c03315cf07e82ab3acc703eddef01aba4d5232a98e4c6825ec116131"
+
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends \
+        build-essential \
+        ca-certificates \
+        curl \
+        git \
+        ninja-build \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN case "${TARGETARCH}" in \
+        amd64) uv_target="x86_64-unknown-linux-gnu" ;; \
+        *) echo "unsupported target architecture: ${TARGETARCH}; this image currently supports only amd64" >&2; exit 1 ;; \
+        esac \
+    && uv_asset="uv-${uv_target}.tar.gz" \
+    && uv_url="https://releases.astral.sh/github/uv/releases/download/${UV_VERSION}/${uv_asset}" \
+    && curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error \
+        --output "/tmp/${uv_asset}" "${uv_url}" \
+    && actual_sha256="$(sha256sum "/tmp/${uv_asset}" | awk '{ print $1 }')" \
+    && test "${actual_sha256}" = "${UV_X86_64_SHA256}" \
+    && tar --extract --gzip --file "/tmp/${uv_asset}" \
+        --directory /usr/local/bin --strip-components=1 \
+        "${uv_asset%.tar.gz}/uv" \
+    && test "$(uv --version | awk '{ print $2 }')" = "${UV_VERSION}" \
+    && rm -f "/tmp/${uv_asset}"
+
+COPY --from=rust-builder \
+    /src/physicsnemo-serve/target/release/physicsnemo-serve-install \
+    /usr/local/bin/physicsnemo-serve-install
+COPY plugins /opt/physicsnemo-serve/plugins
+COPY packaging/physicsnemo-serve-cmd /opt/physicsnemo-serve/packaging/physicsnemo-serve-cmd
+
+RUN --mount=type=cache,target=/root/.cache/uv \
+    test -f "/opt/physicsnemo-serve/plugins/${PHYSICSNEMO_SERVE_E2S_PLUGIN}/plugin.yaml" \
+    && test -f "/opt/physicsnemo-serve/plugins/${PHYSICSNEMO_SERVE_CFD_PLUGIN}/plugin.yaml" \
+    && test -f "/opt/physicsnemo-serve/${PHYSICSNEMO_SERVE_SHARED_REQUIREMENTS}" \
+    && physicsnemo-serve-install \
+        --plugin "/opt/physicsnemo-serve/plugins/${PHYSICSNEMO_SERVE_E2S_PLUGIN}" \
+        --plugin "/opt/physicsnemo-serve/plugins/${PHYSICSNEMO_SERVE_CFD_PLUGIN}" \
+        --requirements "/opt/physicsnemo-serve/${PHYSICSNEMO_SERVE_SHARED_REQUIREMENTS}" \
+        --runtime-dir "/opt/physicsnemo-serve/runtimes/${PHYSICSNEMO_SERVE_RUNTIME_NAME}" \
+        --python "${PHYSICSNEMO_SERVE_PYTHON}" \
+        --torch-backend "${PHYSICSNEMO_SERVE_TORCH_BACKEND}"
+
+
+FROM ${PHYSICSNEMO_SERVE_UBUNTU_IMAGE}
+
+ARG DEBIAN_FRONTEND=noninteractive
+ARG PHYSICSNEMO_SERVE_RUNTIME_NAME=shared
+ARG PHYSICSNEMO_SERVE_E2S_PLUGIN=e2s-deterministic
+ARG PHYSICSNEMO_SERVE_CFD_PLUGIN=physicsnemo-cfd-surface-benchmark
+
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends \
+        ca-certificates \
+        dumb-init \
+        libgomp1 \
+        libgl1 \
+        libglib2.0-0 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=rust-builder \
+    /src/physicsnemo-serve/target/release/physicsnemo-serve \
+    /usr/local/bin/physicsnemo-serve
+COPY --from=rust-builder \
+    /src/physicsnemo-serve/target/release/physicsnemo-serve-install \
+    /usr/local/bin/physicsnemo-serve-install
+COPY --from=runtime-builder /usr/local/bin/uv /usr/local/bin/uv
+COPY --from=runtime-builder /opt/physicsnemo-serve /opt/physicsnemo-serve
+
+ENV PHYSICSNEMO_SERVE_PLUGIN_ROOT="/opt/physicsnemo-serve/plugins/${PHYSICSNEMO_SERVE_E2S_PLUGIN}" \
+    PHYSICSNEMO_SERVE_RUNTIME_DIR="/opt/physicsnemo-serve/runtimes/${PHYSICSNEMO_SERVE_RUNTIME_NAME}" \
+    PHYSICSNEMO_SERVE_E2S_RUNTIME_DIR="/opt/physicsnemo-serve/runtimes/${PHYSICSNEMO_SERVE_RUNTIME_NAME}" \
+    PHYSICSNEMO_SERVE_CFD_RUNTIME_DIR="/opt/physicsnemo-serve/runtimes/${PHYSICSNEMO_SERVE_RUNTIME_NAME}" \
+    PHYSICSNEMO_SERVE_E2S_ZARR_BACKEND="python" \
+    E2S_PREFETCH_ALLOWED_HTTPS_HOSTS="huggingface.co,us.aws.cdn.hf.co,cas-bridge.xethub.hf.co,raw.githubusercontent.com" \
+    E2S_PREFETCH_ALLOWED_SIGNED_REDIRECT_HOSTS="us.aws.cdn.hf.co,cas-bridge.xethub.hf.co" \
+    E2S_DOWNLOAD_TIMEOUT_SECS="1800" \
+    UV_PYTHON_INSTALL_DIR="/opt/physicsnemo-serve/uv-python" \
+    PATH="/usr/local/bin:${PATH}"
+
+WORKDIR /workspace
+
+ENTRYPOINT ["dumb-init", "--", "physicsnemo-serve"]
+CMD ["--help"]

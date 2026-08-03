@@ -1,0 +1,13 @@
+# PhysicsNeMo CFD v0.0.2 GPU runtime.
+#
+# The CFD GPU extra uses RAPIDS CUDA 13 packages. The container's shared
+# Earth2Studio/CFD environment therefore uses the CUDA 13 PyTorch backend.
+--find-links https://data.pyg.org/whl/torch-2.10.0+cu130.html
+
+torch==2.10.0
+torchvision==0.25.0
+torch-scatter==2.1.2
+# numba-cuda still imports np.row_stack, which NumPy removed in 2.5.
+numpy<2.5
+nvidia-physicsnemo[cu13]==2.1.1
+nvidia-physicsnemo-cfd[gpu,evaluation-hf] @ git+https://github.com/NVIDIA/physicsnemo-cfd.git@921f14dc2ac14c04aabffaba3290deb792379dd8

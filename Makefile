@@ -12,14 +12,18 @@ RUNTIME_BASE_IMAGE_TAG = pytorch-26.01-py3-th0.8.0
 RUNTIME_BASE_IMAGE = $(RUNTIME_BASE_IMAGE_NAME):$(RUNTIME_BASE_IMAGE_TAG)
 SERVE_CMD_DIST_DIR ?= dist
 SERVE_CMD_OUTPUT ?= $(SERVE_CMD_DIST_DIR)/physicsnemo-serve
+SERVE_CMD_COMBINED_OUTPUT ?= $(SERVE_CMD_DIST_DIR)/physicsnemo-serve-combined
 SERVE_CMD_LINUX_AMD64_OUTPUT ?= $(SERVE_CMD_DIST_DIR)/physicsnemo-serve-linux-amd64
 SERVE_INSTALLER_OUTPUT ?= $(SERVE_CMD_DIST_DIR)/physicsnemo-serve-install
 SERVE_INSTALLER_LINUX_AMD64_OUTPUT ?= $(SERVE_CMD_DIST_DIR)/physicsnemo-serve-install-linux-amd64
 SERVE_CMD_LINUX_AMD64_TARGET ?= x86_64-unknown-linux-gnu.2.17
 SERVE_CMD_LINUX_AMD64_TARGET_DIR ?= x86_64-unknown-linux-gnu
 SERVE_CMD_RUST_TOOLCHAIN ?= 1.94.1
+SERVE_CMD_PYTHON_VERSION ?= 3.12
+SERVE_CMD_RUNTIME_REQUIREMENTS ?= packaging/physicsnemo-serve-cmd/runtime-base.lock
+SERVE_CMD_COMPRESSION_LEVEL ?= 5
 
-.PHONY: image runtime-base-image build build-serve-cmd build-serve-cmd-linux-amd64 build-serve-installer build-serve-installer-linux-amd64 clean clean-all experiments observe stress
+.PHONY: image runtime-base-image build install-serve-cmd-builders build-serve-cmd build-serve-cmd-combined build-serve-cmd-linux-amd64 build-serve-installer build-serve-installer-linux-amd64 clean clean-all experiments observe stress
 
 image: runtime-base-image
 	@test -n "$(DOCKER_REPO)" || (echo "DOCKER_REPO is not set!" && exit 1)
@@ -32,6 +36,44 @@ runtime-base-image:
 build:
 	cargo build --release -p inference_server -p worker-runtime
 
+install-serve-cmd-builders:
+	@set -eu; \
+	if [ "$$(uname -s)" != "Linux" ]; then \
+		echo "install-serve-cmd-builders currently supports Linux only" >&2; \
+		exit 1; \
+	fi; \
+	if ! command -v apt-get >/dev/null 2>&1; then \
+		echo "apt-get is required; install build-essential, ca-certificates, cmake, curl, and pkg-config with your distribution package manager" >&2; \
+		exit 1; \
+	fi; \
+	if [ "$$(id -u)" -eq 0 ]; then \
+		sudo_cmd=""; \
+	elif command -v sudo >/dev/null 2>&1; then \
+		sudo_cmd="sudo"; \
+	else \
+		echo "run this target as root or install sudo" >&2; \
+		exit 1; \
+	fi; \
+	$$sudo_cmd apt-get update; \
+	$$sudo_cmd apt-get install --yes build-essential ca-certificates cmake curl pkg-config; \
+	if command -v rustup >/dev/null 2>&1; then \
+		rustup_bin="$$(command -v rustup)"; \
+	else \
+		rustup_init="$$(mktemp)"; \
+		trap 'rm -f "$$rustup_init"' EXIT HUP INT TERM; \
+		curl --proto '=https' --tlsv1.2 --fail --silent --show-error \
+			--output "$$rustup_init" https://sh.rustup.rs; \
+		sh "$$rustup_init" -y --profile minimal --default-toolchain none; \
+		rm -f "$$rustup_init"; \
+		trap - EXIT HUP INT TERM; \
+		rustup_bin="$$HOME/.cargo/bin/rustup"; \
+	fi; \
+	"$$rustup_bin" toolchain install $(SERVE_CMD_RUST_TOOLCHAIN) --profile minimal; \
+	"$$rustup_bin" default $(SERVE_CMD_RUST_TOOLCHAIN); \
+	"$$rustup_bin" run $(SERVE_CMD_RUST_TOOLCHAIN) rustc --version; \
+	"$$rustup_bin" run $(SERVE_CMD_RUST_TOOLCHAIN) cargo --version; \
+	echo "Builder installation complete. Run: source \"$$HOME/.cargo/env\""
+
 build-serve-cmd:
 	cargo build --locked --release --package physicsnemo-serve-cmd --bin physicsnemo-serve
 	mkdir -p $(SERVE_CMD_DIST_DIR)
@@ -39,6 +81,33 @@ build-serve-cmd:
 	chmod +x $(SERVE_CMD_OUTPUT)
 	@echo "Thin CLI built: $(SERVE_CMD_OUTPUT)"
 	@echo "Run it with: $(SERVE_CMD_OUTPUT) infer --runtime-dir <DIR> ..."
+
+build-serve-cmd-combined:
+	@command -v uv >/dev/null 2>&1 || (echo "uv is required; install it from https://docs.astral.sh/uv/" >&2 && exit 1)
+	@test -f "$(SERVE_CMD_RUNTIME_REQUIREMENTS)" || (echo "requirements lock not found: $(SERVE_CMD_RUNTIME_REQUIREMENTS)" >&2 && exit 1)
+	uv python install $(SERVE_CMD_PYTHON_VERSION)
+	cargo build --locked --release --package physicsnemo-serve-cmd --bin physicsnemo-serve
+	@set -eu; \
+	python_bin="$$(uv python find $(SERVE_CMD_PYTHON_VERSION))"; \
+	python_prefix="$$(dirname "$$(dirname "$$python_bin")")"; \
+	runtime_workspace="$$(mktemp -d "$${TMPDIR:-/tmp}/physicsnemo-serve-runtime.XXXXXX")"; \
+	staged_output="$(SERVE_CMD_COMBINED_OUTPUT).tmp.$$$$"; \
+	trap 'rm -rf "$$runtime_workspace"; rm -f "$$staged_output"' EXIT HUP INT TERM; \
+	uv run python packaging/physicsnemo-serve-cmd/assemble_runtime.py \
+		--python-prefix "$$python_prefix" \
+		--requirements "$(SERVE_CMD_RUNTIME_REQUIREMENTS)" \
+		--output "$$runtime_workspace/runtime"; \
+	mkdir -p "$(dir $(SERVE_CMD_COMBINED_OUTPUT))"; \
+	target/release/physicsnemo-serve package \
+		--runtime-dir "$$runtime_workspace/runtime" \
+		--output "$$staged_output" \
+		--compression-level "$(SERVE_CMD_COMPRESSION_LEVEL)"; \
+	mv -f "$$staged_output" "$(SERVE_CMD_COMBINED_OUTPUT)"; \
+	chmod +x "$(SERVE_CMD_COMBINED_OUTPUT)"; \
+	trap - EXIT HUP INT TERM; \
+	rm -rf "$$runtime_workspace"
+	@echo "Self-contained CLI built: $(SERVE_CMD_COMBINED_OUTPUT)"
+	@echo "Run it with: $(SERVE_CMD_COMBINED_OUTPUT) infer ..."
 
 build-serve-cmd-linux-amd64:
 	@command -v zig >/dev/null 2>&1 || (echo "zig is required; install it with: brew install zig" && exit 1)

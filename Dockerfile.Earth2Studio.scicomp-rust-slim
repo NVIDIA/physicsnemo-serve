@@ -224,6 +224,8 @@ ARG PHYSICSNEMO_VERSION=2.1.1
 ARG PHYSICSNEMO_CFD_TORCH_VERSION=2.10.0+cu130
 ARG PHYSICSNEMO_CFD_TORCHVISION_VERSION=0.25.0+cu130
 ARG PHYSICSNEMO_CFD_TORCH_SCATTER_VERSION=2.1.2+pt210cu130
+ARG PHYSICSNEMO_NUMPY_VERSION=2.2.6
+ARG PHYSICSNEMO_SCIPY_VERSION=1.18.0
 
 ENV PHYSICSNEMO_CFD_VENV=/opt/physicsnemo-cfd-venv \
     PHYSICSNEMO_CFD_PYTHON_EXECUTABLE=/opt/physicsnemo-cfd-venv/bin/python
@@ -244,7 +246,10 @@ RUN "$PHYSICSNEMO_SERVE_PYTHON_EXECUTABLE" -m pip install --no-cache-dir --no-bu
     "git+https://github.com/NVIDIA/makani.git@b38fcb2799d7dbc146fa60459f3f9823394a8bf1" \
     'warp-lang<1.12.0' \
     cartopy cfgrib && \
-    "$PHYSICSNEMO_SERVE_PYTHON_EXECUTABLE" -m pip install --no-cache-dir 'scipy==1.13.1'
+    "$PHYSICSNEMO_SERVE_PYTHON_EXECUTABLE" -m pip install --no-cache-dir \
+        "numpy==${PHYSICSNEMO_NUMPY_VERSION}" "scipy==${PHYSICSNEMO_SCIPY_VERSION}" && \
+    "$PHYSICSNEMO_SERVE_PYTHON_EXECUTABLE" -c \
+        "import numpy, scipy; assert numpy.__version__ == '${PHYSICSNEMO_NUMPY_VERSION}', numpy.__version__; assert scipy.__version__ == '${PHYSICSNEMO_SCIPY_VERSION}', scipy.__version__"
 
 # Keep PhysicsNeMo-CFD separate from the Earth2Studio environment. The venv
 # uses the base image's CUDA system libraries, while its Python packages and
@@ -263,11 +268,15 @@ RUN env -u PIP_CONSTRAINT "$PHYSICSNEMO_CFD_PYTHON_EXECUTABLE" -m pip install \
         --no-cache-dir --index-url https://download.pytorch.org/whl/cu130 \
         "torch==${PHYSICSNEMO_CFD_TORCH_VERSION}" \
         "torchvision==${PHYSICSNEMO_CFD_TORCHVISION_VERSION}" \
-    && printf 'torch==%s\ntorchvision==%s\n' \
+    && printf 'torch==%s\ntorchvision==%s\nnumpy==%s\nscipy==%s\n' \
         "${PHYSICSNEMO_CFD_TORCH_VERSION}" \
         "${PHYSICSNEMO_CFD_TORCHVISION_VERSION}" \
+        "${PHYSICSNEMO_NUMPY_VERSION}" \
+        "${PHYSICSNEMO_SCIPY_VERSION}" \
         > /tmp/physicsnemo-cfd-constraints.txt \
     && env -u PIP_CONSTRAINT "$PHYSICSNEMO_CFD_PYTHON_EXECUTABLE" -m pip install --no-cache-dir \
+        "numpy==${PHYSICSNEMO_NUMPY_VERSION}" \
+        "scipy==${PHYSICSNEMO_SCIPY_VERSION}" \
         redis 'pydantic>=2.0.0' 'hiredis>=2.0.0' python-dotenv aiofiles \
         'jsonschema>=4.26.0' \
     && env -u PIP_CONSTRAINT "$PHYSICSNEMO_CFD_PYTHON_EXECUTABLE" -m pip install --no-cache-dir \
@@ -289,15 +298,19 @@ RUN "$PHYSICSNEMO_CFD_PYTHON_EXECUTABLE" - \
         "$PHYSICSNEMO_CFD_COMMIT" \
         "$PHYSICSNEMO_CFD_TORCH_VERSION" \
         "$PHYSICSNEMO_CFD_TORCHVISION_VERSION" \
-        "$PHYSICSNEMO_CFD_TORCH_SCATTER_VERSION" <<'PY'
+        "$PHYSICSNEMO_CFD_TORCH_SCATTER_VERSION" \
+        "$PHYSICSNEMO_NUMPY_VERSION" \
+        "$PHYSICSNEMO_SCIPY_VERSION" <<'PY'
 import importlib.metadata
 import importlib.util
 import json
 import sys
 
 import huggingface_hub
+import numpy
 import physicsnemo
 import physicsnemo.cfd
+import scipy
 import torch
 import torch_geometric
 import torch_scatter
@@ -310,6 +323,8 @@ from packaging.version import Version
     expected_torch,
     expected_torchvision,
     expected_torch_scatter,
+    expected_numpy,
+    expected_scipy,
 ) = sys.argv[1:]
 assert sys.version_info[:2] == (3, 12), sys.version
 assert physicsnemo.__version__ == expected_physicsnemo
@@ -317,6 +332,8 @@ assert physicsnemo.cfd.__version__ == expected_cfd
 assert torch.__version__ == expected_torch
 assert importlib.metadata.version("torchvision") == expected_torchvision
 assert importlib.metadata.version("torch-scatter") == expected_torch_scatter
+assert numpy.__version__ == expected_numpy
+assert scipy.__version__ == expected_scipy
 assert torch.version.cuda == "13.0"
 
 distribution = importlib.metadata.distribution("nvidia-physicsnemo-cfd")

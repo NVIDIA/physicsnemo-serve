@@ -7,7 +7,7 @@
 torch==2.10.0
 torchvision==0.25.0
 torch-scatter==2.1.2
-# numba-cuda still imports np.row_stack, which NumPy removed in 2.5.
+# Pinned to match the service-mode CFD venv for cross-mode numerical parity.
 numpy==2.2.6
 scipy==1.18.0
 nvidia-physicsnemo[cu13]==2.1.1

@@ -7,7 +7,7 @@
 # - Stage 3 (builder): Cook dependencies (cached), then build binaries
 # - Stage 4 (runtime): Minimal image with binaries + Python wheel
 #
-# Build with: DOCKER_BUILDKIT=1 docker build -f Dockerfile.Earth2Studio.scicomp-rust-slim -t e2s-rust .
+# Build with: DOCKER_BUILDKIT=1 docker build -f Dockerfile.physicsnemo-serve.scicomp-rust-slim -t e2s-rust .
 
 # =============================================================================
 # Stage 1: Chef - Shared Rust build tooling
@@ -288,6 +288,8 @@ RUN env -u PIP_CONSTRAINT "$PHYSICSNEMO_CFD_PYTHON_EXECUTABLE" -m pip install \
         --no-index \
         --find-links "https://data.pyg.org/whl/torch-2.10.0+cu130.html" \
         "torch-scatter==${PHYSICSNEMO_CFD_TORCH_SCATTER_VERSION}" \
+    && env -u PIP_CONSTRAINT "$PHYSICSNEMO_CFD_PYTHON_EXECUTABLE" -m pip install --no-cache-dir \
+        'numpy==2.2.6' 'scipy==1.18.0' \
     && "$PHYSICSNEMO_CFD_PYTHON_EXECUTABLE" -m pip check
 
 # Fail the image build if the requested source revision, versions, Python ABI,

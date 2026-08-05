@@ -10,7 +10,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 RUNTIME_CONFIG = REPO_ROOT / "scripts" / "worker_runtime_config.json"
-DOCKERFILE = REPO_ROOT / "Dockerfile.Earth2Studio.scicomp-rust-slim"
+DOCKERFILE = REPO_ROOT / "Dockerfile.physicsnemo-serve.scicomp-rust-slim"
 CFD_PYTHON = "/opt/physicsnemo-cfd-venv/bin/python"
 CFD_MODEL_CACHE = "/outputs/.cache/physicsnemo-cfd/models"
 

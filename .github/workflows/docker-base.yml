@@ -9,7 +9,7 @@ on:
       - main
       - "pull-request/[0-9]+"
     paths:
-      - Dockerfile.Earth2Studio.runtime-base
+      - Dockerfile.physicsnemo-serve.runtime-base
   workflow_dispatch:
 
 concurrency:
@@ -33,7 +33,7 @@ jobs:
       - name: Build runtime base image
         run: |
           docker build \
-            -f Dockerfile.Earth2Studio.runtime-base \
+            -f Dockerfile.physicsnemo-serve.runtime-base \
             --build-arg PYTORCH_BASE_IMAGE=${{ env.PYTORCH_BASE_IMAGE }} \
             -t ${{ vars.NGC_REGISTRY }}/${{ secrets.NGC_ORG }}/${{ secrets.NGC_RUNTIME_BASE_IMAGE }}:${{ env.RUNTIME_BASE_TAG }} \
             .

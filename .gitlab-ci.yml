@@ -211,11 +211,11 @@ runtime_base_image_build:
       aud: https://stg.vault.nvidia.com
   rules:
     - changes:
-        - Dockerfile.Earth2Studio.runtime-base
+        - Dockerfile.physicsnemo-serve.runtime-base
         - .gitlab-ci.yml
   variables:
     NGC_IMAGE: scicomp-ferroflux-runtime-base
-    DOCKER_FILE_PATH: Dockerfile.Earth2Studio.runtime-base
+    DOCKER_FILE_PATH: Dockerfile.physicsnemo-serve.runtime-base
     IMAGE_TAG: "pytorch-26.01-py3-th0.8.1"
     TAR_PATH: ./runtime-base-container.tar
     EXTRA_PARAMS: "--snapshot-mode=redo --cache-ttl=168h --build-arg PYTORCH_BASE_IMAGE=${NGC_REGISTRY}/${NGC_ORG}/pytorch:26.01-py3"
@@ -242,7 +242,7 @@ image_build:
     - job: runtime_base_image_build
       optional: true
   variables:
-    DOCKER_FILE_PATH: Dockerfile.Earth2Studio.scicomp-rust-slim
+    DOCKER_FILE_PATH: Dockerfile.physicsnemo-serve.scicomp-rust-slim
     IMAGE_TAG: "${GIT_TAG}"
     TAR_PATH: ./container.tar
     EXTRA_PARAMS: "--snapshot-mode=redo --cache-ttl=168h --build-arg PHYSICSNEMO_SERVE_RUNTIME_BASE_IMAGE=${NGC_REGISTRY}/${NGC_ORG}/scicomp-ferroflux-runtime-base:pytorch-26.01-py3-th0.8.1"

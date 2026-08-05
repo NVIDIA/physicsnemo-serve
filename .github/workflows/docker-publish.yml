@@ -51,7 +51,7 @@ jobs:
           else
             echo "Runtime base image is missing; building ${BASE_IMAGE}"
             docker buildx build \
-              -f Dockerfile.Earth2Studio.runtime-base \
+              -f Dockerfile.physicsnemo-serve.runtime-base \
               --build-arg PYTORCH_BASE_IMAGE=${{ env.PYTORCH_BASE_IMAGE }} \
               -t "${BASE_IMAGE}" \
               --push \
@@ -61,7 +61,7 @@ jobs:
       - name: Build and push main image
         run: |
           docker buildx build \
-            -f Dockerfile.Earth2Studio.scicomp-rust-slim \
+            -f Dockerfile.physicsnemo-serve.scicomp-rust-slim \
             --build-arg PHYSICSNEMO_SERVE_RUNTIME_BASE_IMAGE=${{ vars.NGC_REGISTRY }}/${{ secrets.NGC_ORG }}/${{ secrets.NGC_RUNTIME_BASE_IMAGE }}:${{ env.RUNTIME_BASE_TAG }} \
             -t ${{ vars.NGC_REGISTRY }}/${{ secrets.NGC_ORG }}/${{ secrets.NGC_IMAGE }}:${{ steps.tag.outputs.tag }} \
             --push \

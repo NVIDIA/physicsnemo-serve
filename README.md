@@ -19,8 +19,8 @@ It reduces the friction between trained model checkpoints and production inferen
 Build the service container:
 
 ```bash
-docker build -f Dockerfile.Earth2Studio.runtime-base -t physicsnemo-serve-runtime-base .
-docker build -f Dockerfile.Earth2Studio.scicomp-rust-slim -t physicsnemo-serve .
+docker build -f Dockerfile.physicsnemo-serve.runtime-base -t physicsnemo-serve-runtime-base .
+docker build -f Dockerfile.physicsnemo-serve.scicomp-rust-slim -t physicsnemo-serve .
 ```
 
 Then choose your path:

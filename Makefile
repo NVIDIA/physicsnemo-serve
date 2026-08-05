@@ -23,7 +23,10 @@ SERVE_CMD_PYTHON_VERSION ?= 3.12
 SERVE_CMD_RUNTIME_REQUIREMENTS ?= packaging/physicsnemo-serve-cmd/runtime-base.lock
 SERVE_CMD_COMPRESSION_LEVEL ?= 5
 
-.PHONY: image runtime-base-image build install-serve-cmd-builders build-serve-cmd build-serve-cmd-self-contained build-serve-cmd-linux-amd64 build-serve-installer build-serve-installer-linux-amd64 clean clean-all experiments observe stress
+SERVE_CMD_IMAGE_NAME ?= $(DOCKER_REPO)/physicsnemo-serve-cmd
+SERVE_CMD_IMAGE_TAG ?= $(IMAGE_TAG)
+
+.PHONY: image runtime-base-image serve-cmd-image build install-serve-cmd-builders build-serve-cmd build-serve-cmd-self-contained build-serve-cmd-linux-amd64 build-serve-installer build-serve-installer-linux-amd64 clean clean-all experiments observe stress
 
 # Build the main PhysicsNeMo Serve container image on top of the runtime base image.
 image: runtime-base-image
@@ -34,6 +37,12 @@ image: runtime-base-image
 runtime-base-image:
 	@test -n "$(DOCKER_REPO)" || (echo "DOCKER_REPO is not set!" && exit 1)
 	DOCKER_BUILDKIT=1 docker build --build-arg PYTORCH_BASE_IMAGE=$(DOCKER_REPO)/pytorch:26.01-py3 -t $(RUNTIME_BASE_IMAGE) -f Dockerfile.physicsnemo-serve.runtime-base .
+
+serve-cmd-image:
+	@test -n "$(DOCKER_REPO)" || (echo "DOCKER_REPO is not set!" && exit 1)
+	DOCKER_BUILDKIT=1 docker build --platform linux/amd64 \
+		-t $(SERVE_CMD_IMAGE_NAME):$(SERVE_CMD_IMAGE_TAG) \
+		-f Dockerfile.physicsnemo-serve-cmd .
 
 # Compile the inference server and worker runtime in release mode.
 build:

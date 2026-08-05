@@ -578,7 +578,7 @@ def fetch_binary_report_via_reader_job(
         f"print({BINARY_REPORT_END!r}, flush=True)\n"
     )
     encoded = base64.b64encode(reader_python.encode("utf-8")).decode("ascii")
-    reader_command = f"printf %s {shlex.quote(encoded)} | base64 -d | python3; sleep 30"
+    reader_command = f"printf %s {shlex.quote(encoded)} | base64 -d | python3 2>&1; sleep 30"
     reader_args = [
         "--name", reader_name,
         "--container-image", service_image,

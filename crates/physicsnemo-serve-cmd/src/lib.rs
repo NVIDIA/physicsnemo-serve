@@ -19,7 +19,6 @@ physicsnemo-serve — run manifest-driven inference without service processes
 
 USAGE:
   physicsnemo-serve infer --plugin PATH --request FILE --output-dir DIR [--runtime-dir DIR] [--run-id ID] [--device DEVICE]
-  physicsnemo-serve run   --plugin PATH --request FILE --output-dir DIR [--runtime-dir DIR] [--run-id ID] [--device DEVICE]
   physicsnemo-serve package --runtime-dir DIR --output FILE [--compression-level LEVEL]
   physicsnemo-serve --help
   physicsnemo-serve --version
@@ -71,9 +70,9 @@ where
     match command.as_str() {
         "--help" | "-h" | "help" => Ok(CliCommand::Help),
         "--version" | "-V" => Ok(CliCommand::Version),
-        "infer" | "run" if is_help_request(&remaining) => Ok(CliCommand::Help),
+        "infer" if is_help_request(&remaining) => Ok(CliCommand::Help),
         "package" if is_help_request(&remaining) => Ok(CliCommand::Help),
-        "infer" | "run" => parse_infer_args(&remaining).map(CliCommand::Infer),
+        "infer" => parse_infer_args(&remaining).map(CliCommand::Infer),
         "package" => parse_package_args(&remaining).map(CliCommand::Package),
         PREFETCH_COMMAND => parse_prefetch_args(&remaining).map(CliCommand::Prefetch),
         unsupported => Err(anyhow::anyhow!(
@@ -297,6 +296,22 @@ mod tests {
             args.runtime_dir,
             Some(PathBuf::from("/opt/physicsnemo-runtime"))
         );
+    }
+
+    #[test]
+    fn rejects_removed_run_command() {
+        let error = parse_args([
+            "run",
+            "--plugin",
+            "/plugins/demo",
+            "--request",
+            "request.json",
+            "--output-dir",
+            "outputs",
+        ])
+        .expect_err("the removed run command must be rejected");
+
+        assert!(error.to_string().contains("unsupported command 'run'"));
     }
 
     #[test]

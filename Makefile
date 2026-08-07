@@ -12,7 +12,7 @@ RUNTIME_BASE_IMAGE_TAG = pytorch-26.01-py3-th0.8.0
 RUNTIME_BASE_IMAGE = $(RUNTIME_BASE_IMAGE_NAME):$(RUNTIME_BASE_IMAGE_TAG)
 SERVE_CMD_DIST_DIR ?= dist
 SERVE_CMD_OUTPUT ?= $(SERVE_CMD_DIST_DIR)/physicsnemo-serve
-SERVE_CMD_COMBINED_OUTPUT ?= $(SERVE_CMD_DIST_DIR)/physicsnemo-serve-combined
+SERVE_CMD_SELF_CONTAINED_OUTPUT ?= $(SERVE_CMD_DIST_DIR)/physicsnemo-serve-self-contained
 SERVE_CMD_LINUX_AMD64_OUTPUT ?= $(SERVE_CMD_DIST_DIR)/physicsnemo-serve-linux-amd64
 SERVE_INSTALLER_OUTPUT ?= $(SERVE_CMD_DIST_DIR)/physicsnemo-serve-install
 SERVE_INSTALLER_LINUX_AMD64_OUTPUT ?= $(SERVE_CMD_DIST_DIR)/physicsnemo-serve-install-linux-amd64
@@ -23,19 +23,23 @@ SERVE_CMD_PYTHON_VERSION ?= 3.12
 SERVE_CMD_RUNTIME_REQUIREMENTS ?= packaging/physicsnemo-serve-cmd/runtime-base.lock
 SERVE_CMD_COMPRESSION_LEVEL ?= 5
 
-.PHONY: image runtime-base-image build install-serve-cmd-builders build-serve-cmd build-serve-cmd-combined build-serve-cmd-linux-amd64 build-serve-installer build-serve-installer-linux-amd64 clean clean-all experiments observe stress
+.PHONY: image runtime-base-image build install-serve-cmd-builders build-serve-cmd build-serve-cmd-self-contained build-serve-cmd-linux-amd64 build-serve-installer build-serve-installer-linux-amd64 clean clean-all experiments observe stress
 
+# Build the main PhysicsNeMo Serve container image on top of the runtime base image.
 image: runtime-base-image
 	@test -n "$(DOCKER_REPO)" || (echo "DOCKER_REPO is not set!" && exit 1)
 	DOCKER_BUILDKIT=1 docker build --build-arg PHYSICSNEMO_SERVE_RUNTIME_BASE_IMAGE=$(RUNTIME_BASE_IMAGE) -t $(IMAGE_NAME):$(IMAGE_TAG) -f Dockerfile.Earth2Studio.scicomp-rust-slim .
 
+# Build the shared runtime base container image used by the service image.
 runtime-base-image:
 	@test -n "$(DOCKER_REPO)" || (echo "DOCKER_REPO is not set!" && exit 1)
 	DOCKER_BUILDKIT=1 docker build --build-arg PYTORCH_BASE_IMAGE=$(DOCKER_REPO)/pytorch:26.01-py3 -t $(RUNTIME_BASE_IMAGE) -f Dockerfile.Earth2Studio.runtime-base .
 
+# Compile the inference server and worker runtime in release mode.
 build:
 	cargo build --release -p inference_server -p worker-runtime
 
+# Install the Linux system packages and Rust toolchain required to build the CLI binaries.
 install-serve-cmd-builders:
 	@set -eu; \
 	if [ "$$(uname -s)" != "Linux" ]; then \
@@ -74,6 +78,7 @@ install-serve-cmd-builders:
 	"$$rustup_bin" run $(SERVE_CMD_RUST_TOOLCHAIN) cargo --version; \
 	echo "Builder installation complete. Run: source \"$$HOME/.cargo/env\""
 
+# Build the thin native CLI, which expects a separate Python runtime directory.
 build-serve-cmd:
 	cargo build --locked --release --package physicsnemo-serve-cmd --bin physicsnemo-serve
 	mkdir -p $(SERVE_CMD_DIST_DIR)
@@ -82,7 +87,8 @@ build-serve-cmd:
 	@echo "Thin CLI built: $(SERVE_CMD_OUTPUT)"
 	@echo "Run it with: $(SERVE_CMD_OUTPUT) infer --runtime-dir <DIR> ..."
 
-build-serve-cmd-combined:
+# Build a self-contained CLI with the Python runtime and dependencies embedded in one executable.
+build-serve-cmd-self-contained:
 	@command -v uv >/dev/null 2>&1 || (echo "uv is required; install it from https://docs.astral.sh/uv/" >&2 && exit 1)
 	@test -f "$(SERVE_CMD_RUNTIME_REQUIREMENTS)" || (echo "requirements lock not found: $(SERVE_CMD_RUNTIME_REQUIREMENTS)" >&2 && exit 1)
 	uv python install $(SERVE_CMD_PYTHON_VERSION)
@@ -91,24 +97,25 @@ build-serve-cmd-combined:
 	python_bin="$$(uv python find $(SERVE_CMD_PYTHON_VERSION))"; \
 	python_prefix="$$(dirname "$$(dirname "$$python_bin")")"; \
 	runtime_workspace="$$(mktemp -d "$${TMPDIR:-/tmp}/physicsnemo-serve-runtime.XXXXXX")"; \
-	staged_output="$(SERVE_CMD_COMBINED_OUTPUT).tmp.$$$$"; \
+	staged_output="$(SERVE_CMD_SELF_CONTAINED_OUTPUT).tmp.$$$$"; \
 	trap 'rm -rf "$$runtime_workspace"; rm -f "$$staged_output"' EXIT HUP INT TERM; \
 	uv run python packaging/physicsnemo-serve-cmd/assemble_runtime.py \
 		--python-prefix "$$python_prefix" \
 		--requirements "$(SERVE_CMD_RUNTIME_REQUIREMENTS)" \
 		--output "$$runtime_workspace/runtime"; \
-	mkdir -p "$(dir $(SERVE_CMD_COMBINED_OUTPUT))"; \
+	mkdir -p "$(dir $(SERVE_CMD_SELF_CONTAINED_OUTPUT))"; \
 	target/release/physicsnemo-serve package \
 		--runtime-dir "$$runtime_workspace/runtime" \
 		--output "$$staged_output" \
 		--compression-level "$(SERVE_CMD_COMPRESSION_LEVEL)"; \
-	mv -f "$$staged_output" "$(SERVE_CMD_COMBINED_OUTPUT)"; \
-	chmod +x "$(SERVE_CMD_COMBINED_OUTPUT)"; \
+	mv -f "$$staged_output" "$(SERVE_CMD_SELF_CONTAINED_OUTPUT)"; \
+	chmod +x "$(SERVE_CMD_SELF_CONTAINED_OUTPUT)"; \
 	trap - EXIT HUP INT TERM; \
 	rm -rf "$$runtime_workspace"
-	@echo "Self-contained CLI built: $(SERVE_CMD_COMBINED_OUTPUT)"
-	@echo "Run it with: $(SERVE_CMD_COMBINED_OUTPUT) infer ..."
+	@echo "Self-contained CLI built: $(SERVE_CMD_SELF_CONTAINED_OUTPUT)"
+	@echo "Run it with: $(SERVE_CMD_SELF_CONTAINED_OUTPUT) infer ..."
 
+# Cross-compile the thin CLI for Linux x86_64 using Zig if building on a different platform.
 build-serve-cmd-linux-amd64:
 	@command -v zig >/dev/null 2>&1 || (echo "zig is required; install it with: brew install zig" && exit 1)
 	@command -v cmake >/dev/null 2>&1 || (echo "cmake is required by aws-lc-sys; install it with: brew install cmake" && exit 1)
@@ -122,6 +129,7 @@ build-serve-cmd-linux-amd64:
 	@echo "Thin Linux x86_64 CLI built: $(SERVE_CMD_LINUX_AMD64_OUTPUT)"
 	@echo "Run it with: $(SERVE_CMD_LINUX_AMD64_OUTPUT) infer --runtime-dir <DIR> ..."
 
+# Build the native installer that extracts an embedded runtime from a self-contained CLI.
 build-serve-installer:
 	cargo build --locked --release --package physicsnemo-serve-cmd --bin physicsnemo-serve-install
 	mkdir -p $(SERVE_CMD_DIST_DIR)
@@ -129,6 +137,7 @@ build-serve-installer:
 	chmod +x $(SERVE_INSTALLER_OUTPUT)
 	@echo "Runtime installer built: $(SERVE_INSTALLER_OUTPUT)"
 
+# Cross-compile the runtime installer for Linux x86_64 using Zig if building on a different platform.
 build-serve-installer-linux-amd64:
 	@command -v zig >/dev/null 2>&1 || (echo "zig is required; install it with: brew install zig" && exit 1)
 	@command -v cmake >/dev/null 2>&1 || (echo "cmake is required by aws-lc-sys; install it with: brew install cmake" && exit 1)
@@ -141,6 +150,7 @@ build-serve-installer-linux-amd64:
 	chmod +x $(SERVE_INSTALLER_LINUX_AMD64_OUTPUT)
 	@echo "Linux x86_64 runtime installer built: $(SERVE_INSTALLER_LINUX_AMD64_OUTPUT)"
 
+# Run the Rust unit tests for the CLI and service workspace packages.
 test-rust:
 	cargo test -p physicsnemo-serve-cmd --lib
 	cargo test -p worker-runtime --lib
@@ -148,24 +158,28 @@ test-rust:
 	cargo test -p inference_server --lib
 	cargo test -p scicomp-rq --lib
 
+# Remove all Cargo build artifacts.
 clean:
 	cargo clean
 
+# Remove Cargo build artifacts plus generated experiment artifacts and outputs.
 clean-all:
 	cargo clean
 	rm -rf artifacts/ outputs/
 
+# Build the end-to-end experiment runner binary.
 experiments:
 	cd tests/e2e && go build -o ../../bin/run_experiments ./run_experiments.go
 	@echo "Binary built: bin/run_experiments"
 	@echo "Usage: bin/run_experiments --service_url_rust <RUST_URL> --service_url_python <PYTHON_URL> --ep_token <TOKEN> [--expt 1|2|3|all]"
 
-# Run this command and browse on localhost:3000
+# Start the local observability stack; browse it at http://localhost:3000.
 observe:
 	@test -n "$(SERVICE_URL)" || (echo "SERVICE_URL is not set!" && exit 1)
 	@test -n "$(EP_TOKEN)" || (echo "EP_TOKEN is not set!" && exit 1)
 	SERVICE_URL=$(SERVICE_URL) EP_TOKEN=$(EP_TOKEN) docker compose -f observability/docker-compose.yml up
 
+# Build the end-to-end service stress-test binary.
 stress:
 	cd tests/e2e && go build -o ../../bin/stress_service ./stress_service.go
 	@echo "Binary built: bin/stress_service"

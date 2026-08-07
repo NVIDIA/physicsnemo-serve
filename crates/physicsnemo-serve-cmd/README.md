@@ -105,7 +105,7 @@ compatible host OS and architecture, plus any system GPU driver required by
 CUDA packages.
 
 The `build-serve-cmd` Make target produces only the thin Rust executable, while
-`build-serve-cmd-combined` performs the complete runtime assembly and packaging
+`build-serve-cmd-self-contained` performs the complete runtime assembly and packaging
 workflow. Likewise,
 `Dockerfile.physicsnemo-serve-cmd` places the Rust executable and its Python
 runtimes in separate paths inside the container; it does not append those
@@ -113,18 +113,18 @@ runtimes to the executable.
 
 ### Build self-contained executable
 
-The combined Make target performs all required steps and writes
-`dist/physicsnemo-serve-combined`:
+The self-contained Make target performs all required steps and writes
+`dist/physicsnemo-serve-self-contained`:
 
 ```bash
-make build-serve-cmd-combined
+make build-serve-cmd-self-contained
 ```
 
 The Python version, requirements lock, compression level, and output are
 configurable. For example, to package the Earth2Studio runtime:
 
 ```bash
-make build-serve-cmd-combined \
+make build-serve-cmd-self-contained \
     SERVE_CMD_RUNTIME_REQUIREMENTS=packaging/physicsnemo-serve-cmd/external-runtime/requirements-e2s.lock \
     SERVE_CMD_COMPRESSION_LEVEL=12
 ```
@@ -151,7 +151,7 @@ cargo build --locked --release \
 # Append the runtime payload to produce the self-contained executable
 target/release/physicsnemo-serve package \
     --runtime-dir build/inference-cli-runtime \
-    --output dist/physicsnemo-serve-combined
+    --output dist/physicsnemo-serve-self-contained
 ```
 
 Pass `--compression-level LEVEL` (from `-7` through `22`) to trade packaging
@@ -169,7 +169,7 @@ refer to the host installation and are not portable.
 ### Run self-contained executable
 
 ```bash
-dist/physicsnemo-serve-combined infer \
+dist/physicsnemo-serve-self-contained infer \
     --plugin /path/to/plugin \
     --request request.json \
     --output-dir outputs \

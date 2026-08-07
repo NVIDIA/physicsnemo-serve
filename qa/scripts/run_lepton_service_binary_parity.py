@@ -72,6 +72,10 @@ MATRIX_CONFIGS: dict[str, tuple[Path, Path]] = {
         QA_ROOT / "inference" / "cfd_parity_surface_run1_full_matrix.json",
         PLUGIN_EXAMPLES / "public_run_1_full_matrix_request.json",
     ),
+    "three": (
+        QA_ROOT / "inference" / "cfd_parity_surface_run1_3model.json",
+        PLUGIN_EXAMPLES / "public_run_1_3model_request.json",
+    ),
     "domino": (
         QA_ROOT / "inference" / "cfd_parity_surface_run1.json",
         PLUGIN_EXAMPLES / "public_run_1_request.json",
@@ -1063,9 +1067,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     parser.add_argument(
         "--matrix",
-        choices=["all", "domino"],
-        default="all",
+        choices=["all", "three", "domino"],
+        default="three",
         help=(
+            "'three' runs domino_surface, fignet_surface, xmgn_surface "
+            "(public_run_1_3model_request.json) — these have confirmed binary parity; "
             "'all' runs all 5 CFD models (public_run_1_full_matrix_request.json); "
             "'domino' runs domino_surface only (public_run_1_request.json). "
             "Sets the profile and request automatically; ignored if --profile or "

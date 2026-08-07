@@ -1,0 +1,28 @@
+{
+  "models": [
+    "domino_surface",
+    "fignet_surface",
+    "xmgn_surface"
+  ],
+  "cases": [
+    {
+      "case_id": "run_1",
+      "mesh_uri": "https://huggingface.co/datasets/neashton/drivaerml/resolve/f26d75e0d3dee10ba0e42829bafd0e0d95ca5acc/run_1/boundary_1.vtp",
+      "sha256": "01d388402dad7a783db9c666ddb18e6db745aac16a3193c275e0726dd108bb40",
+      "size_bytes": 659606189,
+      "geometry_uri": "https://huggingface.co/datasets/neashton/drivaerml/resolve/f26d75e0d3dee10ba0e42829bafd0e0d95ca5acc/run_1/drivaer_1.stl",
+      "geometry_sha256": "411e6651284a26fc94924106b833fd79febc6deba63922c929dd8acfc99720d2",
+      "geometry_size_bytes": 142385186
+    }
+  ],
+  "metrics": [
+    "l2_pressure",
+    "l2_shear_stress",
+    "l2_pressure_area_weighted",
+    "drag",
+    "lift"
+  ],
+  "seed": 42,
+  "save_inference_mesh": false,
+  "visual_case_ids": []
+}

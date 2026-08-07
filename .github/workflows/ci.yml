@@ -61,6 +61,7 @@ jobs:
         with:
           toolchain: "1.94.1"
           cache: false
+      - uses: astral-sh/setup-uv@v3
       - uses: actions/cache@v4
         with:
           path: |
@@ -75,6 +76,10 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends libssl-dev pkg-config
       - run: cargo build
+      - name: Build PhysicsNeMo Serve CLI binary
+        run: make build-serve-cmd
+      - name: Build self-contained PhysicsNeMo Serve CLI binary
+        run: make build-serve-cmd-self-contained
 
   rust-test:
     name: Rust Test

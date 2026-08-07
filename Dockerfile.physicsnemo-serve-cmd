@@ -1,11 +1,12 @@
-# The shared CFD runtime currently supports only linux/amd64 because its
+# The CFD runtime currently supports only linux/amd64 because its
 # torch-scatter dependency has no Linux arm64 wheel. Build with:
 #   docker buildx build --platform linux/amd64 --load \
 #     -f Dockerfile.physicsnemo-serve-cmd \
 #     -t physicsnemo-serve-cmd:latest .
 #
-# Earth2Studio and PhysicsNeMo CFD share one CUDA 13 runtime. All plugin
-# definitions are copied into the image.
+# Earth2Studio and PhysicsNeMo CFD use separate runtimes so their CUDA
+# dependency stacks can evolve independently. All plugin definitions are
+# copied into the image.
 
 ARG PHYSICSNEMO_SERVE_UBUNTU_IMAGE=nvcr.io/nvidia/base/ubuntu:jammy-20260217
 
@@ -56,11 +57,16 @@ FROM ${PHYSICSNEMO_SERVE_UBUNTU_IMAGE} AS runtime-builder
 
 ARG DEBIAN_FRONTEND=noninteractive
 ARG PHYSICSNEMO_SERVE_PYTHON=3.12
-ARG PHYSICSNEMO_SERVE_RUNTIME_NAME=shared
-ARG PHYSICSNEMO_SERVE_TORCH_BACKEND=cu130
+ARG PHYSICSNEMO_SERVE_E2S_RUNTIME_NAME=e2s
+ARG PHYSICSNEMO_SERVE_CFD_RUNTIME_NAME=cfd
+ARG PHYSICSNEMO_SERVE_E2S_TORCH_BACKEND=cu130
+ARG PHYSICSNEMO_SERVE_CFD_TORCH_BACKEND=cu128
 ARG PHYSICSNEMO_SERVE_E2S_PLUGIN=e2s-deterministic
 ARG PHYSICSNEMO_SERVE_CFD_PLUGIN=physicsnemo-cfd-surface-benchmark
-ARG PHYSICSNEMO_SERVE_SHARED_REQUIREMENTS=packaging/physicsnemo-serve-cmd/external-runtime/requirements-shared.lock
+ARG PHYSICSNEMO_NUMPY_VERSION=2.2.6
+ARG PHYSICSNEMO_SCIPY_VERSION=1.18.0
+ARG PHYSICSNEMO_SERVE_E2S_REQUIREMENTS=packaging/physicsnemo-serve-cmd/external-runtime/requirements-e2s.lock
+ARG PHYSICSNEMO_SERVE_CFD_REQUIREMENTS=packaging/physicsnemo-serve-cmd/external-runtime/requirements-cfd.lock
 ARG UV_VERSION=0.11.16
 ARG TARGETARCH
 
@@ -102,26 +108,40 @@ COPY packaging/physicsnemo-serve-cmd /opt/physicsnemo-serve/packaging/physicsnem
 
 RUN --mount=type=cache,target=/root/.cache/uv \
     test -f "/opt/physicsnemo-serve/plugins/${PHYSICSNEMO_SERVE_E2S_PLUGIN}/plugin.yaml" \
-    && test -f "/opt/physicsnemo-serve/plugins/${PHYSICSNEMO_SERVE_CFD_PLUGIN}/plugin.yaml" \
-    && test -f "/opt/physicsnemo-serve/${PHYSICSNEMO_SERVE_SHARED_REQUIREMENTS}" \
+    && test -f "/opt/physicsnemo-serve/${PHYSICSNEMO_SERVE_E2S_REQUIREMENTS}" \
     && physicsnemo-serve-install \
         --plugin "/opt/physicsnemo-serve/plugins/${PHYSICSNEMO_SERVE_E2S_PLUGIN}" \
-        --plugin "/opt/physicsnemo-serve/plugins/${PHYSICSNEMO_SERVE_CFD_PLUGIN}" \
-        --requirements "/opt/physicsnemo-serve/${PHYSICSNEMO_SERVE_SHARED_REQUIREMENTS}" \
-        --runtime-dir "/opt/physicsnemo-serve/runtimes/${PHYSICSNEMO_SERVE_RUNTIME_NAME}" \
+        --requirements "/opt/physicsnemo-serve/${PHYSICSNEMO_SERVE_E2S_REQUIREMENTS}" \
+        --runtime-dir "/opt/physicsnemo-serve/runtimes/${PHYSICSNEMO_SERVE_E2S_RUNTIME_NAME}" \
         --python "${PHYSICSNEMO_SERVE_PYTHON}" \
-        --torch-backend "${PHYSICSNEMO_SERVE_TORCH_BACKEND}"
+        --torch-backend "${PHYSICSNEMO_SERVE_E2S_TORCH_BACKEND}" \
+    && "/opt/physicsnemo-serve/runtimes/${PHYSICSNEMO_SERVE_E2S_RUNTIME_NAME}/bin/python" \
+        -c "import numpy, scipy, torch_harmonics; assert numpy.__version__ == '${PHYSICSNEMO_NUMPY_VERSION}', numpy.__version__; assert scipy.__version__ == '${PHYSICSNEMO_SCIPY_VERSION}', scipy.__version__; from earth2studio.models.px import FCN3"
+
+RUN --mount=type=cache,target=/root/.cache/uv \
+    test -f "/opt/physicsnemo-serve/plugins/${PHYSICSNEMO_SERVE_CFD_PLUGIN}/plugin.yaml" \
+    && test -f "/opt/physicsnemo-serve/${PHYSICSNEMO_SERVE_CFD_REQUIREMENTS}" \
+    && physicsnemo-serve-install \
+        --plugin "/opt/physicsnemo-serve/plugins/${PHYSICSNEMO_SERVE_CFD_PLUGIN}" \
+        --requirements "/opt/physicsnemo-serve/${PHYSICSNEMO_SERVE_CFD_REQUIREMENTS}" \
+        --runtime-dir "/opt/physicsnemo-serve/runtimes/${PHYSICSNEMO_SERVE_CFD_RUNTIME_NAME}" \
+        --python "${PHYSICSNEMO_SERVE_PYTHON}" \
+        --torch-backend "${PHYSICSNEMO_SERVE_CFD_TORCH_BACKEND}" \
+    && "/opt/physicsnemo-serve/runtimes/${PHYSICSNEMO_SERVE_CFD_RUNTIME_NAME}/bin/python" \
+        -c "import numpy, scipy; assert numpy.__version__ == '${PHYSICSNEMO_NUMPY_VERSION}', numpy.__version__; assert scipy.__version__ == '${PHYSICSNEMO_SCIPY_VERSION}', scipy.__version__"
 
 
 FROM ${PHYSICSNEMO_SERVE_UBUNTU_IMAGE}
 
 ARG DEBIAN_FRONTEND=noninteractive
-ARG PHYSICSNEMO_SERVE_RUNTIME_NAME=shared
+ARG PHYSICSNEMO_SERVE_E2S_RUNTIME_NAME=e2s
+ARG PHYSICSNEMO_SERVE_CFD_RUNTIME_NAME=cfd
 ARG PHYSICSNEMO_SERVE_E2S_PLUGIN=e2s-deterministic
 ARG PHYSICSNEMO_SERVE_CFD_PLUGIN=physicsnemo-cfd-surface-benchmark
 
 RUN apt-get update \
     && apt-get install --yes --no-install-recommends \
+        build-essential \
         ca-certificates \
         dumb-init \
         libgomp1 \
@@ -139,14 +159,17 @@ COPY --from=runtime-builder /usr/local/bin/uv /usr/local/bin/uv
 COPY --from=runtime-builder /opt/physicsnemo-serve /opt/physicsnemo-serve
 
 ENV PHYSICSNEMO_SERVE_PLUGIN_ROOT="/opt/physicsnemo-serve/plugins/${PHYSICSNEMO_SERVE_E2S_PLUGIN}" \
-    PHYSICSNEMO_SERVE_RUNTIME_DIR="/opt/physicsnemo-serve/runtimes/${PHYSICSNEMO_SERVE_RUNTIME_NAME}" \
-    PHYSICSNEMO_SERVE_E2S_RUNTIME_DIR="/opt/physicsnemo-serve/runtimes/${PHYSICSNEMO_SERVE_RUNTIME_NAME}" \
-    PHYSICSNEMO_SERVE_CFD_RUNTIME_DIR="/opt/physicsnemo-serve/runtimes/${PHYSICSNEMO_SERVE_RUNTIME_NAME}" \
+    PHYSICSNEMO_SERVE_RUNTIME_DIR="/opt/physicsnemo-serve/runtimes/${PHYSICSNEMO_SERVE_E2S_RUNTIME_NAME}" \
+    PHYSICSNEMO_SERVE_E2S_RUNTIME_DIR="/opt/physicsnemo-serve/runtimes/${PHYSICSNEMO_SERVE_E2S_RUNTIME_NAME}" \
+    PHYSICSNEMO_SERVE_CFD_RUNTIME_DIR="/opt/physicsnemo-serve/runtimes/${PHYSICSNEMO_SERVE_CFD_RUNTIME_NAME}" \
     PHYSICSNEMO_SERVE_E2S_ZARR_BACKEND="python" \
     E2S_PREFETCH_ALLOWED_HTTPS_HOSTS="huggingface.co,us.aws.cdn.hf.co,cas-bridge.xethub.hf.co,raw.githubusercontent.com" \
     E2S_PREFETCH_ALLOWED_SIGNED_REDIRECT_HOSTS="us.aws.cdn.hf.co,cas-bridge.xethub.hf.co" \
     E2S_DOWNLOAD_TIMEOUT_SECS="1800" \
     UV_PYTHON_INSTALL_DIR="/opt/physicsnemo-serve/uv-python" \
+    CC="/usr/bin/gcc" \
+    CXX="/usr/bin/g++" \
+    TRITON_CACHE_DIR="/tmp/physicsnemo-triton-cache" \
     PATH="/usr/local/bin:${PATH}"
 
 WORKDIR /workspace

@@ -438,6 +438,7 @@ def build_binary_job_args(
         "--resource-shape", args.resource_shape,
         "--image-pull-secrets", args.pull_secret,
         "--mount", f"{nfs_path}:{args.mount_target}:node-nfs:{args.lustre_storage}",
+        "--max-failure-retry", "1",
         *env_flags,
         "--command", binary_command,
     ]

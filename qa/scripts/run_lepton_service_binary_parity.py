@@ -393,12 +393,18 @@ def build_binary_command(
     infer_args = [
         "physicsnemo-serve",
         "infer",
-        "--plugin", BINARY_PLUGIN_DIR,
-        "--runtime-dir", BINARY_RUNTIME_DIR,
-        "--request", request_path,
-        "--output-dir", output_dir,
-        "--run-id", BINARY_RUN_SUBID,
-        "--device", "0",
+        "--plugin",
+        BINARY_PLUGIN_DIR,
+        "--runtime-dir",
+        BINARY_RUNTIME_DIR,
+        "--request",
+        request_path,
+        "--output-dir",
+        output_dir,
+        "--run-id",
+        BINARY_RUN_SUBID,
+        "--device",
+        "0",
     ]
 
     # mkdir -p is intentional: Lepton's --max-failure-retry reruns the same
@@ -435,15 +441,23 @@ def build_binary_job_args(
     env_flags += ["--env", f"HF_HOME={hf_cache}"]
     env_flags += ["--env", f"PHYSICSNEMO_CFD_MODEL_CACHE={model_cache}"]
     return [
-        "--name", job_name(profile, run_id),
-        "--container-image", binary_image,
-        "--node-group", args.node_group,
-        "--resource-shape", args.resource_shape,
-        "--image-pull-secrets", args.pull_secret,
-        "--mount", f"{nfs_path}:{args.mount_target}:node-nfs:{args.lustre_storage}",
-        "--max-failure-retry", "1",
+        "--name",
+        job_name(profile, run_id),
+        "--container-image",
+        binary_image,
+        "--node-group",
+        args.node_group,
+        "--resource-shape",
+        args.resource_shape,
+        "--image-pull-secrets",
+        args.pull_secret,
+        "--mount",
+        f"{nfs_path}:{args.mount_target}:node-nfs:{args.lustre_storage}",
+        "--max-failure-retry",
+        "1",
         *env_flags,
-        "--command", binary_command,
+        "--command",
+        binary_command,
     ]
 
 
@@ -503,9 +517,7 @@ def run_rest_qa(
     if not request_path.is_absolute():
         request_path = REPO_ROOT / request_path
     if not request_path.is_file():
-        raise ParityContractError(
-            f"REST parity request does not exist: {request_path}"
-        )
+        raise ParityContractError(f"REST parity request does not exist: {request_path}")
     command = [
         sys.executable,
         "-u",
@@ -586,16 +598,24 @@ def fetch_binary_report_via_reader_job(
         f"print({BINARY_REPORT_END!r}, flush=True)\n"
     )
     encoded = base64.b64encode(reader_python.encode("utf-8")).decode("ascii")
-    reader_command = f"printf %s {shlex.quote(encoded)} | base64 -d | python3 2>&1; sleep 30"
+    reader_command = (
+        f"printf %s {shlex.quote(encoded)} | base64 -d | python3 2>&1; sleep 30"
+    )
     reader_args = [
-        "--name", reader_name,
-        "--container-image", service_image,
-        "--node-group", args.node_group,
-        "--resource-shape", args.reader_resource_shape,
-        "--image-pull-secrets", args.pull_secret,
+        "--name",
+        reader_name,
+        "--container-image",
+        service_image,
+        "--node-group",
+        args.node_group,
+        "--resource-shape",
+        args.reader_resource_shape,
+        "--image-pull-secrets",
+        args.pull_secret,
         "--mount",
         f"{nfs_path}:{args.mount_target}:node-nfs:{args.lustre_storage}",
-        "--command", reader_command,
+        "--command",
+        reader_command,
     ]
     print(f"==> Fetching binary report with reader job: {reader_name}", flush=True)
     returncode, output = run_streaming(
@@ -763,9 +783,7 @@ def run(args: argparse.Namespace) -> int:  # noqa: PLR0912, PLR0915
         write_json_atomic(handoff_path, handoff)
         summary["rest_run_id"] = handoff["rest_run_id"]
         summary["artifacts"]["handoff"] = str(handoff_path)
-        rest_output_nfs = (
-            f"{nfs_path}/{Path(handoff['rest']['report_relpath']).parent}"
-        )
+        rest_output_nfs = f"{nfs_path}/{Path(handoff['rest']['report_relpath']).parent}"
         summary["artifacts"]["rest_output_dir"] = rest_output_nfs
         print(f"\n==> REST output dir:    {rest_output_nfs}", flush=True)
 
@@ -843,11 +861,11 @@ def run(args: argparse.Namespace) -> int:  # noqa: PLR0912, PLR0915
         if job_returncode != 0:
             run_streaming(["lep", "job", "stop", "-i", job_id], env=env)
 
-        binary_output_nfs = (
-            f"{nfs_path}/cfd-binary/{run_id}/output/{BINARY_RUN_SUBID}/<attempt>/benchmark-output"
-        )
+        binary_output_nfs = f"{nfs_path}/cfd-binary/{run_id}/output/{BINARY_RUN_SUBID}/<attempt>/benchmark-output"
         summary["artifacts"]["binary_output_dir"] = binary_output_nfs
-        summary["artifacts"]["binary_job_log"] = str(run_artifact_dir / "binary-job.log")
+        summary["artifacts"]["binary_job_log"] = str(
+            run_artifact_dir / "binary-job.log"
+        )
         print(f"\n==> Binary output dir:  {binary_output_nfs}", flush=True)
 
         capture_job_logs(
@@ -882,9 +900,7 @@ def run(args: argparse.Namespace) -> int:  # noqa: PLR0912, PLR0915
         rest_report = json.loads(
             (evidence_dir / "benchmark_results.json").read_text(encoding="utf-8")
         )
-        write_json_atomic(
-            run_artifact_dir / "rest-benchmark_results.json", rest_report
-        )
+        write_json_atomic(run_artifact_dir / "rest-benchmark_results.json", rest_report)
 
         # -- Phase 8: Compare ------------------------------------------------
         if job_returncode != 0:
@@ -984,7 +1000,7 @@ def _print_result(summary: dict[str, Any]) -> None:
     run_id = summary.get("run_id", "?")
     artifacts = summary.get("artifacts", {})
 
-    print(f"\n{'='*60}", flush=True)
+    print(f"\n{'=' * 60}", flush=True)
 
     rest_out = artifacts.get("rest_output_dir")
     if rest_out:
@@ -1027,9 +1043,9 @@ def _print_result(summary: dict[str, Any]) -> None:
         if rest_log_path and Path(rest_log_path).is_file():
             _print_log_failures(Path(rest_log_path))
 
-    print(f"{'='*60}", flush=True)
+    print(f"{'=' * 60}", flush=True)
     print(f"  Binary parity run {run_id}: {result.upper()}", flush=True)
-    print(f"{'='*60}\n", flush=True)
+    print(f"{'=' * 60}\n", flush=True)
 
 
 # ---------------------------------------------------------------------------

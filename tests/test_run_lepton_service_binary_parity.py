@@ -14,7 +14,9 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS_DIR = REPO_ROOT / "qa" / "scripts"
-PROFILE_PATH = REPO_ROOT / "qa" / "inference" / "cfd_parity_surface_run1_full_matrix.json"
+PROFILE_PATH = (
+    REPO_ROOT / "qa" / "inference" / "cfd_parity_surface_run1_full_matrix.json"
+)
 sys.path.insert(0, str(SCRIPTS_DIR))
 
 import cfd_parity_contract as contract  # noqa: E402
@@ -163,7 +165,13 @@ def _args(tmp_path: Path, evidence: Path) -> argparse.Namespace:
         binary_image="nvcr.io/nvidia/physicsnemo-serve-cmd:pr-14-1c397c1",
         matrix="three",
         profile=str(PROFILE_PATH),
-        rest_request_path=str(REPO_ROOT / "plugins" / "physicsnemo-cfd-surface-benchmark" / "examples" / "public_run_1_3model_request.json"),
+        rest_request_path=str(
+            REPO_ROOT
+            / "plugins"
+            / "physicsnemo-cfd-surface-benchmark"
+            / "examples"
+            / "public_run_1_3model_request.json"
+        ),
         rest_evidence_dir=str(evidence),
         run_id="binary-test",
         artifact_dir=str(tmp_path / "artifacts"),
@@ -262,6 +270,7 @@ def test_binary_command_injects_request_json_via_base64() -> None:
     )
     # Extract base64 payload from "printf %s <payload>" in the write command.
     import re
+
     match = re.search(r"printf %s (\S+)", write_cmd)
     assert match, "base64 write command has unexpected format"
     raw = match.group(1).strip("'\"")

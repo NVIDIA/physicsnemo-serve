@@ -72,10 +72,7 @@ def test_cfd_image_uses_pinned_isolated_runtime_and_packages_plugins() -> None:
         'importlib.metadata.version("torch-scatter") == expected_torch_scatter'
         in dockerfile
     )
-    assert (
-        'assert torch.version.cuda == "12.8"'
-        in dockerfile
-    )
+    assert 'assert torch.version.cuda == "12.8"' in dockerfile
     assert (
         '"$PHYSICSNEMO_CFD_PYTHON_EXECUTABLE" -m pip install '
         "--no-cache-dir /tmp/wheels/*.whl" in dockerfile

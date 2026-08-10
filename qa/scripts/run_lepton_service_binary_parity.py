@@ -296,13 +296,13 @@ def wait_for_loggable_job(
             check=False,
         )
         state = _job_state(result.stdout or "")
-        if state in {
-            "Running",
-            "Completed",
-            "Succeeded",
-            "Success",
-            "Failed",
-            "Error",
+        if state is not None and state.lower() in {
+            "running",
+            "completed",
+            "succeeded",
+            "success",
+            "failed",
+            "error",
         }:
             time.sleep(5)
             return
@@ -402,6 +402,10 @@ def build_binary_command(
         "--device", "0",
     ]
 
+    # mkdir -p is intentional: Lepton's --max-failure-retry reruns the same
+    # command, so we must not reject an existing root directory. Results are
+    # isolated in attempt-specific subdirectories created by the binary, and
+    # the report reader always picks the newest by mtime.
     setup = [
         f"mkdir -p {shlex.quote(root)}",
         base64_write_command(request_path, request_text),

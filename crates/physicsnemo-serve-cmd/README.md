@@ -244,12 +244,39 @@ packaging/physicsnemo-serve-cmd/external-runtime/run.sh \
 
 ### Runtimes in the Docker image
 
-The CLI Docker image ships two pre-built plugin runtimes with independent CUDA
+The CLI Dockerfile exposes two final image targets. The default
+`ubuntu-runtime` target uses the minimal Jammy base and keeps independent CUDA
 stacks:
 
 ```text
 /opt/physicsnemo-serve/runtimes/e2s   # consolidated E2S requirements, cu130
 /opt/physicsnemo-serve/runtimes/cfd   # CFD requirements, cu128
+```
+
+Build it with `make serve-cmd-image`, or directly with Docker:
+
+```bash
+docker build \
+    --target ubuntu-runtime \
+    --file Dockerfile.physicsnemo-serve-cmd \
+    --tag physicsnemo-serve-cmd:latest \
+    .
+```
+
+The `pytorch-runtime` target is based on `nvcr.io/nvidia/pytorch:26.01-py3`,
+matching the service's PyTorch/CUDA toolkit foundation. Both isolated plugin
+runtimes use cu130 wheels, including the CFD runtime generated from
+`requirements-cfd-cu130.lock`:
+
+```bash
+make serve-cmd-pytorch-image
+
+# Equivalent direct build:
+docker build \
+    --target pytorch-runtime \
+    --file Dockerfile.physicsnemo-serve-cmd \
+    --tag physicsnemo-serve-cmd:pytorch \
+    .
 ```
 
 The image defaults to the E2S runtime via `PHYSICSNEMO_SERVE_RUNTIME_DIR`. To

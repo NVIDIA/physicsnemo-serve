@@ -22,11 +22,13 @@ SERVE_CMD_RUST_TOOLCHAIN ?= 1.94.1
 SERVE_CMD_PYTHON_VERSION ?= 3.12
 SERVE_CMD_RUNTIME_REQUIREMENTS ?= packaging/physicsnemo-serve-cmd/runtime-base.lock
 SERVE_CMD_COMPRESSION_LEVEL ?= 5
+SERVE_CMD_DOCKER_IMAGE ?= physicsnemo-serve-cmd:latest
+SERVE_CMD_PYTORCH_DOCKER_IMAGE ?= physicsnemo-serve-cmd:pytorch
 
 SERVE_CMD_IMAGE_NAME ?= $(DOCKER_REPO)/physicsnemo-serve-cmd
 SERVE_CMD_IMAGE_TAG ?= $(IMAGE_TAG)
 
-.PHONY: image runtime-base-image serve-cmd-image build install-serve-cmd-builders build-serve-cmd build-serve-cmd-self-contained build-serve-cmd-linux-amd64 build-serve-installer build-serve-installer-linux-amd64 clean clean-all experiments observe stress
+.PHONY: image runtime-base-image serve-cmd-image serve-cmd-pytorch-image build install-serve-cmd-builders build-serve-cmd build-serve-cmd-self-contained build-serve-cmd-linux-amd64 build-serve-installer build-serve-installer-linux-amd64 clean clean-all experiments observe stress
 
 # Build the main PhysicsNeMo Serve container image on top of the runtime base image.
 image: runtime-base-image
@@ -43,6 +45,14 @@ serve-cmd-image:
 	DOCKER_BUILDKIT=1 docker build --platform linux/amd64 \
 		-t $(SERVE_CMD_IMAGE_NAME):$(SERVE_CMD_IMAGE_TAG) \
 		-f Dockerfile.physicsnemo-serve-cmd .
+
+# Build the original Ubuntu-based CLI image with E2S cu130 and CFD cu128.
+serve-cmd-image:
+	DOCKER_BUILDKIT=1 docker build --target ubuntu-runtime -t $(SERVE_CMD_DOCKER_IMAGE) -f Dockerfile.physicsnemo-serve-cmd .
+
+# Build the NGC PyTorch-based CLI image with E2S and CFD both on cu130.
+serve-cmd-pytorch-image:
+	DOCKER_BUILDKIT=1 docker build --target pytorch-runtime -t $(SERVE_CMD_PYTORCH_DOCKER_IMAGE) -f Dockerfile.physicsnemo-serve-cmd .
 
 # Compile the inference server and worker runtime in release mode.
 build:

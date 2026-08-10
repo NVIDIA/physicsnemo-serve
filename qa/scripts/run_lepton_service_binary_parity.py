@@ -50,7 +50,6 @@ from cfd_parity_contract import (
     ParityContractError,
     build_handoff,
     compare_reports,
-    read_json_object,
     validate_profile,
     write_json_atomic,
 )

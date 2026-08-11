@@ -48,6 +48,7 @@ import subprocess
 import sys
 import threading
 import time
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 
@@ -133,20 +134,20 @@ ALL_WORKFLOW_PLUGIN_IDS = [
 WORKFLOW_ALL = "__all__"
 
 
-def determine_workflows(
+def determine_e2s_workflows(
     *,
     service: str,
     workflows_arg: str | None,
     suite: str = "",
 ) -> list[str]:
-    """Determine which workflow plugin IDs to iterate over.
+    """Determine which Earth2Studio workflow plugin IDs to iterate over.
 
     Priority:
     1. PHYSICSNEMO_SERVE_ENABLED_PLUGIN_ID env var (single workflow, legacy mode)
     2. --workflows CLI arg (comma-separated list)
     3. For Rust publication QA: plugins selected by the publication requests
-    4. For Rust CFD E2E QA: the PhysicsNeMo-CFD surface benchmark plugin
-    5. For the Rust service: full list of all known plugin IDs (one deploy each)
+    4. For Rust CFD-only QA (cfd_e2e): no E2S workflows
+    5. For the Rust service: full list of all known E2S plugin IDs (one deploy each)
        For the Python service: single deployment running all workflows at once
     """
     env_plugin_id = os.environ.get("PHYSICSNEMO_SERVE_ENABLED_PLUGIN_ID", "").strip()
@@ -169,12 +170,36 @@ def determine_workflows(
         )
 
     if service == "rust" and suite == "cfd_e2e":
-        return [CFD_E2E_WORKFLOW_ID]
+        return []
 
     if service == "python":
         return [WORKFLOW_ALL]
 
     return list(ALL_WORKFLOW_PLUGIN_IDS)
+
+
+def determine_cfd_workflows(*, service: str, suite: str) -> list[str]:
+    """Return CFD workflow IDs to test.
+
+    Returns the PhysicsNeMo-CFD surface benchmark plugin for dedicated CFD runs
+    (--suite cfd_e2e) and as an appended step for full QA (--suite full).
+    Returns an empty list for all other suites.
+    """
+    if service == "rust" and suite in ("cfd_e2e", "full"):
+        return [CFD_E2E_WORKFLOW_ID]
+    return []
+
+
+def determine_workflows(
+    *,
+    service: str,
+    workflows_arg: str | None,
+    suite: str = "",
+) -> list[str]:
+    """Return all workflow IDs: E2S workflows followed by CFD workflows."""
+    return determine_e2s_workflows(
+        service=service, workflows_arg=workflows_arg, suite=suite
+    ) + determine_cfd_workflows(service=service, suite=suite)
 
 
 def command_output_text(output: str | bytes | None) -> str:
@@ -1097,6 +1122,29 @@ def run_one_workflow(
         _teardown_this()
 
 
+def _pytest_counts(artifact_dir: Path, workflow_id: str) -> str:
+    """Return 'N passed / M total' by parsing the newest JUnit XML for the workflow."""
+    results_dir = artifact_dir / "pytest-results"
+    slug = re.sub(r"[^a-zA-Z0-9_-]", "_", workflow_id)
+    xmls = sorted(results_dir.glob(f"results_{slug}_*.xml"), key=lambda p: p.stat().st_mtime)
+    if not xmls:
+        return ""
+    try:
+        root = ET.parse(xmls[-1]).getroot()
+        suite = root if root.tag == "testsuite" else root.find("testsuite")
+        if suite is None:
+            return ""
+        total = int(suite.get("tests", 0))
+        failures = int(suite.get("failures", 0))
+        errors = int(suite.get("errors", 0))
+        skipped = int(suite.get("skipped", 0))
+        passed = total - failures - errors - skipped
+        ran = total - skipped
+        return f"{passed} passed / {ran} ran"
+    except Exception:
+        return ""
+
+
 def main():
     _ensure_line_buffered()
     parser = argparse.ArgumentParser(
@@ -1273,43 +1321,44 @@ def main():
     if not artifact_dir.is_absolute():
         artifact_dir = Path.cwd() / artifact_dir
 
-    workflows = determine_workflows(
+    e2s_workflows = determine_e2s_workflows(
         service=args.service,
         workflows_arg=args.workflows,
         suite=args.suite,
     )
-    if args.suite == "cfd_e2e" and workflows != [CFD_E2E_WORKFLOW_ID]:
+    cfd_workflows = determine_cfd_workflows(service=args.service, suite=args.suite)
+    all_workflows = e2s_workflows + cfd_workflows
+
+    if args.suite == "cfd_e2e" and e2s_workflows:
         sys.exit(
             "Error: --suite cfd_e2e must run only "
             f"{CFD_E2E_WORKFLOW_ID!r}; remove conflicting workflow selection."
         )
-    if args.suite == "cfd_e2e":
-        container_envs.extend(cfd_e2e_container_envs())
 
     endpoint_name_override = None
-    if len(workflows) == 1 and args.endpoint_name:
+    if len(all_workflows) == 1 and args.endpoint_name:
         endpoint_name_override = args.endpoint_name
-    elif len(workflows) > 1 and args.endpoint_name:
+    elif len(all_workflows) > 1 and args.endpoint_name:
         print(
             "Warning: --endpoint-name is ignored in multi-workflow mode "
             "(each workflow gets a unique endpoint name).",
             flush=True,
         )
 
-    if len(workflows) > 1 and args.skip_teardown:
+    if len(all_workflows) > 1 and args.skip_teardown:
         print(
             "Warning: --skip-teardown only applies to single-workflow runs. "
             "Ignoring in multi-workflow mode to avoid leaking GPU resources.",
             flush=True,
         )
 
-    skip_teardown = args.skip_teardown and len(workflows) == 1
+    skip_teardown = args.skip_teardown and len(all_workflows) == 1
 
     print(
-        f"\n==> QA run: {len(workflows)} workflow(s) to test sequentially",
+        f"\n==> QA run: {len(all_workflows)} workflow(s) to test sequentially",
         flush=True,
     )
-    for i, wf in enumerate(workflows, 1):
+    for i, wf in enumerate(all_workflows, 1):
         print(f"    {i}. {wf}", flush=True)
     print(flush=True)
 
@@ -1339,7 +1388,9 @@ def main():
     atexit.register(_atexit_teardown)
 
     results: list[tuple[str, int]] = []
-    for workflow_id in workflows:
+
+    # Run E2S workflows with standard configuration.
+    for workflow_id in e2s_workflows:
         exit_code = run_one_workflow(
             workflow_id=workflow_id,
             source=source,
@@ -1363,6 +1414,48 @@ def main():
         )
         results.append((workflow_id, exit_code))
 
+    # Run CFD workflows with their dedicated configuration:
+    # - CFD-specific container envs (executor class, prefetch hosts, ext cache)
+    # - suite="cfd_e2e" so run_one_workflow applies QA_CFD_E2E_ENABLED=1
+    # - public_run_1_full_matrix_request.json (all 5 models) unless overridden
+    if cfd_workflows:
+        _cfd_default_request = (
+            SCRIPTS_DIR.parent.parent
+            / "plugins"
+            / "physicsnemo-cfd-surface-benchmark"
+            / "examples"
+            / "public_run_1_full_matrix_request.json"
+        )
+        _cfd_request_was_set = bool(os.environ.get("QA_CFD_E2E_REQUEST_PATH", "").strip())
+        if not _cfd_request_was_set:
+            os.environ["QA_CFD_E2E_REQUEST_PATH"] = str(_cfd_default_request)
+        try:
+            for workflow_id in cfd_workflows:
+                exit_code = run_one_workflow(
+                    workflow_id=workflow_id,
+                    source=source,
+                    service=args.service,
+                    image_tag=args.image_tag,
+                    workspace_id=workspace_id,
+                    workspace_token=workspace_token,
+                    endpoint_token=endpoint_token,
+                    nfs_path=nfs_path,
+                    suite="cfd_e2e",
+                    test_filter=args.test_filter,
+                    num_proc=min(args.num_proc, 1),
+                    skip_teardown=False,
+                    stream_logs=args.stream_endpoint_logs,
+                    log_interval=args.endpoint_log_interval,
+                    artifact_dir=artifact_dir,
+                    post_health_wait_secs=args.post_health_wait_secs,
+                    container_envs=list(container_envs) + cfd_e2e_container_envs(),
+                    deploy_config=_deploy_cfg,
+                )
+                results.append((workflow_id, exit_code))
+        finally:
+            if not _cfd_request_was_set:
+                os.environ.pop("QA_CFD_E2E_REQUEST_PATH", None)
+
     # Print summary table
     print(
         f"\n{'=' * 76}\n  QA SUMMARY\n{'=' * 76}",
@@ -1373,7 +1466,9 @@ def main():
         status = "PASS" if exit_code == 0 else "FAIL"
         if exit_code != 0:
             any_failed = True
-        print(f"  [{status}] {workflow_id} (exit code: {exit_code})", flush=True)
+        test_counts = _pytest_counts(artifact_dir, workflow_id)
+        counts_str = f" ({test_counts})" if test_counts else ""
+        print(f"  [{status}] {workflow_id}{counts_str}", flush=True)
 
     total = len(results)
     passed = sum(1 for _, code in results if code == 0)

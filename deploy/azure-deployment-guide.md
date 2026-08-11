@@ -148,7 +148,7 @@ Then build and push the runtime-base image (takes ~15–20 min on first run):
 DOCKER_BUILDKIT=1 docker build \
   --build-arg PYTORCH_BASE_IMAGE=nvcr.io/nvidia/pytorch:26.01-py3 \
   -t "$RUNTIME_BASE_IMAGE" \
-  -f Dockerfile.Earth2Studio.runtime-base .
+  -f Dockerfile.physicsnemo-serve.runtime-base .
 
 docker push "$RUNTIME_BASE_IMAGE"
 ```
@@ -166,14 +166,14 @@ export PYTORCH_BASE_IMAGE="<registry>/<repository>:<tag>"
 DOCKER_BUILDKIT=1 docker build \
   --build-arg PYTORCH_BASE_IMAGE="$PYTORCH_BASE_IMAGE" \
   -t "$RUNTIME_BASE_IMAGE" \
-  -f Dockerfile.Earth2Studio.runtime-base .
+  -f Dockerfile.physicsnemo-serve.runtime-base .
 
 docker push "$RUNTIME_BASE_IMAGE"
 ```
 
 Log in to the alternative registry only if it requires authentication. A public
 image can be pulled without an NGC API key. The alternative image must be compatible
-with `Dockerfile.Earth2Studio.runtime-base`: Linux/amd64, an `apt`-based userland,
+with `Dockerfile.physicsnemo-serve.runtime-base`: Linux/amd64, an `apt`-based userland,
 Python 3, a CUDA-enabled PyTorch installation, and a CUDA toolkit available at
 `/usr/local/cuda` for building CUDA extensions.
 
@@ -190,7 +190,7 @@ DOCKER_BUILDKIT=1 DOCKER_REPO="$ACR_LOGIN_SERVER" \
   docker build \
   --build-arg PHYSICSNEMO_SERVE_RUNTIME_BASE_IMAGE="$RUNTIME_BASE_IMAGE" \
   -t "${IMAGE_NAME}:${IMAGE_TAG}" \
-  -f Dockerfile.Earth2Studio.scicomp-rust-slim .
+  -f Dockerfile.physicsnemo-serve.scicomp-rust-slim .
 
 docker push "${IMAGE_NAME}:${IMAGE_TAG}"
 ```

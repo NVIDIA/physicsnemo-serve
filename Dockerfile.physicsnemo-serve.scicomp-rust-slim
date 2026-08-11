@@ -7,7 +7,7 @@
 # - Stage 3 (builder): Cook dependencies (cached), then build binaries
 # - Stage 4 (runtime): Minimal image with binaries + Python wheel
 #
-# Build with: DOCKER_BUILDKIT=1 docker build -f Dockerfile.Earth2Studio.scicomp-rust-slim -t e2s-rust .
+# Build with: DOCKER_BUILDKIT=1 docker build -f Dockerfile.physicsnemo-serve.scicomp-rust-slim -t e2s-rust .
 
 # =============================================================================
 # Stage 1: Chef - Shared Rust build tooling
@@ -221,9 +221,9 @@ ARG E2G_HASH=11dcf1b0787a7eb6a8497a3a5a5e1fdcc31232d3
 ARG PHYSICSNEMO_CFD_COMMIT=921f14dc2ac14c04aabffaba3290deb792379dd8
 ARG PHYSICSNEMO_CFD_VERSION=0.0.2
 ARG PHYSICSNEMO_VERSION=2.1.1
-ARG PHYSICSNEMO_CFD_TORCH_VERSION=2.10.0+cu130
-ARG PHYSICSNEMO_CFD_TORCHVISION_VERSION=0.25.0+cu130
-ARG PHYSICSNEMO_CFD_TORCH_SCATTER_VERSION=2.1.2+pt210cu130
+ARG PHYSICSNEMO_CFD_TORCH_VERSION=2.10.0+cu128
+ARG PHYSICSNEMO_CFD_TORCHVISION_VERSION=0.25.0+cu128
+ARG PHYSICSNEMO_CFD_TORCH_SCATTER_VERSION=2.1.2+pt210cu128
 ARG PHYSICSNEMO_NUMPY_VERSION=2.2.6
 ARG PHYSICSNEMO_SCIPY_VERSION=1.18.0
 
@@ -260,12 +260,12 @@ RUN test "$(python3.12 -c 'import sys; print(f"{sys.version_info.major}.{sys.ver
         --no-cache-dir --upgrade pip setuptools wheel
 
 # PhysicsNeMo 2.1.1 requires the final PyTorch 2.10 release. Install the CUDA
-# 13.0 wheel into the CFD venv so the base image's 2.10 alpha build and global
-# pip constraint remain unchanged for Earth2Studio.
-# Use PhysicsNeMo's cu13 extra as the compatibility boundary for RAPIDS and
-# CuPy (notably its <14 CuPy cap), then layer the CFD GPU/HF extras on top.
+# 12.8 wheel into the CFD venv to match the binary-mode runtime for numerical
+# parity. The E2S venv above uses cu130; CFD uses cu128 intentionally.
+# Use PhysicsNeMo's cu12 extra as the compatibility boundary for RAPIDS and
+# CuPy, then layer the CFD GPU/HF extras on top.
 RUN env -u PIP_CONSTRAINT "$PHYSICSNEMO_CFD_PYTHON_EXECUTABLE" -m pip install \
-        --no-cache-dir --index-url https://download.pytorch.org/whl/cu130 \
+        --no-cache-dir --index-url https://download.pytorch.org/whl/cu128 \
         "torch==${PHYSICSNEMO_CFD_TORCH_VERSION}" \
         "torchvision==${PHYSICSNEMO_CFD_TORCHVISION_VERSION}" \
     && printf 'torch==%s\ntorchvision==%s\nnumpy==%s\nscipy==%s\n' \
@@ -282,12 +282,14 @@ RUN env -u PIP_CONSTRAINT "$PHYSICSNEMO_CFD_PYTHON_EXECUTABLE" -m pip install \
     && env -u PIP_CONSTRAINT "$PHYSICSNEMO_CFD_PYTHON_EXECUTABLE" -m pip install --no-cache-dir \
         --constraint /tmp/physicsnemo-cfd-constraints.txt \
         --extra-index-url https://pypi.nvidia.com \
-        "nvidia-physicsnemo[cu13]==${PHYSICSNEMO_VERSION}" \
-        "nvidia-physicsnemo-cfd[gpu,evaluation-hf] @ git+https://github.com/NVIDIA/physicsnemo-cfd.git@${PHYSICSNEMO_CFD_COMMIT}" \
+        "nvidia-physicsnemo[cu12]==${PHYSICSNEMO_VERSION}" \
+        "nvidia-physicsnemo-cfd[evaluation-hf] @ git+https://github.com/NVIDIA/physicsnemo-cfd.git@${PHYSICSNEMO_CFD_COMMIT}" \
     && env -u PIP_CONSTRAINT "$PHYSICSNEMO_CFD_PYTHON_EXECUTABLE" -m pip install --no-cache-dir \
         --no-index \
-        --find-links "https://data.pyg.org/whl/torch-2.10.0+cu130.html" \
+        --find-links "https://data.pyg.org/whl/torch-2.10.0+cu128.html" \
         "torch-scatter==${PHYSICSNEMO_CFD_TORCH_SCATTER_VERSION}" \
+    && env -u PIP_CONSTRAINT "$PHYSICSNEMO_CFD_PYTHON_EXECUTABLE" -m pip install --no-cache-dir \
+        'numpy==2.2.6' 'scipy==1.18.0' 'torch-geometric==2.8.0.post1' \
     && "$PHYSICSNEMO_CFD_PYTHON_EXECUTABLE" -m pip check
 
 # Fail the image build if the requested source revision, versions, Python ABI,
@@ -334,17 +336,14 @@ assert importlib.metadata.version("torchvision") == expected_torchvision
 assert importlib.metadata.version("torch-scatter") == expected_torch_scatter
 assert numpy.__version__ == expected_numpy
 assert scipy.__version__ == expected_scipy
-assert torch.version.cuda == "13.0"
+assert torch.version.cuda == "12.8"
 
 distribution = importlib.metadata.distribution("nvidia-physicsnemo-cfd")
 direct_url_text = distribution.read_text("direct_url.json")
 assert direct_url_text is not None
 direct_url = json.loads(direct_url_text)
 assert direct_url["vcs_info"]["commit_id"] == expected_commit
-assert Version(importlib.metadata.version("cupy-cuda13x")) < Version("14.0.0")
 for package, module in (
-    ("cupy-cuda13x", "cupy"),
-    ("cuml-cu13", "cuml"),
     ("huggingface-hub", "huggingface_hub"),
     ("torch-geometric", "torch_geometric"),
     ("torch-scatter", "torch_scatter"),

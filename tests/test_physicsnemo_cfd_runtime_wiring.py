@@ -10,7 +10,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 RUNTIME_CONFIG = REPO_ROOT / "scripts" / "worker_runtime_config.json"
-DOCKERFILE = REPO_ROOT / "Dockerfile.Earth2Studio.scicomp-rust-slim"
+DOCKERFILE = REPO_ROOT / "Dockerfile.physicsnemo-serve.scicomp-rust-slim"
 CFD_PYTHON = "/opt/physicsnemo-cfd-venv/bin/python"
 CFD_MODEL_CACHE = "/outputs/.cache/physicsnemo-cfd/models"
 
@@ -46,15 +46,15 @@ def test_cfd_image_uses_pinned_isolated_runtime_and_packages_plugins() -> None:
     )
     assert "ARG PHYSICSNEMO_CFD_VERSION=0.0.2" in dockerfile
     assert "ARG PHYSICSNEMO_VERSION=2.1.1" in dockerfile
-    assert "ARG PHYSICSNEMO_CFD_TORCH_VERSION=2.10.0+cu130" in dockerfile
-    assert "ARG PHYSICSNEMO_CFD_TORCH_SCATTER_VERSION=2.1.2+pt210cu130" in dockerfile
+    assert "ARG PHYSICSNEMO_CFD_TORCH_VERSION=2.10.0+cu128" in dockerfile
+    assert "ARG PHYSICSNEMO_CFD_TORCH_SCATTER_VERSION=2.1.2+pt210cu128" in dockerfile
     assert 'python3.12 -m venv "$PHYSICSNEMO_CFD_VENV"' in dockerfile
     assert "python3.12 -m venv --system-site-packages" not in dockerfile
-    assert "base image's 2.10 alpha build" in dockerfile
+    assert "CFD uses cu128 intentionally" in dockerfile
     assert 'env -u PIP_CONSTRAINT "$PHYSICSNEMO_CFD_PYTHON_EXECUTABLE"' in dockerfile
-    assert "--index-url https://download.pytorch.org/whl/cu130" in dockerfile
-    assert '"nvidia-physicsnemo[cu13]==${PHYSICSNEMO_VERSION}"' in dockerfile
-    assert "nvidia-physicsnemo-cfd[gpu,evaluation-hf] @ git+https://" in dockerfile
+    assert "--index-url https://download.pytorch.org/whl/cu128" in dockerfile
+    assert '"nvidia-physicsnemo[cu12]==${PHYSICSNEMO_VERSION}"' in dockerfile
+    assert "nvidia-physicsnemo-cfd[evaluation-hf] @ git+https://" in dockerfile
     assert '"$PHYSICSNEMO_CFD_PYTHON_EXECUTABLE" -m pip check' in dockerfile
     assert 'direct_url["vcs_info"]["commit_id"] == expected_commit' in dockerfile
     assert "assert torch.__version__ == expected_torch" in dockerfile
@@ -62,20 +62,17 @@ def test_cfd_image_uses_pinned_isolated_runtime_and_packages_plugins() -> None:
         'importlib.metadata.version("torchvision") == expected_torchvision'
         in dockerfile
     )
-    assert 'assert torch.version.cuda == "13.0"' in dockerfile
+    assert 'assert torch.version.cuda == "12.8"' in dockerfile
     assert "/tmp/physicsnemo-cfd-constraints.txt" in dockerfile
     assert '"torch==${PHYSICSNEMO_CFD_TORCH_VERSION}"' in dockerfile
     assert '"torchvision==${PHYSICSNEMO_CFD_TORCHVISION_VERSION}"' in dockerfile
     assert '"torch-scatter==${PHYSICSNEMO_CFD_TORCH_SCATTER_VERSION}"' in dockerfile
-    assert "https://data.pyg.org/whl/torch-2.10.0+cu130.html" in dockerfile
+    assert "https://data.pyg.org/whl/torch-2.10.0+cu128.html" in dockerfile
     assert (
         'importlib.metadata.version("torch-scatter") == expected_torch_scatter'
         in dockerfile
     )
-    assert (
-        'Version(importlib.metadata.version("cupy-cuda13x")) < Version("14.0.0")'
-        in dockerfile
-    )
+    assert 'assert torch.version.cuda == "12.8"' in dockerfile
     assert (
         '"$PHYSICSNEMO_CFD_PYTHON_EXECUTABLE" -m pip install '
         "--no-cache-dir /tmp/wheels/*.whl" in dockerfile

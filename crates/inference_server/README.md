@@ -28,4 +28,4 @@ curl http://localhost:8080/v1/infer/workflows
 
 ## Docker
 
-The repository still keeps `Dockerfile.Earth2Studio.scicomp-rust-slim` for deployments that need it.
+The repository still keeps `Dockerfile.physicsnemo-serve.scicomp-rust-slim` for deployments that need it.

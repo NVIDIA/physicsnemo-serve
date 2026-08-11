@@ -6,7 +6,7 @@ _cfg = $(shell grep '^$(1):' deploy/config.yaml 2>/dev/null | head -1 | sed 's/^
 
 DOCKER_REPO ?= $(call _cfg,docker_registry)
 IMAGE_NAME ?= $(DOCKER_REPO)/$(call _cfg,image_name)
-IMAGE_TAG = v0.1.20260714.0
+IMAGE_TAG = v0.1.20260810.1
 RUNTIME_BASE_IMAGE_NAME ?= $(DOCKER_REPO)/$(call _cfg,runtime_base_image)
 RUNTIME_BASE_IMAGE_TAG = pytorch-26.01-py3-th0.8.0
 RUNTIME_BASE_IMAGE = $(RUNTIME_BASE_IMAGE_NAME):$(RUNTIME_BASE_IMAGE_TAG)
@@ -23,17 +23,26 @@ SERVE_CMD_PYTHON_VERSION ?= 3.12
 SERVE_CMD_RUNTIME_REQUIREMENTS ?= packaging/physicsnemo-serve-cmd/runtime-base.lock
 SERVE_CMD_COMPRESSION_LEVEL ?= 5
 
-.PHONY: image runtime-base-image build install-serve-cmd-builders build-serve-cmd build-serve-cmd-self-contained build-serve-cmd-linux-amd64 build-serve-installer build-serve-installer-linux-amd64 clean clean-all experiments observe stress
+SERVE_CMD_IMAGE_NAME ?= $(DOCKER_REPO)/physicsnemo-serve-cmd
+SERVE_CMD_IMAGE_TAG ?= $(IMAGE_TAG)
+
+.PHONY: image runtime-base-image serve-cmd-image build install-serve-cmd-builders build-serve-cmd build-serve-cmd-self-contained build-serve-cmd-linux-amd64 build-serve-installer build-serve-installer-linux-amd64 clean clean-all experiments observe stress
 
 # Build the main PhysicsNeMo Serve container image on top of the runtime base image.
 image: runtime-base-image
 	@test -n "$(DOCKER_REPO)" || (echo "DOCKER_REPO is not set!" && exit 1)
-	DOCKER_BUILDKIT=1 docker build --build-arg PHYSICSNEMO_SERVE_RUNTIME_BASE_IMAGE=$(RUNTIME_BASE_IMAGE) -t $(IMAGE_NAME):$(IMAGE_TAG) -f Dockerfile.Earth2Studio.scicomp-rust-slim .
+	DOCKER_BUILDKIT=1 docker build --build-arg PHYSICSNEMO_SERVE_RUNTIME_BASE_IMAGE=$(RUNTIME_BASE_IMAGE) -t $(IMAGE_NAME):$(IMAGE_TAG) -f Dockerfile.physicsnemo-serve.scicomp-rust-slim .
 
 # Build the shared runtime base container image used by the service image.
 runtime-base-image:
 	@test -n "$(DOCKER_REPO)" || (echo "DOCKER_REPO is not set!" && exit 1)
-	DOCKER_BUILDKIT=1 docker build --build-arg PYTORCH_BASE_IMAGE=$(DOCKER_REPO)/pytorch:26.01-py3 -t $(RUNTIME_BASE_IMAGE) -f Dockerfile.Earth2Studio.runtime-base .
+	DOCKER_BUILDKIT=1 docker build --build-arg PYTORCH_BASE_IMAGE=$(DOCKER_REPO)/pytorch:26.01-py3 -t $(RUNTIME_BASE_IMAGE) -f Dockerfile.physicsnemo-serve.runtime-base .
+
+serve-cmd-image:
+	@test -n "$(DOCKER_REPO)" || (echo "DOCKER_REPO is not set!" && exit 1)
+	DOCKER_BUILDKIT=1 docker build --platform linux/amd64 \
+		-t $(SERVE_CMD_IMAGE_NAME):$(SERVE_CMD_IMAGE_TAG) \
+		-f Dockerfile.physicsnemo-serve-cmd .
 
 # Compile the inference server and worker runtime in release mode.
 build:

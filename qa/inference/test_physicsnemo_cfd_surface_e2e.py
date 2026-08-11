@@ -207,11 +207,20 @@ def _submit_without_retry(
                         base_url + "/readyz",
                         timeout=min(timeout, 10),
                     )
+                    if warmup.status_code in (502, 503, 504):
+                        last_warmup_error = requests.HTTPError(
+                            f"{warmup.status_code} on warmup GET",
+                            response=warmup,
+                        )
+                        warmup = None
+                        if attempt + 1 < warmup_attempts:
+                            time.sleep(5)
+                        continue
                     break
                 except (requests.ConnectionError, requests.Timeout) as exc:
                     last_warmup_error = exc
                     if attempt + 1 < warmup_attempts:
-                        time.sleep(1)
+                        time.sleep(5)
             if warmup is None:
                 assert last_warmup_error is not None
                 raise last_warmup_error

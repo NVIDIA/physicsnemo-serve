@@ -121,6 +121,8 @@ def test_submission_warms_no_retry_session_before_post(monkeypatch) -> None:
     response = object()
 
     class WarmupResponse:
+        status_code = 200
+
         def raise_for_status(self) -> None:
             events.append("warmup-ok")
 
@@ -195,6 +197,8 @@ def test_submission_retries_only_safe_warmup_get(monkeypatch) -> None:
     posts = 0
 
     class WarmupResponse:
+        status_code = 200
+
         def raise_for_status(self) -> None:
             return None
 

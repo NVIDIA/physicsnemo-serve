@@ -5,6 +5,9 @@ from __future__ import annotations
 
 import json
 import logging
+import shutil
+import tempfile
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
 from e2s_workflow import Earth2Workflow
@@ -13,6 +16,22 @@ if TYPE_CHECKING:
     from earth2studio.io import IOBackend
 
 logger = logging.getLogger(__name__)
+
+
+def _new_request_scoped_gfs(cache_dir: Path) -> Any:
+    """Create GFS lazily with a cache directory owned by one request."""
+    from earth2studio.data import GFS
+
+    class _RequestScopedGFS(GFS):
+        def __init__(self, owned_cache_dir: Path) -> None:
+            self._request_cache_dir = owned_cache_dir
+            super().__init__(cache=False)
+
+        @property
+        def cache(self) -> str:
+            return str(self._request_cache_dir)
+
+    return _RequestScopedGFS(cache_dir)
 
 
 def prepare_model_cache(_ctx: dict[str, Any]) -> dict[str, list[str]]:
@@ -41,15 +60,14 @@ class DeterministicWorkflow(Earth2Workflow):
 
     name = "deterministic_workflow"
     description = "Earth2Studio deterministic forecast workflow with visualization"
-    cache_scope = "process"
     model_cache_names = ["DLWP", "FCN", "FCN3"]
-    cache_preserve_attributes = ("_packages", "_models", "_data_sources")
 
     def __init__(self) -> None:
         super().__init__()
         self._packages: dict[str, Any] = {}
         self._models: dict[str, Any] = {}
         self._data_sources: dict[str, Any] = {}
+        self._data_cache_dirs: set[Path] = set()
 
     def _model_for_type(self, model_type: str) -> tuple[Any, Any]:
         from earth2studio.models.px import DLWP, FCN, FCN3
@@ -75,21 +93,20 @@ class DeterministicWorkflow(Earth2Workflow):
         return package, model
 
     def _data_for_source(self, data_source: str) -> Any:
-        from earth2studio.data import GFS
-
         normalized = data_source.lower()
         if normalized in self._data_sources:
             return self._data_sources[normalized]
         if normalized != "gfs":
             raise ValueError(f"Unsupported data source: {data_source}")
-        data = GFS()
+        cache_dir = Path(tempfile.mkdtemp(prefix="physicsnemo-e2s-gfs-"))
+        try:
+            data = _new_request_scoped_gfs(cache_dir)
+        except BaseException:
+            shutil.rmtree(cache_dir, ignore_errors=True)
+            raise
+        self._data_cache_dirs.add(cache_dir)
         self._data_sources[normalized] = data
         return data
-
-    def warmup(self, _ctx: dict[str, Any]) -> dict[str, list[str]]:
-        self._model_for_type("fcn")
-        self._data_for_source("gfs")
-        return {"model_names": ["DLWP", "FCN", "FCN3"]}
 
     def __call__(
         self,
@@ -221,20 +238,23 @@ class DeterministicWorkflow(Earth2Workflow):
             raise
 
     def cleanup(self) -> None:
-        # Package HTTP sessions may be shared by Earth2 package caches.
-        # Drop package refs before generic cleanup to avoid closing shared clients.
-        self._clear_attributes("_packages")
         try:
             super().cleanup()
         finally:
             from plugin_sdk import cleanup_earth2_runtime_resources
 
-            cleanup_earth2_runtime_resources(
-                *list((self._models or {}).values()),
-                *list((self._data_sources or {}).values()),
-            )
-            self._clear_attributes("_models", "_data_sources")
-            self._cleanup_torch_runtime()
+            try:
+                cleanup_earth2_runtime_resources(
+                    *list((self._models or {}).values()),
+                    *list((self._data_sources or {}).values()),
+                )
+            finally:
+                for cache_dir in self._data_cache_dirs or ():
+                    shutil.rmtree(cache_dir, ignore_errors=True)
+                self._clear_attributes(
+                    "_packages", "_models", "_data_sources", "_data_cache_dirs"
+                )
+                self._cleanup_torch_runtime()
 
 
 WORKFLOW = DeterministicWorkflow

@@ -1278,7 +1278,7 @@ def execute(ctx):
         {
             "run_id": ctx["run_id"],
             "batch_id": ctx.get("batch_id"),
-            "batch_size": ctx.get("batch_info", {}).get("batch_size"),
+            "batch_size": (ctx.get("batch_info") or {}).get("batch_size"),
         }
     )
     return {
@@ -1286,6 +1286,52 @@ def execute(ctx):
         "output_path": None,
         "artifacts": [],
         "value": ctx["parameters"]["value"] + 1,
+    }
+""".strip(),
+    )
+    return plugin_root
+
+
+def create_process_isolation_plugin(
+    root: Path, plugin_id: str = "demo-process-isolation"
+) -> Path:
+    plugin_root = create_module_execute_only_plugin(root, plugin_id=plugin_id)
+    write_file(
+        plugin_root / "workflow.py",
+        """
+from __future__ import annotations
+
+import os
+import signal
+import threading
+import time
+from pathlib import Path
+
+
+def execute(ctx):
+    signal.signal(signal.SIGUSR1, signal.SIG_IGN)
+    parameters = ctx["parameters"]
+    sync_dir = Path(parameters["sync_dir"])
+    sync_dir.mkdir(parents=True, exist_ok=True)
+    marker = sync_dir / f"ready-{os.getpid()}"
+    marker.write_text(ctx["run_id"], encoding="utf-8")
+
+    deadline = time.monotonic() + 10
+    expected = int(parameters["expected_processes"])
+    while len(list(sync_dir.glob("ready-*"))) < expected:
+        if time.monotonic() >= deadline:
+            raise TimeoutError("parallel item processes did not overlap")
+        time.sleep(0.01)
+
+    print(f"plugin diagnostic for {ctx['run_id']}")
+    return {
+        "status": "succeeded",
+        "output_path": None,
+        "artifacts": [],
+        "pid": os.getpid(),
+        "main_thread": threading.current_thread() is threading.main_thread(),
+        "batch_id_seen": ctx.get("batch_id"),
+        "batch_info_seen": ctx.get("batch_info"),
     }
 """.strip(),
     )
@@ -2323,15 +2369,69 @@ def test_inference_worker_falls_back_to_execute_for_scheduler_batch(
     assert executor._plugin_modules[plugin_root.name].EXECUTE_CALLS == [
         {
             "run_id": "batch-run-fallback:item:0",
-            "batch_id": "batch-run-fallback",
-            "batch_size": 2,
+            "batch_id": None,
+            "batch_size": None,
         },
         {
             "run_id": "batch-run-fallback:item:1",
-            "batch_id": "batch-run-fallback",
-            "batch_size": 2,
+            "batch_id": None,
+            "batch_size": None,
         },
     ]
+
+
+def test_inference_worker_parallel_batch_uses_isolated_main_thread_processes(
+    tmp_path: Path, monkeypatch
+):
+    plugin_root = create_process_isolation_plugin(tmp_path)
+    module = load_inference_worker_module()
+    sync_dir = tmp_path / "sync"
+
+    monkeypatch.setenv("PLUGIN_DIR", str(plugin_root.parent))
+    monkeypatch.setenv("DEFAULT_OUTPUT_DIR", str(tmp_path / "outputs"))
+    monkeypatch.setenv("PHYSICSNEMO_SERVE_MAX_PARALLEL_ITEMS", "2")
+    monkeypatch.delenv("REDIS_URL", raising=False)
+
+    items = []
+    for index in range(2):
+        run_id = f"parallel-process:item:{index}"
+        parameters = {
+            "sync_dir": str(sync_dir),
+            "expected_processes": 2,
+        }
+        items.append(
+            {
+                "run_id": run_id,
+                "payload": {
+                    "run_id": run_id,
+                    "workflow_id": plugin_root.name,
+                    "operation": "run",
+                    "parameters": parameters,
+                },
+            }
+        )
+
+    executor = module.WorkflowExecutor(DummyRedis())
+    try:
+        result = executor.execute(
+            plugin_root.name,
+            "parallel-process",
+            {},
+            payload={
+                "workflow_id": plugin_root.name,
+                "operation": "run",
+                "items": items,
+            },
+        )
+    finally:
+        executor.close()
+
+    assert result["status"] == "succeeded"
+    item_results = [entry["result"] for entry in result["batch_results"]]
+    assert len({item_result["pid"] for item_result in item_results}) == 2
+    assert all(item_result["main_thread"] for item_result in item_results)
+    assert all(item_result["batch_id_seen"] is None for item_result in item_results)
+    assert all(item_result["batch_info_seen"] is None for item_result in item_results)
 
 
 def test_inference_worker_uses_run_batch_for_single_item_execution(
@@ -6566,17 +6666,28 @@ def test_plugin_dev_run_local_dry_run_includes_scheduler_when_pipeline_declares_
     )
 
 
-def test_plugin_dev_run_local_dry_run_uses_scheduler_for_batch_profile(
+@pytest.mark.parametrize(
+    ("pipeline_profile", "expected_phases"),
+    [
+        ("batch", ["prepare", "execute", "results"]),
+        ("prefetch", ["prepare", "prefetch", "execute", "results"]),
+    ],
+)
+def test_plugin_dev_run_local_dry_run_rewrites_cpu_compact_pipeline_without_scheduler(
     tmp_path: Path,
+    pipeline_profile: str,
+    expected_phases: list[str],
 ):
-    plugin_root = create_class_based_json_plugin(tmp_path, plugin_id="demo-batched")
+    plugin_root = create_class_based_json_plugin(
+        tmp_path, plugin_id=f"demo-{pipeline_profile}"
+    )
     script = repo_root() / "scripts" / "plugin_dev.py"
-    workspace = tmp_path / "run-local-batched"
+    workspace = tmp_path / f"run-local-{pipeline_profile}"
 
-    def use_batch_profile(manifest: dict) -> None:
-        manifest["pipeline"] = {"profile": "batch"}
+    def use_compact_profile(manifest: dict) -> None:
+        manifest["pipeline"] = {"profile": pipeline_profile}
 
-    update_manifest(plugin_root, use_batch_profile)
+    update_manifest(plugin_root, use_compact_profile)
 
     proc = subprocess.run(
         [
@@ -6599,13 +6710,28 @@ def test_plugin_dev_run_local_dry_run_uses_scheduler_for_batch_profile(
     runtime_config = json.loads(
         Path(data["runtime_config_path"]).read_text(encoding="utf-8")
     )
-    assert "scheduler" in runtime_config["roles"]
+    assert "scheduler" not in runtime_config["roles"]
+    assert "schedule" not in runtime_config["streams"]
+    assert "release" not in runtime_config["streams"]
     assert "batch" not in runtime_config["roles"]
     assert "batch" not in runtime_config["streams"]
 
     process_names = [process["name"] for process in data["processes"]]
-    assert "scheduler" in process_names
+    assert "scheduler" not in process_names
     assert "batch" not in process_names
+
+    inference_server = next(
+        process
+        for process in data["processes"]
+        if process["name"] == "inference_server"
+    )
+    runtime_plugin_root = Path(inference_server["env"]["PLUGIN_DIR"]) / plugin_root.name
+    runtime_manifest = yaml.safe_load(
+        (runtime_plugin_root / "plugin.yaml").read_text(encoding="utf-8")
+    )
+    assert [
+        stage["phase"] for stage in runtime_manifest["pipeline"]["stages"]
+    ] == expected_phases
 
 
 def test_plugin_dev_run_local_dry_run_includes_fanout_and_collect_for_ensemble_pipeline(

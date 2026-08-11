@@ -1126,7 +1126,9 @@ def _pytest_counts(artifact_dir: Path, workflow_id: str) -> str:
     """Return 'N passed / M total' by parsing the newest JUnit XML for the workflow."""
     results_dir = artifact_dir / "pytest-results"
     slug = re.sub(r"[^a-zA-Z0-9_-]", "_", workflow_id)
-    xmls = sorted(results_dir.glob(f"results_{slug}_*.xml"), key=lambda p: p.stat().st_mtime)
+    xmls = sorted(
+        results_dir.glob(f"results_{slug}_*.xml"), key=lambda p: p.stat().st_mtime
+    )
     if not xmls:
         return ""
     try:
@@ -1426,7 +1428,9 @@ def main():
             / "examples"
             / "public_run_1_full_matrix_request.json"
         )
-        _cfd_request_was_set = bool(os.environ.get("QA_CFD_E2E_REQUEST_PATH", "").strip())
+        _cfd_request_was_set = bool(
+            os.environ.get("QA_CFD_E2E_REQUEST_PATH", "").strip()
+        )
         if not _cfd_request_was_set:
             os.environ["QA_CFD_E2E_REQUEST_PATH"] = str(_cfd_default_request)
         try:

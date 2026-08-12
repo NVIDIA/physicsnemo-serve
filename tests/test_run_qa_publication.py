@@ -656,3 +656,53 @@ def test_publication_runtime_config_uses_explicit_local_mount_mapping(
         "/outputs/qa-publication/test-endpoint/worker_runtime_config.json"
     )
     assert host_path.is_file()
+
+
+# ---------------------------------------------------------------------------
+# determine_e2s_workflows / determine_cfd_workflows routing tests
+# ---------------------------------------------------------------------------
+
+
+def test_determine_cfd_workflows_returns_cfd_for_full_suite(monkeypatch):
+    monkeypatch.delenv("PHYSICSNEMO_SERVE_ENABLED_PLUGIN_ID", raising=False)
+    result = run_qa.determine_cfd_workflows(service="rust", suite="full")
+    assert result == [run_qa.CFD_E2E_WORKFLOW_ID]
+
+
+def test_determine_cfd_workflows_returns_cfd_for_cfd_e2e_suite(monkeypatch):
+    monkeypatch.delenv("PHYSICSNEMO_SERVE_ENABLED_PLUGIN_ID", raising=False)
+    result = run_qa.determine_cfd_workflows(service="rust", suite="cfd_e2e")
+    assert result == [run_qa.CFD_E2E_WORKFLOW_ID]
+
+
+def test_determine_cfd_workflows_empty_for_other_suites(monkeypatch):
+    monkeypatch.delenv("PHYSICSNEMO_SERVE_ENABLED_PLUGIN_ID", raising=False)
+    for suite in ("cicd", "smoke", "basic", "publication"):
+        assert run_qa.determine_cfd_workflows(service="rust", suite=suite) == []
+    assert run_qa.determine_cfd_workflows(service="python", suite="full") == []
+
+
+def test_determine_e2s_workflows_empty_for_cfd_e2e_suite(monkeypatch):
+    monkeypatch.delenv("PHYSICSNEMO_SERVE_ENABLED_PLUGIN_ID", raising=False)
+    result = run_qa.determine_e2s_workflows(
+        service="rust", workflows_arg=None, suite="cfd_e2e"
+    )
+    assert result == []
+
+
+def test_determine_e2s_workflows_returns_all_plugins_for_full_suite(monkeypatch):
+    monkeypatch.delenv("PHYSICSNEMO_SERVE_ENABLED_PLUGIN_ID", raising=False)
+    result = run_qa.determine_e2s_workflows(
+        service="rust", workflows_arg=None, suite="full"
+    )
+    assert result == list(run_qa.ALL_WORKFLOW_PLUGIN_IDS)
+    assert run_qa.CFD_E2E_WORKFLOW_ID not in result
+
+
+def test_determine_workflows_full_ends_with_cfd(monkeypatch):
+    monkeypatch.delenv("PHYSICSNEMO_SERVE_ENABLED_PLUGIN_ID", raising=False)
+    result = run_qa.determine_workflows(
+        service="rust", workflows_arg=None, suite="full"
+    )
+    assert result[-1] == run_qa.CFD_E2E_WORKFLOW_ID
+    assert result[:-1] == list(run_qa.ALL_WORKFLOW_PLUGIN_IDS)

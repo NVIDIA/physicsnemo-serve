@@ -1088,7 +1088,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--matrix",
         choices=["all", "three", "domino"],
-        default="three",
+        default="all",
         help=(
             "'three' runs domino_surface, fignet_surface, xmgn_surface "
             "(public_run_1_3model_request.json) — these have confirmed binary parity; "

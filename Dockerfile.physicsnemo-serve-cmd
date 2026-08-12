@@ -9,6 +9,7 @@
 # copied into the image.
 
 ARG PHYSICSNEMO_SERVE_UBUNTU_IMAGE=nvcr.io/nvidia/base/ubuntu:jammy-20260217
+ARG PHYSICSNEMO_SERVE_RUNTIME_BASE_IMAGE=nvcr.io/nvidia/pytorch:26.01-py3
 
 FROM ${PHYSICSNEMO_SERVE_UBUNTU_IMAGE} AS rust-builder
 
@@ -131,7 +132,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
         -c "import numpy, scipy; assert numpy.__version__ == '${PHYSICSNEMO_NUMPY_VERSION}', numpy.__version__; assert scipy.__version__ == '${PHYSICSNEMO_SCIPY_VERSION}', scipy.__version__"
 
 
-FROM ${PHYSICSNEMO_SERVE_UBUNTU_IMAGE}
+FROM ${PHYSICSNEMO_SERVE_RUNTIME_BASE_IMAGE}
 
 ARG DEBIAN_FRONTEND=noninteractive
 ARG PHYSICSNEMO_SERVE_E2S_RUNTIME_NAME=e2s

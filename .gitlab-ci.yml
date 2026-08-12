@@ -596,3 +596,66 @@ rust io benchmark:
       fi
 
       python -u "$QA_SOURCE_DIR/scripts/run_lepton_rust_io_benchmark.py" "${rust_io_args[@]}"
+
+service vs binary parity:
+  extends: .physicsnemo-serve-qa-vault
+  stage: integration-tests
+  image: python:3.11
+  when: manual
+  needs:
+    - !reference [.vault:client, needs]
+    - job: prepare-ci
+      artifacts: true
+    - job: image_build
+      artifacts: false
+  variables:
+    QA_SOURCE_DIR: qa
+    QA_ARTIFACT_DIR: artifacts
+    QA_BINARY_IMAGE_NAME: physicsnemo-serve-cmd
+    QA_PARITY_JOB_TIMEOUT: "57600"
+    QA_PARITY_JOB_POLL_INTERVAL: "120"
+    QA_RESOURCE_SHAPE: gpu.h100-sxm
+  before_script:
+    - !reference [.vault:client, before_script]
+    - set +x
+    - LEPTON_WORKSPACE_TOKEN="$(vault kv get -mount=kv/infra -field=lepton_workspace_token ferroflux/qa/dev)"
+    - export LEPTON_WORKSPACE_TOKEN
+    - python --version
+    - python -m pip install --upgrade pip
+    - python -m pip install -r "$QA_SOURCE_DIR/inference/requirements.txt"
+    - mkdir -p "$QA_SOURCE_DIR/$QA_ARTIFACT_DIR"
+  artifacts:
+    when: always
+    expire_in: 1 week
+    paths:
+      - qa/artifacts/
+  script:
+    - set -eu
+    - export USER="${USER:-${GITLAB_USER_LOGIN:-ci}}"
+    - export LEPTON_WORKSPACE_TOKEN="${LEPTON_WORKSPACE_TOKEN:-}"
+    - |
+      if [ -z "$LEPTON_WORKSPACE_TOKEN" ]; then
+        echo "LEPTON_WORKSPACE_TOKEN is required."
+        exit 1
+      fi
+
+      image_tag="${QA_IMAGE_TAG:-}"
+      if [ -z "$image_tag" ]; then
+        image_tag="${GIT_TAG:-}"
+      fi
+      if [ -z "$image_tag" ]; then
+        echo "GIT_TAG or QA_IMAGE_TAG is required."
+        exit 1
+      fi
+
+      service_image="${NGC_REGISTRY}/${NGC_ORG}/${NGC_IMAGE}:${image_tag}"
+      binary_image="${NGC_REGISTRY}/${NGC_ORG}/${QA_BINARY_IMAGE_NAME}:${image_tag}"
+
+      python -u "$QA_SOURCE_DIR/scripts/run_lepton_service_binary_parity.py" \
+        --image-tag "$service_image" \
+        --binary-image "$binary_image" \
+        --job-timeout "$QA_PARITY_JOB_TIMEOUT" \
+        --job-poll-interval "$QA_PARITY_JOB_POLL_INTERVAL" \
+        --resource-shape "$QA_RESOURCE_SHAPE" \
+        --lustre-dir "binary-parity-${CI_PIPELINE_ID:-manual}" \
+        --artifact-dir "$QA_SOURCE_DIR/$QA_ARTIFACT_DIR"

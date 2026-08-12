@@ -102,20 +102,6 @@ jobs:
             exit 1
           fi
 
-      - name: Check binary image build status (required for parity)
-        if: github.event_name == 'issue_comment' && steps.parse.outputs.run_parity == 'true'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          SHA=${{ steps.pr.outputs.sha }}
-          CONCLUSION=$(gh api repos/${{ github.repository }}/commits/$SHA/check-runs \
-            --jq '.check_runs[] | select(.name == "Build & Push CLI Runtime Image") | .conclusion' | head -1)
-          if [[ "$CONCLUSION" != "success" ]]; then
-            gh pr comment ${{ steps.pr.outputs.number }} \
-              --body "Cannot run parity QA: binary image build has not succeeded for commit \`${SHA:0:7}\`. Current status: \`${CONCLUSION:-not found}\`. Please ensure the **PhysicsNeMo Serve CLI Docker** check passes first."
-            exit 1
-          fi
-
       - name: Parse command
         id: parse
         run: |
@@ -189,6 +175,20 @@ jobs:
             echo "run_crps=$RUN_CRPS" >> "$GITHUB_OUTPUT"
             echo "run_benchmark=$RUN_BENCHMARK" >> "$GITHUB_OUTPUT"
             echo "run_parity=$RUN_PARITY" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Check binary image build status (required for parity)
+        if: github.event_name == 'issue_comment' && steps.parse.outputs.run_parity == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          SHA=${{ steps.pr.outputs.sha }}
+          CONCLUSION=$(gh api repos/${{ github.repository }}/commits/$SHA/check-runs \
+            --jq '.check_runs[] | select(.name == "Build & Push CLI Runtime Image") | .conclusion' | head -1)
+          if [[ "$CONCLUSION" != "success" ]]; then
+            gh pr comment ${{ steps.pr.outputs.number }} \
+              --body "Cannot run parity QA: binary image build has not succeeded for commit \`${SHA:0:7}\`. Current status: \`${CONCLUSION:-not found}\`. Please ensure the **PhysicsNeMo Serve CLI Docker** check passes first."
+            exit 1
           fi
 
       - name: Determine image tag

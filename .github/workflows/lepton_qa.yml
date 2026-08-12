@@ -25,6 +25,10 @@ on:
           - crps
           - benchmark
           - parity
+      binary_image_tag:
+        description: "Binary image tag for parity (defaults to image_tag if not set)"
+        required: false
+        default: ""
 
 concurrency:
   group: lepton-qa-${{ github.event.issue.number || github.run_id }}
@@ -377,12 +381,16 @@ jobs:
           PYTHONPATH: ${{ github.workspace }}:${{ github.workspace }}/python/e2s_tools
         run: |
           IMAGE_TAG="${{ needs.gate.outputs.image_tag }}"
+          BINARY_TAG="${{ inputs.binary_image_tag || needs.gate.outputs.image_tag }}"
           if [[ "$IMAGE_TAG" == *"/"* ]]; then
             FULL_IMAGE="$IMAGE_TAG"
-            FULL_BINARY_IMAGE="${IMAGE_TAG%:*}-cmd:${IMAGE_TAG##*:}"
           else
             FULL_IMAGE="${{ vars.NGC_REGISTRY }}/${{ secrets.NGC_ORG }}/${{ secrets.NGC_IMAGE }}:${IMAGE_TAG}"
-            FULL_BINARY_IMAGE="${{ vars.NGC_REGISTRY }}/${{ secrets.NGC_ORG }}/physicsnemo-serve-cmd:${IMAGE_TAG}"
+          fi
+          if [[ "$BINARY_TAG" == *"/"* ]]; then
+            FULL_BINARY_IMAGE="$BINARY_TAG"
+          else
+            FULL_BINARY_IMAGE="${{ vars.NGC_REGISTRY }}/${{ secrets.NGC_ORG }}/physicsnemo-serve-cmd:${BINARY_TAG}"
           fi
           uv run python qa/scripts/run_lepton_service_binary_parity.py \
             --image-tag "$FULL_IMAGE" \

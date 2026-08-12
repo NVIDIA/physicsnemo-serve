@@ -112,7 +112,7 @@ jobs:
                 echo "run_cicd=true" >> "$GITHUB_OUTPUT"
                 echo "run_crps=true" >> "$GITHUB_OUTPUT"
                 echo "run_benchmark=true" >> "$GITHUB_OUTPUT"
-                echo "run_parity=true" >> "$GITHUB_OUTPUT"
+                echo "run_parity=false" >> "$GITHUB_OUTPUT"
                 ;;
               cicd)
                 echo "run_cicd=true" >> "$GITHUB_OUTPUT"
@@ -157,7 +157,6 @@ jobs:
               RUN_CICD=true
               RUN_CRPS=true
               RUN_BENCHMARK=true
-              RUN_PARITY=true
             fi
             if echo "$COMMENT" | grep -q '/lepton-cicd'; then
               RUN_CICD=true

@@ -24,6 +24,11 @@ on:
           - cicd
           - crps
           - benchmark
+          - parity
+      binary_image_tag:
+        description: "Binary image tag for parity (defaults to image_tag if not set)"
+        required: false
+        default: ""
 
 concurrency:
   group: lepton-qa-${{ github.event.issue.number || github.run_id }}
@@ -41,11 +46,13 @@ jobs:
        (contains(github.event.comment.body, '/lepton-all') ||
         contains(github.event.comment.body, '/lepton-cicd') ||
         contains(github.event.comment.body, '/lepton-crps') ||
-        contains(github.event.comment.body, '/lepton-benchmark')))
+        contains(github.event.comment.body, '/lepton-benchmark') ||
+        contains(github.event.comment.body, '/lepton-parity')))
     outputs:
       run_cicd: ${{ steps.parse.outputs.run_cicd }}
       run_crps: ${{ steps.parse.outputs.run_crps }}
       run_benchmark: ${{ steps.parse.outputs.run_benchmark }}
+      run_parity: ${{ steps.parse.outputs.run_parity }}
       image_tag: ${{ steps.image.outputs.tag }}
       sha: ${{ steps.pr.outputs.sha || steps.wr.outputs.sha }}
       pr_number: ${{ steps.pr.outputs.number }}
@@ -105,32 +112,47 @@ jobs:
                 echo "run_cicd=true" >> "$GITHUB_OUTPUT"
                 echo "run_crps=true" >> "$GITHUB_OUTPUT"
                 echo "run_benchmark=true" >> "$GITHUB_OUTPUT"
+                echo "run_parity=false" >> "$GITHUB_OUTPUT"
                 ;;
               cicd)
                 echo "run_cicd=true" >> "$GITHUB_OUTPUT"
                 echo "run_crps=false" >> "$GITHUB_OUTPUT"
                 echo "run_benchmark=false" >> "$GITHUB_OUTPUT"
+                echo "run_parity=false" >> "$GITHUB_OUTPUT"
                 ;;
               crps)
                 echo "run_cicd=false" >> "$GITHUB_OUTPUT"
                 echo "run_crps=true" >> "$GITHUB_OUTPUT"
                 echo "run_benchmark=false" >> "$GITHUB_OUTPUT"
+                echo "run_parity=false" >> "$GITHUB_OUTPUT"
                 ;;
               benchmark)
                 echo "run_cicd=false" >> "$GITHUB_OUTPUT"
                 echo "run_crps=false" >> "$GITHUB_OUTPUT"
                 echo "run_benchmark=true" >> "$GITHUB_OUTPUT"
+                echo "run_parity=false" >> "$GITHUB_OUTPUT"
+                ;;
+              parity)
+                echo "run_cicd=false" >> "$GITHUB_OUTPUT"
+                echo "run_crps=false" >> "$GITHUB_OUTPUT"
+                echo "run_benchmark=false" >> "$GITHUB_OUTPUT"
+                echo "run_parity=true" >> "$GITHUB_OUTPUT"
                 ;;
             esac
           elif [[ "${{ github.event_name }}" == "workflow_run" ]]; then
             echo "run_cicd=true" >> "$GITHUB_OUTPUT"
             echo "run_crps=true" >> "$GITHUB_OUTPUT"
             echo "run_benchmark=true" >> "$GITHUB_OUTPUT"
+            # Parity requires both service and binary images; the binary image
+            # is built by a separate workflow so it may not be ready yet when
+            # this workflow_run fires. Keep parity as manual-only.
+            echo "run_parity=false" >> "$GITHUB_OUTPUT"
           else
             COMMENT="${{ github.event.comment.body }}"
             RUN_CICD=false
             RUN_CRPS=false
             RUN_BENCHMARK=false
+            RUN_PARITY=false
             if echo "$COMMENT" | grep -q '/lepton-all'; then
               RUN_CICD=true
               RUN_CRPS=true
@@ -145,9 +167,27 @@ jobs:
             if echo "$COMMENT" | grep -q '/lepton-benchmark'; then
               RUN_BENCHMARK=true
             fi
+            if echo "$COMMENT" | grep -q '/lepton-parity'; then
+              RUN_PARITY=true
+            fi
             echo "run_cicd=$RUN_CICD" >> "$GITHUB_OUTPUT"
             echo "run_crps=$RUN_CRPS" >> "$GITHUB_OUTPUT"
             echo "run_benchmark=$RUN_BENCHMARK" >> "$GITHUB_OUTPUT"
+            echo "run_parity=$RUN_PARITY" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Check binary image build status (required for parity)
+        if: github.event_name == 'issue_comment' && steps.parse.outputs.run_parity == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          SHA=${{ steps.pr.outputs.sha }}
+          CONCLUSION=$(gh api repos/${{ github.repository }}/commits/$SHA/check-runs \
+            --jq '.check_runs[] | select(.name == "Build & Push CLI Runtime Image") | .conclusion' | head -1)
+          if [[ "$CONCLUSION" != "success" ]]; then
+            gh pr comment ${{ steps.pr.outputs.number }} \
+              --body "Cannot run parity QA: binary image build has not succeeded for commit \`${SHA:0:7}\`. Current status: \`${CONCLUSION:-not found}\`. Please ensure the **PhysicsNeMo Serve CLI Docker** check passes first."
+            exit 1
           fi
 
       - name: Determine image tag
@@ -184,6 +224,9 @@ jobs:
           fi
           if [[ "${{ steps.parse.outputs.run_benchmark }}" == "true" ]]; then
             set_status pending "Lepton QA (benchmark)" "Queued"
+          fi
+          if [[ "${{ steps.parse.outputs.run_parity }}" == "true" ]]; then
+            set_status pending "Lepton QA (parity)" "Queued"
           fi
 
   # ─── CICD: deploy → pytest → teardown ──────────────────────────────
@@ -306,10 +349,56 @@ jobs:
             --image-tag "${{ needs.gate.outputs.image_tag }}" \
             --preset benchmark-report
 
+  # ─── Parity: service-mode vs binary-mode CFD benchmark ────────────
+  parity:
+    name: Lepton QA (parity)
+    needs: [gate, cicd]
+    runs-on: linux-amd64-cpu4
+    if: always() && needs.gate.result == 'success' && needs.gate.outputs.run_parity == 'true' && (needs.cicd.result == 'success' || needs.cicd.result == 'skipped')
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.gate.outputs.sha || github.sha }}
+
+      - uses: astral-sh/setup-uv@v3
+
+      - name: Install Lepton CLI
+        run: |
+          uv tool install leptonai
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Run service-mode vs binary-mode parity check
+        env:
+          LEPTON_WORKSPACE_TOKEN: ${{ secrets.LEPTON_WORKSPACE_TOKEN }}
+          LEPTON_WORKSPACE_ID: ${{ secrets.LEPTON_WORKSPACE_ID }}
+          LEPTON_NODE_GROUP: ${{ secrets.LEPTON_NODE_GROUP }}
+          LEPTON_PULL_SECRET: ${{ secrets.PULL_SECRET }}
+          NFS_MOUNT_BASE: ${{ vars.NFS_MOUNT_BASE }}
+          DOCKER_REGISTRY: ${{ vars.NGC_REGISTRY }}/${{ secrets.NGC_ORG }}
+          IMAGE_NAME: ${{ secrets.NGC_IMAGE }}
+          PULL_SECRET: ${{ secrets.PULL_SECRET }}
+          PYTHONPATH: ${{ github.workspace }}:${{ github.workspace }}/python/e2s_tools
+        run: |
+          IMAGE_TAG="${{ needs.gate.outputs.image_tag }}"
+          BINARY_TAG="${{ inputs.binary_image_tag || needs.gate.outputs.image_tag }}"
+          if [[ "$IMAGE_TAG" == *"/"* ]]; then
+            FULL_IMAGE="$IMAGE_TAG"
+          else
+            FULL_IMAGE="${{ vars.NGC_REGISTRY }}/${{ secrets.NGC_ORG }}/${{ secrets.NGC_IMAGE }}:${IMAGE_TAG}"
+          fi
+          if [[ "$BINARY_TAG" == *"/"* ]]; then
+            FULL_BINARY_IMAGE="$BINARY_TAG"
+          else
+            FULL_BINARY_IMAGE="${{ vars.NGC_REGISTRY }}/${{ secrets.NGC_ORG }}/physicsnemo-serve-cmd:${BINARY_TAG}"
+          fi
+          uv run python qa/scripts/run_lepton_service_binary_parity.py \
+            --image-tag "$FULL_IMAGE" \
+            --binary-image "$FULL_BINARY_IMAGE"
+
   # ─── Report final status back to PR ────────────────────────────────
   report-status:
     name: Report Status
-    needs: [gate, cicd, crps, benchmark]
+    needs: [gate, cicd, crps, benchmark, parity]
     runs-on: linux-amd64-cpu4
     if: always() && needs.gate.result == 'success' && needs.gate.outputs.sha != ''
     steps:
@@ -344,3 +433,4 @@ jobs:
           report_job "${{ needs.cicd.result }}" "Lepton QA (cicd)" "${{ needs.gate.outputs.run_cicd }}"
           report_job "${{ needs.crps.result }}" "Lepton QA (crps)" "${{ needs.gate.outputs.run_crps }}"
           report_job "${{ needs.benchmark.result }}" "Lepton QA (benchmark)" "${{ needs.gate.outputs.run_benchmark }}"
+          report_job "${{ needs.parity.result }}" "Lepton QA (parity)" "${{ needs.gate.outputs.run_parity }}"

@@ -75,22 +75,6 @@ The existing `inference_server`, distributed `worker-runtime`, Redis
 configuration, Dockerfiles, and Python inference worker remain supported for
 the full service deployment.
 
-## Contributors
-
-This project is currently not accepting contributions.
-
-## License
-
-PhysicsNeMo-Serve is provided under the Apache License 2.0, refer to the [LICENSE file](LICENSE) for full license text.
-
-This project will download and install additional third-party open source software projects. Review the license terms of these open source projects before use. In particular, note that NVIDIA does not release docker images or host this service. If you choose to do either, also inspect the default Dockerfile provided (and any changes you make) and ensure you comply with any additional licensing terms.
-
-## Docs
-
-- [onboarding.md](docs/onboarding.md)
-- [plugin-authoring-guide.md](docs/plugin-authoring-guide.md)
-- [inference-service-user-guide.md](docs/inference-service-user-guide.md)
-
 ## Cloud Output Publication
 
 PhysicsNeMo-Serve can publish a workflow's primary output artifact to S3-compatible
@@ -176,23 +160,33 @@ Upload performance is configured separately on the `publish` role:
 Zarr stores. The multipart settings apply to large single-file artifacts such as
 NetCDF or HDF5.
 
+## Docs
 
-## 🚀 Upcoming Changes & Roadmap
+See [docs/README.md](docs/README.md) for the full documentation index. Start with:
+
+- [onboarding.md](docs/onboarding.md) — shortest entry point for service consumers and plugin authors
+- [plugin-authoring-guide.md](docs/plugin-authoring-guide.md) — plugin layout, hooks, and local validation
+- [inference-service-user-guide.md](docs/inference-service-user-guide.md) — architecture, configuration, and deployment (including Lepton.AI)
+
+## Upcoming Changes & Roadmap
 
 We are continuously improving `physicsnemo-serve`. Here is what we're currently working on and what's coming next:
 
-### ⚙️ In Progress
-- [/] **Scheduler Enhancements**
-  - **Batch & Fanout Hints Migration:** Moving batch hints and fanout hints processing directly to the scheduler for better centralized request orchestration.
-- [/] **Optimized Request Processing**
-  - **Fanout Request Batching:** Native batching support for fanout requests to improve backend efficiency.
+### In Progress
+- [x] **Batch & Fanout Hints Migration:** Batch & Ensemble Fanout Hints Migration: Moving batch and fanout hints into the scheduler to distribute requests across multiple ensemble members for aggregated predictions, establishing the scheduler as the single source of truth for request orchestration and resource optimization.
+- [x] **Fanout Request Batching:** Native batching support for fanout requests to improve compute efficiency.
 
----
+### Planned Features
+- [ ] **Priority Queue:** Replacing the current FIFO scheduler queue with a Priority Queue to better support latency-sensitive requests.
+- [ ] **Request Fusion:** Fuse batched requests with the same start timestamp and data source to reduce execution overhead and improving compute efficiency.
+- [ ] **Intelligent GPU Selection:** Upgrading GPU selection strategy beyond simple Round-Robin to dynamic, load-aware routing.
 
-### 📋 Planned Features
-- [ ] **Scheduler Enhancements**
-  - **Priority Queue:** Replacing the current FIFO scheduler queue with a Priority Queue to better support latency-sensitive requests.
-- [ ] **Optimized Request Processing**
-  - **Request Fusion:** Fusing batched requests to reduce execution overhead and maximize throughput.
-- [ ] **Intelligent GPU Selection**
-  - Upgrading GPU selection strategy beyond simple Round-Robin to dynamic, load-aware routing.
+## Contributors
+
+This project is currently not accepting contributions.
+
+## License
+
+PhysicsNeMo-Serve is provided under the Apache License 2.0, refer to the [LICENSE file](LICENSE) for full license text.
+
+This project will download and install additional third-party open source software projects. Review the license terms of these open source projects before use. In particular, note that NVIDIA does not release docker images or host this service. If you choose to do either, also inspect the default Dockerfile provided (and any changes you make) and ensure you comply with any additional licensing terms.

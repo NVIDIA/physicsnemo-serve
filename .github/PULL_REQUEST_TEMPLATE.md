@@ -11,6 +11,7 @@
 - [ ] The documentation is up to date with these changes.
 - [ ] An [issue](https://github.com/NVIDIA/physicsnemo-serve/issues) is linked to this pull request.
 - [ ] Assess and address Greptile feedback (AI code review bot for guidance; use discretion, addressing all feedback is not required).
+- [ ] Open source licenses have been reviewed for any new dependencies added in `pyproject.toml`, `Cargo.toml`, etc.
 
 ## Dependencies
 

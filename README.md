@@ -174,11 +174,11 @@ We are continuously improving `physicsnemo-serve`. Here is what we're currently 
 
 ### In Progress
 - [x] **Batch & Fanout Hints Migration:** Batch & Ensemble Fanout Hints Migration: Moving batch and fanout hints into the scheduler to distribute requests across multiple ensemble members for aggregated predictions, establishing the scheduler as the single source of truth for request orchestration and resource optimization.
-- [x] **Fanout Request Batching:** Native batching support for fanout requests to improve compute efficiency.
+- [x] **Fanout Request Batching:** Native batching support (Ensemble use cases) for fanout requests to improve compute efficiency.
 
 ### Planned Features
 - [ ] **Priority Queue:** Replacing the current FIFO scheduler queue with a Priority Queue to better support latency-sensitive requests.
-- [ ] **Request Fusion:** Fuse batched requests with the same start timestamp and data source to reduce execution overhead and improving compute efficiency.
+- [ ] **Request Fusion for Weather Models:** Fuse batched weather-model requests with the same forecast start timestamp and data source to minimize execution overhead and improve compute efficiency.
 - [ ] **Intelligent GPU Selection:** Upgrading GPU selection strategy beyond simple Round-Robin to dynamic, load-aware routing.
 
 ## Contributors

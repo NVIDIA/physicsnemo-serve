@@ -175,3 +175,24 @@ Upload performance is configured separately on the `publish` role:
 `max_concurrent_files` controls parallel uploads for directory artifacts such as
 Zarr stores. The multipart settings apply to large single-file artifacts such as
 NetCDF or HDF5.
+
+
+## 🚀 Upcoming Changes & Roadmap
+
+We are continuously improving `physicsnemo-serve`. Here is what we're currently working on and what's coming next:
+
+### ⚙️ In Progress
+- [/] **Scheduler Enhancements**
+  - **Batch & Fanout Hints Migration:** Moving batch hints and fanout hints processing directly to the scheduler for better centralized request orchestration.
+- [/] **Optimized Request Processing**
+  - **Fanout Request Batching:** Native batching support for fanout requests to improve backend efficiency.
+
+---
+
+### 📋 Planned Features
+- [ ] **Scheduler Enhancements**
+  - **Priority Queue:** Replacing the current FIFO scheduler queue with a Priority Queue to better support latency-sensitive requests.
+- [ ] **Optimized Request Processing**
+  - **Request Fusion:** Fusing batched requests to reduce execution overhead and maximize throughput.
+- [ ] **Intelligent GPU Selection**
+  - Upgrading GPU selection strategy beyond simple Round-Robin to dynamic, load-aware routing.

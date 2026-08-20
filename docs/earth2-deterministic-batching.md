@@ -10,7 +10,7 @@ This plugin uses framework-level batching.
 
 That means:
 
-1. multiple compatible requests are grouped by the `batch` stage
+1. the scheduler groups multiple compatible requests
 2. the execute worker receives them together
 3. the plugin runs one `run_batch(items, ctx)` call for the whole group
 

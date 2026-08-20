@@ -45,7 +45,6 @@ from plugin_sdk import OutputRegistry  # noqa: E402
 SUPPORTED_STAGE_HANDLERS = {
     ("prepare", "plugin_phase"),
     ("prefetch", "prefetch"),
-    ("batch", "batch"),
     ("schedule", "schedule"),
     ("execute", "plugin_phase"),
     ("postprocess", "plugin_phase"),
@@ -253,7 +252,7 @@ def run_plugin(
             )
             payload["prefetch_artifacts"] = materialized["artifacts"]
             prefetch_stats = materialized["stats"]
-        elif phase in {"batch", "schedule"}:
+        elif phase == "schedule":
             pass
         elif phase == "execute":
             payload["result"] = _invoke_phase(module, workflow_id, phase, payload)

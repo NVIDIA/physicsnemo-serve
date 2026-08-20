@@ -203,7 +203,7 @@ struct ReleasePayload {
     resource_id: u32,
 }
 
-/// Scheduler role with remote-style discovery and memory-aware best-fit routing.
+/// Scheduler role with remote-style discovery and resource-aware routing.
 #[derive(Clone)]
 pub struct SchedulerRole {
     /// Tracks discovered worker capacity and active GPU reservations.
@@ -1747,6 +1747,60 @@ mod tests {
         .to_string()
     }
 
+    fn batchable_schedule_payload_with_max_size(
+        run_id: &str,
+        memory_mb: u64,
+        max_batch_size: usize,
+    ) -> String {
+        let mut payload: JsonValue =
+            serde_json::from_str(&batchable_schedule_payload(run_id, memory_mb)).unwrap();
+        payload["batch_profile"] = json!({
+            "enabled": true,
+            "max_batch_size": max_batch_size
+        });
+        payload.to_string()
+    }
+
+    fn known_profile_batchable_schedule_payload(
+        run_id: &str,
+        workflow: &str,
+        executor_class: &str,
+    ) -> String {
+        json!({
+            "run_id": run_id,
+            "workflow": workflow,
+            "workflow_id": workflow,
+            "operation": "run",
+            "runtime": {
+                "executor_class": executor_class
+            },
+            "stage_context": {
+                "current_stage_id": "schedule",
+                "current_phase": "schedule",
+                "pipeline": [
+                    {"id": "prepare", "phase": "prepare", "queue": "prepare", "next": "schedule"},
+                    {"id": "schedule", "phase": "schedule", "queue": "schedule", "next": "execute"},
+                    {"id": "execute", "phase": "execute", "queue": format!("execute.{executor_class}"), "next": "results"},
+                    {"id": "results", "phase": "results", "queue": "results", "next": null}
+                ]
+            }
+        })
+        .to_string()
+    }
+
+    fn legacy_known_profile_batchable_schedule_payload(
+        run_id: &str,
+        workflow: &str,
+        executor_class: &str,
+    ) -> String {
+        let mut payload: JsonValue = serde_json::from_str(
+            &known_profile_batchable_schedule_payload(run_id, workflow, executor_class),
+        )
+        .unwrap();
+        payload.as_object_mut().unwrap().remove("runtime");
+        payload.to_string()
+    }
+
     async fn run_task_by_name_result(
         tasks: &[Box<dyn BackgroundTask>],
         task_name: &str,
@@ -1852,6 +1906,267 @@ mod tests {
         assert_eq!(role.queued_request_count().await, 0);
 
         set_env_var("SCHEDULER_DISCOVERY_JSON", prev_discovery.as_deref());
+    }
+
+    #[tokio::test]
+    async fn scheduler_excludes_candidate_with_single_item_batch_limit() {
+        let _guard = test_env::env_lock().lock().await;
+        let prev_discovery = std::env::var("SCHEDULER_DISCOVERY_JSON").ok();
+        set_env_var(
+            "SCHEDULER_DISCOVERY_JSON",
+            Some(
+                r#"[{"resource_id":0,"stream_name":"gpu:ns:pod:0","total_memory_mb":50000,"used_memory_mb":0,"device_kind":"gpu","executor_class":"python.gpu.demo","tags":["demo"]}]"#,
+            ),
+        );
+
+        let (_redis_server, role, tasks) = scheduler_with_test_queue_manager(
+            "scheduler-tests",
+            &scheduler_env_with_batching(
+                "test:",
+                json!({
+                    "memory_utilization_percent": 100,
+                    "batching_enabled": true,
+                    "max_batch_size": 4,
+                    "max_batch_wait_ms": 10_000
+                }),
+            ),
+        )
+        .await;
+        let sink = RecordingSink::new();
+        run_gpu_discovery(&tasks, &sink).await;
+
+        for (message_id, run_id, max_batch_size) in [
+            ("1-0", "run-a", 2),
+            ("1-1", "run-b", 1),
+            ("1-2", "run-c", 2),
+        ] {
+            queue_schedule(
+                &role,
+                &schedule_msg_with_id(
+                    message_id,
+                    run_id,
+                    &batchable_schedule_payload_with_max_size(run_id, 10_000, max_batch_size),
+                ),
+                "schedule",
+                &sink,
+            )
+            .await;
+        }
+        run_scheduler_task(&tasks, &sink).await;
+
+        let writes = sink.writes();
+        assert_eq!(writes.len(), 1);
+        let forwarded: JsonValue = serde_json::from_str(&writes[0].payload).unwrap();
+        assert_eq!(forwarded["items"][0]["run_id"], "run-a");
+        assert_eq!(forwarded["items"][1]["run_id"], "run-c");
+        assert_eq!(role.queued_request_count().await, 1);
+
+        run_scheduler_task(&tasks, &sink).await;
+        let writes = sink.writes();
+        assert_eq!(writes.len(), 2);
+        assert_eq!(writes[1].run_id, "run-b");
+        assert_eq!(role.queued_request_count().await, 0);
+
+        set_env_var("SCHEDULER_DISCOVERY_JSON", prev_discovery.as_deref());
+    }
+
+    #[tokio::test]
+    async fn scheduler_flushes_at_smallest_accepted_candidate_batch_limit() {
+        let _guard = test_env::env_lock().lock().await;
+        let prev_discovery = std::env::var("SCHEDULER_DISCOVERY_JSON").ok();
+        set_env_var(
+            "SCHEDULER_DISCOVERY_JSON",
+            Some(
+                r#"[{"resource_id":0,"stream_name":"gpu:ns:pod:0","total_memory_mb":50000,"used_memory_mb":0,"device_kind":"gpu","executor_class":"python.gpu.demo","tags":["demo"]}]"#,
+            ),
+        );
+
+        let (_redis_server, role, tasks) = scheduler_with_test_queue_manager(
+            "scheduler-tests",
+            &scheduler_env_with_batching(
+                "test:",
+                json!({
+                    "memory_utilization_percent": 100,
+                    "batching_enabled": true,
+                    "max_batch_size": 4,
+                    "max_batch_wait_ms": 10_000
+                }),
+            ),
+        )
+        .await;
+        let sink = RecordingSink::new();
+        run_gpu_discovery(&tasks, &sink).await;
+
+        for (message_id, run_id, max_batch_size) in [
+            ("1-0", "run-a", 4),
+            ("1-1", "run-b", 2),
+            ("1-2", "run-c", 4),
+        ] {
+            queue_schedule(
+                &role,
+                &schedule_msg_with_id(
+                    message_id,
+                    run_id,
+                    &batchable_schedule_payload_with_max_size(run_id, 10_000, max_batch_size),
+                ),
+                "schedule",
+                &sink,
+            )
+            .await;
+        }
+        run_scheduler_task(&tasks, &sink).await;
+
+        let writes = sink.writes();
+        assert_eq!(writes.len(), 1);
+        let forwarded: JsonValue = serde_json::from_str(&writes[0].payload).unwrap();
+        assert_eq!(forwarded["batch_info"]["batch_size"], 2);
+        assert_eq!(forwarded["batch_info"]["flush_reason"], "max_batch_size");
+        assert_eq!(forwarded["items"][0]["run_id"], "run-a");
+        assert_eq!(forwarded["items"][1]["run_id"], "run-b");
+        assert_eq!(role.queued_request_count().await, 1);
+
+        set_env_var("SCHEDULER_DISCOVERY_JSON", prev_discovery.as_deref());
+    }
+
+    #[tokio::test]
+    async fn scheduler_batches_known_profile_requests_for_runtime_executor_class() {
+        let _guard = test_env::env_lock().lock().await;
+        let prev_discovery = std::env::var("SCHEDULER_DISCOVERY_JSON").ok();
+        let prev_profiles = std::env::var("SCHEDULER_PROFILES_JSON").ok();
+        set_env_var(
+            "SCHEDULER_DISCOVERY_JSON",
+            Some(
+                r#"[
+                    {"resource_id":0,"stream_name":"execute.python.gpu.other","total_memory_mb":50000,"used_memory_mb":0,"device_kind":"gpu","executor_class":"python.gpu.other","tags":["other"]},
+                    {"resource_id":1,"stream_name":"execute.python.gpu.demo","total_memory_mb":50000,"used_memory_mb":0,"device_kind":"gpu","executor_class":"python.gpu.demo","tags":["demo"]}
+                ]"#,
+            ),
+        );
+        set_env_var(
+            "SCHEDULER_PROFILES_JSON",
+            Some(
+                r#"{"profiles":[{"workflow":"known-profile-batch","gpus.used":1,"peak":{"memory.used":"2048 MiB"}}]}"#,
+            ),
+        );
+
+        let (_redis_server, role, tasks) = scheduler_with_test_queue_manager(
+            "scheduler-tests",
+            &scheduler_env_with_batching(
+                "test:",
+                json!({
+                    "memory_utilization_percent": 100,
+                    "batching_enabled": true,
+                    "max_batch_size": 2,
+                    "max_batch_wait_ms": 10_000
+                }),
+            ),
+        )
+        .await;
+        let sink = RecordingSink::new();
+        run_gpu_discovery(&tasks, &sink).await;
+
+        for (message_id, run_id) in [("1-0", "run-a"), ("1-1", "run-b")] {
+            queue_schedule(
+                &role,
+                &schedule_msg_with_id(
+                    message_id,
+                    run_id,
+                    &known_profile_batchable_schedule_payload(
+                        run_id,
+                        "known-profile-batch",
+                        "python.gpu.demo",
+                    ),
+                ),
+                "schedule",
+                &sink,
+            )
+            .await;
+        }
+        run_scheduler_task(&tasks, &sink).await;
+
+        let writes = sink.writes();
+        assert_eq!(writes.len(), 1);
+        assert_eq!(writes[0].stream_key, "execute.python.gpu.demo");
+        let forwarded: JsonValue = serde_json::from_str(&writes[0].payload).unwrap();
+        assert_eq!(forwarded["batch_info"]["batch_size"], 2);
+        assert_eq!(
+            forwarded["resource_profile"]["executor_class"],
+            "python.gpu.demo"
+        );
+        assert_eq!(forwarded["resource_profile"]["memory_mb"], 4_096);
+
+        set_env_var("SCHEDULER_DISCOVERY_JSON", prev_discovery.as_deref());
+        set_env_var("SCHEDULER_PROFILES_JSON", prev_profiles.as_deref());
+    }
+
+    #[tokio::test]
+    async fn scheduler_batches_legacy_known_profile_requests_for_uniform_worker_executor() {
+        let _guard = test_env::env_lock().lock().await;
+        let prev_discovery = std::env::var("SCHEDULER_DISCOVERY_JSON").ok();
+        let prev_profiles = std::env::var("SCHEDULER_PROFILES_JSON").ok();
+        set_env_var(
+            "SCHEDULER_DISCOVERY_JSON",
+            Some(
+                r#"[
+                    {"resource_id":0,"stream_name":"execute.python.gpu.demo:0","total_memory_mb":50000,"used_memory_mb":0,"device_kind":"gpu","executor_class":"python.gpu.demo","tags":["demo-a"]},
+                    {"resource_id":1,"stream_name":"execute.python.gpu.demo:1","total_memory_mb":50000,"used_memory_mb":0,"device_kind":"gpu","executor_class":"python.gpu.demo","tags":["demo-b"]}
+                ]"#,
+            ),
+        );
+        set_env_var(
+            "SCHEDULER_PROFILES_JSON",
+            Some(
+                r#"{"profiles":[{"workflow":"legacy-known-profile-batch","gpus.used":1,"peak":{"memory.used":"2048 MiB"}}]}"#,
+            ),
+        );
+
+        let (_redis_server, role, tasks) = scheduler_with_test_queue_manager(
+            "scheduler-tests",
+            &scheduler_env_with_batching(
+                "test:",
+                json!({
+                    "memory_utilization_percent": 100,
+                    "batching_enabled": true,
+                    "max_batch_size": 2,
+                    "max_batch_wait_ms": 10_000
+                }),
+            ),
+        )
+        .await;
+        let sink = RecordingSink::new();
+        run_gpu_discovery(&tasks, &sink).await;
+
+        for (message_id, run_id) in [("1-0", "run-a"), ("1-1", "run-b")] {
+            queue_schedule(
+                &role,
+                &schedule_msg_with_id(
+                    message_id,
+                    run_id,
+                    &legacy_known_profile_batchable_schedule_payload(
+                        run_id,
+                        "legacy-known-profile-batch",
+                        "python.gpu.demo",
+                    ),
+                ),
+                "schedule",
+                &sink,
+            )
+            .await;
+        }
+        run_scheduler_task(&tasks, &sink).await;
+
+        let writes = sink.writes();
+        assert_eq!(writes.len(), 1);
+        assert_eq!(writes[0].stream_key, "execute.python.gpu.demo:0");
+        let forwarded: JsonValue = serde_json::from_str(&writes[0].payload).unwrap();
+        assert_eq!(forwarded["batch_info"]["batch_size"], 2);
+        assert_eq!(
+            forwarded["resource_profile"]["executor_class"],
+            "python.gpu.demo"
+        );
+
+        set_env_var("SCHEDULER_DISCOVERY_JSON", prev_discovery.as_deref());
+        set_env_var("SCHEDULER_PROFILES_JSON", prev_profiles.as_deref());
     }
 
     #[tokio::test]
@@ -2574,8 +2889,7 @@ mod tests {
                 "current_stage_id": "schedule",
                 "current_phase": "schedule",
                 "pipeline": [
-                    {"id": "prepare", "phase": "prepare", "queue": "prepare", "next": "batch"},
-                    {"id": "batch", "phase": "batch", "queue": "batch", "next": "schedule"},
+                    {"id": "prepare", "phase": "prepare", "queue": "prepare", "next": "schedule"},
                     {"id": "schedule", "phase": "schedule", "queue": "schedule", "next": "execute"},
                     {"id": "execute", "phase": "execute", "queue": "execute.python.gpu.test", "next": "results"},
                     {"id": "results", "phase": "results", "queue": "results", "next": null}
@@ -2591,8 +2905,7 @@ mod tests {
                             "current_stage_id": "schedule",
                             "current_phase": "schedule",
                             "pipeline": [
-                                {"id": "prepare", "phase": "prepare", "queue": "prepare", "next": "batch"},
-                                {"id": "batch", "phase": "batch", "queue": "batch", "next": "schedule"},
+                                {"id": "prepare", "phase": "prepare", "queue": "prepare", "next": "schedule"},
                                 {"id": "schedule", "phase": "schedule", "queue": "schedule", "next": "execute"},
                                 {"id": "execute", "phase": "execute", "queue": "execute.python.gpu.test", "next": "results"},
                                 {"id": "results", "phase": "results", "queue": "results", "next": null}

@@ -98,6 +98,18 @@ PIPELINE_RECOMMENDED_CHECK_PHASE = {
     "batch": "prepare",
     "ensemble": "prepare",
 }
+SUPPORTED_PIPELINE_STAGE_HANDLERS = {
+    ("prepare", "plugin_phase"),
+    ("prefetch", "prefetch"),
+    ("fanout", "fanout"),
+    ("schedule", "schedule"),
+    ("execute", "plugin_phase"),
+    ("collect", "collect"),
+    ("postprocess", "plugin_phase"),
+    ("publish", "plugin_phase"),
+    ("publish", "publish_outputs"),
+    ("results", "persist_results"),
+}
 
 
 def _supported_runtime_profiles() -> str:
@@ -187,8 +199,6 @@ def _stage_definition(phase: str, execute_queue: str) -> dict[str, Any]:
             "handler": "prefetch",
             "queue": "prefetch",
         }
-    if phase == "batch":
-        return {"id": "batch", "phase": "batch", "handler": "batch", "queue": "batch"}
     if phase == "fanout":
         return {
             "id": "fanout",
@@ -281,6 +291,22 @@ def load_plugin_manifest(manifest_path: Path) -> dict[str, Any]:
     return expand_plugin_manifest(manifest)
 
 
+def _validate_pipeline_stage_handlers(stages: Any) -> None:
+    if not isinstance(stages, list):
+        raise ValueError("Plugin manifest pipeline.stages must be an array")
+    for stage in stages:
+        if not isinstance(stage, dict):
+            raise ValueError("Plugin manifest pipeline stages must be objects")
+        phase = str(stage.get("phase") or "").strip()
+        handler = str(stage.get("handler") or "").strip()
+        if (phase, handler) not in SUPPORTED_PIPELINE_STAGE_HANDLERS:
+            stage_id = str(stage.get("id") or "").strip()
+            raise ValueError(
+                f"Plugin pipeline stage '{stage_id}' uses unsupported "
+                f"phase/handler combination '{phase}/{handler}'"
+            )
+
+
 def expand_plugin_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
     expanded = copy.deepcopy(manifest)
 
@@ -327,6 +353,8 @@ def expand_plugin_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
         pipeline["stages"] = _build_pipeline_stages(
             pipeline_profile, options, execute_queue
         )
+    if "stages" in pipeline:
+        _validate_pipeline_stage_handlers(pipeline["stages"])
 
     runtime.setdefault("kind", "python")
     runtime.setdefault("entrypoint", "workflow.py")

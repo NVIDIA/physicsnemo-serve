@@ -62,7 +62,8 @@ runtime:
 - `postprocess`
   - `prepare -> schedule -> execute -> postprocess -> results`
 - `batch`
-  - `prepare -> batch -> schedule -> execute -> results`
+  - `prepare -> schedule -> execute -> results`
+  - compatible requests are grouped by the scheduler
 - `ensemble`
   - `prepare -> fanout -> schedule -> execute -> collect -> results`
 
@@ -264,7 +265,6 @@ Do not keep request-scoped state on the shared workflow instance:
 Framework-owned stages:
 
 - `prefetch`
-- `batch`
 - `fanout`
 - `schedule`
 - `collect`
@@ -286,7 +286,7 @@ Common fields:
 - `prefetch_plan`
   - consumed by `prefetch`
 - `batch_profile`
-  - consumed by `schedule` as a hint for grouping compatible requests
+  - consumed by `schedule` as an optional scheduler hint for grouping compatible requests
 - `fanout_profile`
   - consumed by `fanout`, `schedule`, and `collect`
 - `fanout_items`

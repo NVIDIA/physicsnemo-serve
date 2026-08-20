@@ -34,7 +34,7 @@ Then choose your path:
 - `crates/inference_server`
   - REST API for workflow discovery, schema/readiness inspection, run submission, status, and results
 - `crates/worker-runtime`
-  - Rust role workers for `prepare`, `prefetch`, `batch`, `fanout`, `schedule`, `collect`, `postprocess`, and `results`
+  - Rust role workers for `prepare`, `prefetch`, `fanout`, `scheduler`, `collect`, `postprocess`, `publish`, and `results`
 - `crates/e2s_zarr_io`
   - Rust-backed Zarr IO backend for Earth2Studio
 - `crates/scicomp-rq`

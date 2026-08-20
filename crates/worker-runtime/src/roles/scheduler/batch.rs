@@ -16,7 +16,6 @@ use super::{
     PendingSchedule, QueuedRequest, SchedulePayload, ScheduleResourceProfile, SchedulerQueueState,
     SchedulerRole, decode_schedule_payload, fanout_gate, schedule_resource_profile_json,
 };
-use crate::roles::scheduler::reservation::resolve_resource_config;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct BatchProfile {
@@ -302,7 +301,7 @@ fn build_request_batch_payload(
 }
 
 impl SchedulerRole {
-    fn batch_policy_for_payload(&self, payload: &SchedulePayload) -> Option<BatchPolicy> {
+    async fn batch_policy_for_payload(&self, payload: &SchedulePayload) -> Option<BatchPolicy> {
         if !self.config.batching_enabled || scheduler_batch_excluded(payload) {
             return None;
         }
@@ -315,13 +314,24 @@ impl SchedulerRole {
         }
 
         let mut resolved = payload.clone();
-        let Ok((gpus_required, memory_mb, _source)) = resolve_resource_config(&mut resolved) else {
+        let Ok((gpus_required, memory_mb, _source, _resources)) = self
+            .reservations
+            .prepare_resource_requirements(&mut resolved)
+            .await
+        else {
             return None;
         };
         if gpus_required != 1 || memory_mb == 0 {
             return None;
         }
         let base_resource_profile = resolved.resource_profile.clone()?;
+        if base_resource_profile
+            .executor_class
+            .as_deref()
+            .is_none_or(|executor_class| executor_class.trim().is_empty())
+        {
+            return None;
+        }
         let batch_profile = payload.batch_profile.as_ref();
         let batch_key = batch_profile
             .map(|batch_profile| batch_profile.batch_key.trim())
@@ -371,7 +381,7 @@ impl SchedulerRole {
         head: QueuedRequest,
     ) -> Result<Option<SchedulerRequest>> {
         // Leave non-batchable requests on the normal scheduling path.
-        let Some(batch_policy) = self.batch_policy_for_payload(&head.payload) else {
+        let Some(batch_policy) = self.batch_policy_for_payload(&head.payload).await else {
             return Ok(None);
         };
         if batch_policy.max_batch_size <= 1 {
@@ -388,6 +398,7 @@ impl SchedulerRole {
             queued: head.clone(),
             policy: batch_policy.clone(),
         }];
+        let mut effective_max_batch_size = batch_policy.max_batch_size;
 
         let mut flush_reason = None;
         let mut memory_limited = false;
@@ -397,10 +408,16 @@ impl SchedulerRole {
             if !seen_run_ids.insert(queued.msg.run_id().to_string()) {
                 continue;
             }
-            let Some(candidate_policy) = self.batch_policy_for_payload(&queued.payload) else {
+            let Some(candidate_policy) = self.batch_policy_for_payload(&queued.payload).await
+            else {
                 continue;
             };
             if self.batch_key(&queued.payload, &candidate_policy) != head_batch_key {
+                continue;
+            }
+            let candidate_max_batch_size =
+                effective_max_batch_size.min(candidate_policy.max_batch_size);
+            if batch_candidates.len() + 1 > candidate_max_batch_size {
                 continue;
             }
             batch_candidates.push(BatchCandidate {
@@ -427,10 +444,11 @@ impl SchedulerRole {
                 );
                 continue;
             }
+            effective_max_batch_size = candidate_max_batch_size;
 
             // Reaching the limit by adding this compatible request forms a full batch
             // and should flush immediately instead of waiting for max_wait_ms.
-            if batch_candidates.len() == batch_policy.max_batch_size {
+            if batch_candidates.len() == effective_max_batch_size {
                 flush_reason = Some(BatchFlushReason::MaxBatchSize);
                 break;
             }

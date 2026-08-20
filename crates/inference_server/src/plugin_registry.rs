@@ -378,6 +378,14 @@ impl PluginManifest {
             validate_non_empty("pipeline.stages[].phase", &stage.phase)?;
             validate_non_empty("pipeline.stages[].handler", &stage.handler)?;
             validate_non_empty("pipeline.stages[].queue", &stage.queue)?;
+            if !is_supported_stage_handler(&stage.phase, &stage.handler) {
+                bail!(
+                    "pipeline stage '{}' uses unsupported phase/handler combination '{}/{}'",
+                    stage.id,
+                    stage.phase,
+                    stage.handler
+                );
+            }
 
             if !seen_stage_ids.insert(stage.id.clone()) {
                 bail!("duplicate pipeline stage id '{}'", stage.id);
@@ -758,13 +766,6 @@ fn stage_definition(
             "queue": "prefetch",
             "next": next
         }),
-        "batch" => serde_json::json!({
-            "id": "batch",
-            "phase": "batch",
-            "handler": "batch",
-            "queue": "batch",
-            "next": next
-        }),
         "fanout" => serde_json::json!({
             "id": "fanout",
             "phase": "fanout",
@@ -810,6 +811,22 @@ fn stage_definition(
         _ => bail!("unsupported pipeline phase '{}'", phase),
     };
     Ok(stage)
+}
+
+fn is_supported_stage_handler(phase: &str, handler: &str) -> bool {
+    matches!(
+        (phase, handler),
+        ("prepare", "plugin_phase")
+            | ("prefetch", "prefetch")
+            | ("fanout", "fanout")
+            | ("schedule", "schedule")
+            | ("execute", "plugin_phase")
+            | ("collect", "collect")
+            | ("postprocess", "plugin_phase")
+            | ("publish", "plugin_phase")
+            | ("publish", "publish_outputs")
+            | ("results", "persist_results")
+    )
 }
 
 fn normalize_ingress_aliases(

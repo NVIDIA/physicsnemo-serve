@@ -4187,6 +4187,52 @@ def test_plugin_manifest_configuration_must_be_an_object(tmp_path: Path, value: 
         load_plugin_manifest(manifest_path)
 
 
+def test_plugin_manifest_batch_profile_expands_directly_to_schedule(tmp_path: Path):
+    script_dir = repo_root() / "scripts"
+    if str(script_dir) not in sys.path:
+        sys.path.insert(0, str(script_dir))
+
+    from plugin_runtime import load_plugin_manifest  # type: ignore
+
+    manifest_path = tmp_path / "plugin.yaml"
+    manifest_path.write_text(
+        "pipeline:\n  profile: batch\nruntime:\n  profile: python-test\n",
+        encoding="utf-8",
+    )
+
+    manifest = load_plugin_manifest(manifest_path)
+    assert [stage["phase"] for stage in manifest["pipeline"]["stages"]] == [
+        "prepare",
+        "schedule",
+        "execute",
+        "results",
+    ]
+
+
+def test_plugin_manifest_rejects_unsupported_stage_handler(tmp_path: Path):
+    script_dir = repo_root() / "scripts"
+    if str(script_dir) not in sys.path:
+        sys.path.insert(0, str(script_dir))
+
+    from plugin_runtime import load_plugin_manifest  # type: ignore
+
+    manifest_path = tmp_path / "plugin.yaml"
+    manifest_path.write_text(
+        """
+pipeline:
+  stages:
+    - id: unsupported
+      phase: unsupported
+      handler: unsupported
+      queue: unsupported
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="unsupported phase/handler combination"):
+        load_plugin_manifest(manifest_path)
+
+
 def test_shipped_plugins_have_local_docs_and_example_fixtures():
     script_dir = repo_root() / "scripts"
     if str(script_dir) not in sys.path:

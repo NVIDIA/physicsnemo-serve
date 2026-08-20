@@ -15,7 +15,7 @@ Batched deterministic Earth2Studio DLWP plugin for PhysicsNeMo Serve.
 ## Notes
 
 - `run-example` exercises the single-request execution path.
-- True batching happens in the framework `batch` stage and calls the workflow's `run_batch()` hook.
+- True batching happens in the scheduler and calls the workflow's `run_batch()` hook.
 - Requests batch together by `model`.
 - See [earth2-deterministic-batching.md](../../docs/earth2-deterministic-batching.md) for the full flow.
 

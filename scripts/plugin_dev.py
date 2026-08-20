@@ -1167,8 +1167,11 @@ def _run_local_needs_cpu_direct_pipeline(
         return False
     if not _manifest_uses_compact_pipeline_profile(manifest):
         return False
+    pipeline = manifest.get("pipeline", {})
+    if str(pipeline.get("profile") or "").strip() == "batch":
+        return False
     if any(
-        str(stage.get("phase") or "").strip() in {"batch", "fanout"}
+        str(stage.get("phase") or "").strip() == "fanout"
         for stage in _pipeline_stages(manifest)
     ):
         return False

@@ -113,7 +113,7 @@ counters at the bottom to interactive dashboards at the top.
 │    NVIDIA GPU(s)         Host CPU / RAM       Redis :6379               │
 │    ├─ Compute engine     ├─ Global CPU %      ├─ Stream queues          │
 │    ├─ Memory bus         ├─ Per-core CPU %    │  (prepare, prefetch,    │
-│    ├─ VRAM (used/total)  ├─ RAM used/total    │   batch, schedule, …)   │
+│    ├─ VRAM (used/total)  ├─ RAM used/total    │   schedule, release, …) │
 │    └─ via libnvidia-ml   ├─ Load avg 1/5/15m  └─ via redis XLEN        │
 │       (NVML / nvml-      └─ via sysinfo crate                           │
 │        wrapper crate)                          Axum HTTP server          │
@@ -189,7 +189,7 @@ Four producers feed the registry:
    synchronously, which is fast (microseconds) on Linux.
 
 3. **Redis Stream Poller** — The same background task also polls Redis. It issues
-   `XLEN` against each of the 8 known pipeline streams (using the configured
+   `XLEN` against each known pipeline stream (using the configured
    `REDIS_STREAM_PREFIX`), and writes the counts into a `Gauge` family keyed by
    the logical stream name (e.g. `stream="schedule"`). The prefix is stripped
    from the label to keep it environment-agnostic. Redis errors are logged at
@@ -213,8 +213,8 @@ v0 — the Prometheus TSDB provides persistence across the retention window.
 
 **Future (v1+):** The instrumentation layer is where OpenTelemetry would be
 introduced. An OTel SDK could emit tracing spans for each pipeline stage
-(prepare → prefetch → batch → schedule → execute → collect → postprocess →
-results), enabling distributed-trace-style flame graphs of individual request
+(prepare → prefetch → schedule → execute → collect → postprocess → results),
+enabling distributed-trace-style flame graphs of individual request
 lifecycles. The existing `prometheus-client` metrics would remain unchanged;
 OTel would add a parallel tracing signal, not replace the metrics signal.
 
@@ -380,8 +380,8 @@ All metric names are prefixed with `physicsnemo_serve_`.
 |--------|------|--------|-------------|
 | `physicsnemo_serve_redis_stream_length` | Gauge | `stream` | Number of pending entries in a Redis stream |
 
-**Monitored streams:** `prepare`, `prefetch`, `batch`, `schedule`, `release`,
-`collect`, `postprocess`, `results`.
+**Monitored streams:** `prepare`, `prefetch`, `schedule`, `release`, `collect`,
+`postprocess`, `results`.
 
 **Notes:**
 - Polled every 10 seconds using `XLEN` on each stream.
@@ -486,7 +486,7 @@ Prometheus runs as a supervisord-managed process inside the Docker container:
 | 10 | runtime-env-launcher (GPU execute workers) | — |
 | 40 | **Prometheus** | 9090 |
 | 40 | worker-runtime prepare | — |
-| 45 | worker-runtime fanout, batch | — |
+| 45 | worker-runtime fanout | — |
 | 50 | **inference-server** | 8080 |
 | 50 | worker-runtime prefetch, results | — |
 | 55 | worker-runtime collect, postprocess | — |

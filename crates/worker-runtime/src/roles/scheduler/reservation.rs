@@ -171,7 +171,7 @@ impl ResourceReservationTable {
         self.resource_map.lock().await.len()
     }
 
-    async fn prepare_resource_requirements(
+    pub(super) async fn prepare_resource_requirements(
         &self,
         payload: &mut SchedulePayload,
     ) -> Result<(usize, u64, ResourceConfigSource, Vec<ResourceInfo>)> {
@@ -184,8 +184,18 @@ impl ResourceReservationTable {
             let map = self.resource_map.lock().await;
             map.values().cloned().collect::<Vec<_>>()
         };
-        if matches!(config_source, ResourceConfigSource::KnownProfileFallback) {
-            ensure_uniform_worker_capabilities(payload.workflow.as_str(), resources.iter())?;
+        let has_executor_constraint = payload
+            .resource_profile
+            .as_ref()
+            .and_then(|profile| profile.executor_class.as_deref())
+            .is_some_and(|executor_class| !executor_class.trim().is_empty());
+        if matches!(config_source, ResourceConfigSource::KnownProfileFallback)
+            && !has_executor_constraint
+            && let Some(executor_class) =
+                uniform_worker_executor_class(payload.workflow.as_str(), resources.iter())?
+            && let Some(profile) = payload.resource_profile.as_mut()
+        {
+            profile.executor_class = Some(executor_class);
         }
 
         Ok((gpus_required, memory_mb, config_source, resources))
@@ -411,10 +421,19 @@ pub(super) fn resolve_resource_config(
             memory_mb,
             "resolve_resource_config: using known-profile fallback"
         );
+        let executor_class = payload
+            .raw_payload
+            .get("runtime")
+            .and_then(serde_json::Value::as_object)
+            .and_then(|runtime| runtime.get("executor_class"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToString::to_string);
         payload.resource_profile = Some(ScheduleResourceProfile {
             gpus_required: Some(gpus_required),
             memory_mb: Some(memory_mb),
-            executor_class: None,
+            executor_class,
             tags: None,
         });
         return Ok((
@@ -430,24 +449,34 @@ pub(super) fn resolve_resource_config(
     ))
 }
 
-fn ensure_uniform_worker_capabilities<'a>(
+fn uniform_worker_executor_class<'a>(
     workflow: &str,
     workers: impl Iterator<Item = &'a ResourceInfo>,
-) -> Result<()> {
-    let mut capability_groups: HashSet<(Option<String>, Vec<String>)> = HashSet::new();
+) -> Result<Option<String>> {
+    let mut executor_classes = HashSet::new();
     for worker in workers {
-        let mut normalized_tags = worker.tags.clone();
-        normalized_tags.sort_unstable();
-        capability_groups.insert((worker.executor_class.clone(), normalized_tags));
-        if capability_groups.len() > 1 {
+        let executor_class = worker
+            .executor_class
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                anyhow!(
+                    "scheduler: worker '{}' does not publish executor_class required by known-profile fallback for workflow '{}'",
+                    worker.stream_name,
+                    workflow,
+                )
+            })?;
+        executor_classes.insert(executor_class.to_string());
+        if executor_classes.len() > 1 {
             return Err(anyhow!(
-                "scheduler: resource_profile is required for workflow '{}' because known-profile fallback matches multiple GPU worker capability groups",
+                "scheduler: resource_profile is required for workflow '{}' because known-profile fallback matches multiple GPU worker executor classes",
                 workflow,
             ));
         }
     }
 
-    Ok(())
+    Ok(executor_classes.into_iter().next())
 }
 
 // Scheduler uses whichever source reports higher usage: live discovery or the
@@ -1254,17 +1283,31 @@ mod tests {
             ),
         );
 
-        let table = table_with_gpus(vec![worker(
-            1,
-            "execute.python.gpu.demo",
-            32_000,
-            0,
-            "python.gpu.demo",
-            &["demo", "gpu"],
-        )]);
+        let table = table_with_gpus(vec![
+            worker(
+                0,
+                "execute.python.gpu.other",
+                32_000,
+                0,
+                "python.gpu.other",
+                &["other", "gpu"],
+            ),
+            worker(
+                1,
+                "execute.python.gpu.demo",
+                32_000,
+                0,
+                "python.gpu.demo",
+                &["demo", "gpu"],
+            ),
+        ]);
 
         let mut msg = payload("run-legacy", "legacy-demo");
         msg.resource_profile = None;
+        msg.raw_payload = json!({
+            "workflow": "legacy-demo",
+            "runtime": {"executor_class": "python.gpu.demo"}
+        });
 
         let selected = table.reserve(&mut msg).await.unwrap();
         assert_eq!(
@@ -1290,6 +1333,57 @@ mod tests {
             Some(2_048),
             "known-profile fallback should synthesize resource_profile.memory_mb"
         );
+        assert_eq!(
+            msg.resource_profile
+                .as_ref()
+                .and_then(|profile| profile.executor_class.as_deref()),
+            Some("python.gpu.demo"),
+            "known-profile fallback should retain runtime.executor_class"
+        );
+        test_env::set_env_var("SCHEDULER_PROFILES_JSON", prev_profiles.as_deref());
+    }
+
+    #[tokio::test]
+    async fn reserve_infers_uniform_worker_executor_for_known_profile_fallback() {
+        let _guard = test_env::env_lock().lock().await;
+        let prev_profiles = std::env::var("SCHEDULER_PROFILES_JSON").ok();
+        test_env::set_env_var(
+            "SCHEDULER_PROFILES_JSON",
+            Some(
+                r#"{"profiles":[{"workflow":"legacy-demo","gpus.used":1,"peak":{"memory.used":"2048 MiB"}}]}"#,
+            ),
+        );
+
+        let table = table_with_gpus(vec![
+            worker(
+                0,
+                "execute.python.gpu.demo:0",
+                32_000,
+                0,
+                "python.gpu.demo",
+                &["demo-a"],
+            ),
+            worker(
+                1,
+                "execute.python.gpu.demo:1",
+                32_000,
+                0,
+                "python.gpu.demo",
+                &["demo-b"],
+            ),
+        ]);
+        let mut msg = payload("run-legacy", "legacy-demo");
+        msg.resource_profile = None;
+
+        let selected = table.reserve(&mut msg).await.unwrap();
+        assert_eq!(selected[0].stream_name, "execute.python.gpu.demo:0");
+        assert_eq!(
+            msg.resource_profile
+                .as_ref()
+                .and_then(|profile| profile.executor_class.as_deref()),
+            Some("python.gpu.demo")
+        );
+
         test_env::set_env_var("SCHEDULER_PROFILES_JSON", prev_profiles.as_deref());
     }
 

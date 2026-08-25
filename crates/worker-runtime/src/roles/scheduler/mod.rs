@@ -343,6 +343,9 @@ impl SchedulerRole {
             gpu_registry_key = %role.config.gpu_registry_key,
             memory_utilization_percent = role.config.memory_utilization_percent,
             gpu_discovery_interval_secs = role.config.gpu_discovery_interval_secs,
+            batching_enabled = role.config.batching_enabled,
+            max_batch_size = role.config.max_batch_size,
+            max_batch_wait_ms = role.config.max_batch_wait_ms,
             schedule_stream = %role.schedule_stream,
             release_stream = %role.release_stream,
             "Scheduler config loaded"
@@ -751,7 +754,11 @@ impl SchedulerRole {
             SchedulerRequest::Batch(request_batch) => {
                 let queued = request_batch.head.clone();
                 let queue_wait_seconds = request_batch.head.enqueued_at.elapsed().as_secs_f64();
-                (queued, queue_wait_seconds, request_batch.prepare_schedule())
+                (
+                    queued,
+                    queue_wait_seconds,
+                    request_batch.build_pending_schedule(),
+                )
             }
         };
 
@@ -1761,6 +1768,22 @@ mod tests {
         payload.to_string()
     }
 
+    fn batchable_schedule_payload_with_policy(
+        run_id: &str,
+        memory_mb: u64,
+        max_batch_size: usize,
+        max_wait_ms: u64,
+    ) -> String {
+        let mut payload: JsonValue =
+            serde_json::from_str(&batchable_schedule_payload(run_id, memory_mb)).unwrap();
+        payload["batch_profile"] = json!({
+            "enabled": true,
+            "max_batch_size": max_batch_size,
+            "max_wait_ms": max_wait_ms
+        });
+        payload.to_string()
+    }
+
     fn known_profile_batchable_schedule_payload(
         run_id: &str,
         workflow: &str,
@@ -2226,6 +2249,73 @@ mod tests {
         let forwarded: JsonValue = serde_json::from_str(&writes[0].payload).unwrap();
         assert_eq!(forwarded["run_id"], "run-a");
         assert!(forwarded.get("batch_info").is_none());
+        assert_eq!(role.queued_request_count().await, 0);
+
+        set_env_var("SCHEDULER_DISCOVERY_JSON", prev_discovery.as_deref());
+    }
+
+    #[tokio::test]
+    async fn scheduler_flushes_when_any_batch_candidate_reaches_its_wait_limit() {
+        let _guard = test_env::env_lock().lock().await;
+        let prev_discovery = std::env::var("SCHEDULER_DISCOVERY_JSON").ok();
+
+        set_env_var(
+            "SCHEDULER_DISCOVERY_JSON",
+            Some(
+                r#"[{"resource_id":0,"stream_name":"gpu:ns:pod:0","total_memory_mb":50000,"used_memory_mb":0,"device_kind":"gpu","executor_class":"python.gpu.demo","tags":["demo"]}]"#,
+            ),
+        );
+
+        let (_redis_server, role, tasks) = scheduler_with_test_queue_manager(
+            "scheduler-tests",
+            &scheduler_env_with_batching(
+                "test:",
+                json!({
+                    "memory_utilization_percent": 100,
+                    "batching_enabled": true,
+                    "max_batch_size": 3,
+                    "max_batch_wait_ms": 10_000
+                }),
+            ),
+        )
+        .await;
+        let sink = RecordingSink::new();
+        run_gpu_discovery(&tasks, &sink).await;
+
+        for (message_id, run_id, max_wait_ms) in [("1-0", "run-a", 10_000), ("1-1", "run-b", 100)] {
+            queue_schedule(
+                &role,
+                &schedule_msg_with_id(
+                    message_id,
+                    run_id,
+                    &batchable_schedule_payload_with_policy(run_id, 10_000, 3, max_wait_ms),
+                ),
+                "schedule",
+                &sink,
+            )
+            .await;
+        }
+        {
+            let mut state = role.scheduler_queue_state.lock().await;
+            let candidate = state
+                .queue
+                .get_mut(1)
+                .expect("second batch candidate should be pending");
+            candidate.enqueued_at = candidate
+                .enqueued_at
+                .checked_sub(Duration::from_secs(1))
+                .expect("test timestamp should support subtracting queue age");
+        }
+
+        run_scheduler_task(&tasks, &sink).await;
+
+        let writes = sink.writes();
+        assert_eq!(writes.len(), 1);
+        let forwarded: JsonValue = serde_json::from_str(&writes[0].payload).unwrap();
+        assert_eq!(forwarded["batch_info"]["batch_size"], 2);
+        assert_eq!(forwarded["batch_info"]["flush_reason"], "max_wait_ms");
+        assert_eq!(forwarded["items"][0]["run_id"], "run-a");
+        assert_eq!(forwarded["items"][1]["run_id"], "run-b");
         assert_eq!(role.queued_request_count().await, 0);
 
         set_env_var("SCHEDULER_DISCOVERY_JSON", prev_discovery.as_deref());

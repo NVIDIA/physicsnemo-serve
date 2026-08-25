@@ -48,6 +48,7 @@ from plugin_runtime import (  # noqa: E402
     resolve_phase_hook,
     serialize_postprocess_result,
     serialize_prepare_result,
+    validate_batch_execution_contract,
 )
 from plugin_sdk import (  # noqa: E402
     workflow_form_schema,
@@ -355,6 +356,7 @@ def validate_plugin(plugin_root: Path) -> dict[str, Any]:
     )
 
     _validate_readiness_config(manifest)
+    validate_batch_execution_contract(module, workflow_id)
 
     phases = plugin_phases_from_manifest(manifest)
     for phase in phases:

@@ -4052,6 +4052,47 @@ def test_plugin_dev_validate_accepts_class_based_plugin(tmp_path: Path):
     assert "valid" in proc.stdout.lower()
 
 
+def test_plugin_dev_validate_rejects_execute_batch_without_execute(tmp_path: Path):
+    plugin_root = create_class_based_json_plugin(
+        tmp_path, plugin_id="demo-execute-batch-only"
+    )
+    write_file(
+        plugin_root / "workflow.py",
+        """
+def execute_batch(items, ctx):
+    return [{"status": "succeeded"} for _item in items]
+""".strip(),
+    )
+    script = repo_root() / "scripts" / "plugin_dev.py"
+
+    proc = subprocess.run(
+        [sys.executable, str(script), "validate", str(plugin_root)],
+        text=True,
+        capture_output=True,
+        cwd=repo_root(),
+        check=False,
+    )
+
+    assert proc.returncode != 0
+    assert "defines execute_batch(items, ctx)" in proc.stderr
+    assert "does not define execute(ctx)" in proc.stderr
+
+
+def test_plugin_dev_validate_accepts_run_batch_with_sdk_execute_adapter(tmp_path: Path):
+    plugin_root = create_class_based_run_batch_plugin(tmp_path)
+    script = repo_root() / "scripts" / "plugin_dev.py"
+
+    proc = subprocess.run(
+        [sys.executable, str(script), "validate", str(plugin_root)],
+        text=True,
+        capture_output=True,
+        cwd=repo_root(),
+        check=False,
+    )
+
+    assert proc.returncode == 0, proc.stderr
+
+
 def test_plugin_dev_run_example_runs_json_plugin_end_to_end(tmp_path: Path):
     plugin_root = create_class_based_json_plugin(tmp_path)
     script = repo_root() / "scripts" / "plugin_dev.py"

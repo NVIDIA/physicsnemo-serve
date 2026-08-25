@@ -9,7 +9,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
-use tracing::debug;
+use tracing::{debug, info};
 use uuid::Uuid;
 
 use super::{
@@ -65,6 +65,13 @@ impl BatchFlushReason {
 struct BatchCandidate {
     queued: QueuedRequest,
     policy: BatchPolicy,
+}
+
+fn batch_wait_expired(candidates: &[BatchCandidate]) -> bool {
+    candidates.iter().any(|candidate| {
+        candidate.queued.enqueued_at.elapsed()
+            >= Duration::from_millis(candidate.policy.max_wait_ms)
+    })
 }
 
 #[derive(Debug, Clone)]
@@ -456,9 +463,22 @@ impl SchedulerRole {
 
         // With no partner, either keep waiting or resume normal head scheduling.
         if batch_candidates.len() == 1 {
-            if memory_limited
-                || head.enqueued_at.elapsed() >= Duration::from_millis(batch_policy.max_wait_ms)
-            {
+            if memory_limited || batch_wait_expired(&batch_candidates) {
+                let waited_ms = head
+                    .enqueued_at
+                    .elapsed()
+                    .as_millis()
+                    .try_into()
+                    .unwrap_or(u64::MAX);
+                info!(
+                    run_id = head.msg.run_id(),
+                    workflow = %head.payload.workflow,
+                    batch_key = %head_batch_key,
+                    waited_ms,
+                    max_wait_ms = batch_policy.max_wait_ms,
+                    memory_limited,
+                    "scheduler batching window closed without a compatible partner"
+                );
                 return Ok(None);
             }
             return Ok(Some(SchedulerRequest::Wait(head)));
@@ -469,7 +489,7 @@ impl SchedulerRole {
             reason
         } else if memory_limited {
             BatchFlushReason::MemoryFit
-        } else if head.enqueued_at.elapsed() >= Duration::from_millis(batch_policy.max_wait_ms) {
+        } else if batch_wait_expired(&batch_candidates) {
             BatchFlushReason::MaxWaitMs
         } else {
             return Ok(Some(SchedulerRequest::Wait(head)));
@@ -486,11 +506,31 @@ impl SchedulerRole {
 }
 
 impl BatchRequest {
-    pub(super) fn prepare_schedule(&self) -> Result<PendingSchedule> {
+    pub(super) fn build_pending_schedule(&self) -> Result<PendingSchedule> {
         let batch_id = Uuid::new_v4().to_string();
         let candidates = self.candidates.as_slice();
         let payload =
             build_request_batch_payload(&batch_id, candidates, &self.policy, self.flush_reason)?;
+        let member_run_ids = candidates
+            .iter()
+            .map(|candidate| candidate.queued.msg.run_id())
+            .collect::<Vec<_>>();
+        let waited_ms = payload
+            .raw_payload
+            .get("batch_info")
+            .and_then(|batch_info| batch_info.get("waited_ms"))
+            .and_then(serde_json::Value::as_u64);
+        info!(
+            batch_id = %batch_id,
+            workflow = %payload.workflow,
+            batch_key = %self.policy.batch_key,
+            batch_size = candidates.len(),
+            flush_reason = self.flush_reason.as_str(),
+            waited_ms,
+            memory_mb = payload.memory_mb,
+            member_run_ids = ?member_run_ids,
+            "scheduler formed request batch"
+        );
 
         Ok(PendingSchedule {
             source_msg: self.head.msg.clone(),

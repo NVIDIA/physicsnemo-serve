@@ -163,9 +163,10 @@ Plugins provide Python hooks. The framework decides where they run.
 - `run_batch(items, ctx)`
   - preferred typed batch hook for shared setup across compatible items
   - batch-capable workflows may implement this without also defining `run(inputs, ctx)`
-  - single-item execution can still route through this hook with a one-item batch
+  - the inherited SDK `execute()` adapter routes normal single-item execution through this hook with one item
 - `execute_batch(items, ctx)`
   - legacy batch hook retained for compatibility; new SDK plugins should prefer `run_batch(items, ctx)`
+  - module-level plugins that define this hook must also define `execute(ctx)`, because the scheduler may dispatch a request normally when no compatible batch partner is available
 - `postprocess(result, ctx) -> PostprocessOutcome`
   - optional final shaping, aggregation, or publication request stage
   - return `PostprocessOutcome(payload=..., status=..., result_ops=[...])` when overriding final status or requesting built-in side effects
@@ -301,7 +302,12 @@ wait, and memory scaling. It does not force authors to implement a special hook:
 plugins may keep using `run(inputs, ctx)` and let the default adapter execute
 items one by one inside the batch, or implement `run_batch(items, ctx)` when
 shared setup is valuable. When a workflow only implements `run_batch(items, ctx)`,
-normal single-item execution still routes through that hook with a one-item batch.
+the inherited SDK `execute()` adapter routes normal single-item execution through
+that hook with one item. Batching is an optimization rather than a required
+dispatch format: if no compatible partner is available when the batching window
+closes, the scheduler may dispatch the request normally. Legacy module-level
+plugins that define `execute_batch(items, ctx)` must therefore also define
+`execute(ctx)`.
 
 ## Output Registration
 

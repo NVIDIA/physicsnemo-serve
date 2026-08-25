@@ -1029,6 +1029,23 @@ def resolve_phase_hook(
     )
 
 
+def validate_batch_execution_contract(module: Any, workflow_id: str) -> None:
+    """Require legacy batch hooks to retain the normal execution path."""
+    try:
+        resolve_phase_hook(module, workflow_id, "execute_batch")
+    except ValueError:
+        return
+
+    try:
+        resolve_phase_hook(module, workflow_id, "execute")
+    except ValueError as exc:
+        raise ValueError(
+            f"Plugin workflow '{workflow_id}' defines execute_batch(items, ctx) but "
+            "does not define execute(ctx). Batch-capable plugins must support normal "
+            "single-request execution when no compatible batch partner is available."
+        ) from exc
+
+
 def plugin_phases_from_manifest(manifest: dict[str, Any]) -> list[str]:
     phases: list[str] = []
     for stage in manifest.get("pipeline", {}).get("stages", []):

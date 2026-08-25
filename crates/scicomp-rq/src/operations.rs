@@ -8,6 +8,8 @@
 //! All queue-domain Redis stream operations (read, enqueue, handoff, ack,
 //! claim, group management) live here.
 
+use std::collections::HashSet;
+
 use tracing::warn;
 
 use crate::builder;
@@ -69,11 +71,18 @@ fn validate_forward_many_sources(messages: &[Message]) -> Result<()> {
         ));
     };
     validate_message_context(first)?;
+    let mut source_ids = HashSet::with_capacity(messages.len());
+    source_ids.insert(first.id());
     for message in &messages[1..] {
         validate_message_context(message)?;
         if message.stream() != first.stream() || message.group() != first.group() {
             return Err(QueueError::Config(
                 "forward_many source messages must share a stream and consumer group".into(),
+            ));
+        }
+        if !source_ids.insert(message.id()) {
+            return Err(QueueError::Config(
+                "forward_many source message IDs must be unique".into(),
             ));
         }
     }
@@ -885,6 +894,35 @@ mod tests {
             ),
         ];
         assert!(validate_forward_many_sources(&messages).is_ok());
+    }
+
+    #[test]
+    fn validate_forward_many_sources_rejects_duplicate_message_ids() {
+        let messages = vec![
+            Message::new(
+                "1-0",
+                "stream:schedule",
+                "schedule:grp",
+                "run-1",
+                "{}",
+                "schedule",
+            ),
+            Message::new(
+                "1-0",
+                "stream:schedule",
+                "schedule:grp",
+                "run-2",
+                "{}",
+                "schedule",
+            ),
+        ];
+        let error = validate_forward_many_sources(&messages)
+            .expect_err("duplicate source message IDs must be rejected");
+        assert!(
+            error
+                .to_string()
+                .contains("source message IDs must be unique")
+        );
     }
 
     #[test]

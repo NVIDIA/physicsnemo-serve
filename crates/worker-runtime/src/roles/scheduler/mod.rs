@@ -599,7 +599,8 @@ impl SchedulerRole {
     async fn schedule(&self, mut pending: PendingSchedule) -> Result<ScheduleDecision> {
         info!(
             msg_id = pending.source_msg.id(),
-            run_id = pending.source_msg.run_id(),
+            run_id = %pending.payload.run_id,
+            head_run_id = pending.source_msg.run_id(),
             workflow = %pending.payload.workflow,
             parent_run_id = ?pending.payload.parent_run_id,
             "attempting queued scheduler request"

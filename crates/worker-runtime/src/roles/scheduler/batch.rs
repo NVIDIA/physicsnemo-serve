@@ -401,6 +401,16 @@ impl SchedulerRole {
 
         // Seed the batch with the queue head and its compatibility key.
         let head_batch_key = self.batch_key(&head.payload, &batch_policy);
+        info!(
+            head_run_id = head.msg.run_id(),
+            workflow = %head.payload.workflow,
+            compatibility_key = %head_batch_key,
+            queue_depth = state.queue.len(),
+            max_batch_size = batch_policy.max_batch_size,
+            max_wait_ms = batch_policy.max_wait_ms,
+            memory_mb = batch_policy.single_request_memory_mb,
+            "scheduler attempting to form request batch"
+        );
         let mut batch_candidates = vec![BatchCandidate {
             queued: head.clone(),
             policy: batch_policy.clone(),
@@ -520,6 +530,11 @@ impl BatchRequest {
             .get("batch_info")
             .and_then(|batch_info| batch_info.get("waited_ms"))
             .and_then(serde_json::Value::as_u64);
+        let memory_mb = payload
+            .resource_profile
+            .as_ref()
+            .and_then(|profile| profile.memory_mb)
+            .unwrap_or(payload.memory_mb);
         info!(
             batch_id = %batch_id,
             workflow = %payload.workflow,
@@ -527,7 +542,7 @@ impl BatchRequest {
             batch_size = candidates.len(),
             flush_reason = self.flush_reason.as_str(),
             waited_ms,
-            memory_mb = payload.memory_mb,
+            memory_mb,
             member_run_ids = ?member_run_ids,
             "scheduler formed request batch"
         );

@@ -514,7 +514,7 @@ fn match_profile_for_payload(profiles: &Profiles, payload: &SchedulePayload) -> 
         return None;
     };
 
-    info!(
+    debug!(
         workflow = %wf,
         profile_workflow = %matched.workflow.trim(),
         profile_model = profile_model_field(matched),

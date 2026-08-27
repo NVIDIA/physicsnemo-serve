@@ -78,7 +78,7 @@
         "gpu_discovery_interval_secs": 60,
         "batching_enabled": true,
         "max_batch_size": 4,
-        "max_batch_wait_ms": 200
+        "max_batch_wait_ms": 5000
       }
     },
     "collect": {

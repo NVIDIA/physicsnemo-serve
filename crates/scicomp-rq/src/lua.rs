@@ -130,29 +130,33 @@ return 1
 /// # Keys
 /// - `KEYS[1..N]`: destination streams
 /// - `KEYS[N+1]`: source stream
-/// - `KEYS[N+2]`: run hash (run:{run_id})
 ///
 /// # Arguments
-/// - `ARGV[1]`: run_id
-/// - `ARGV[2]`: source_group
-/// - `ARGV[3]`: source_msg_id
-/// - `ARGV[4]`: output_count
-/// - `ARGV[5..]`: pairs of `(payload_i, stage_i)` for each output
+/// - `ARGV[1]`: source group
+/// - `ARGV[2]`: source message count
+/// - `ARGV[3]`: output count
+/// - `ARGV[4]`: run hash prefix
+/// - `ARGV[5..]`: source message IDs followed by output `(run_id, payload, stage)` triples
 pub const LUA_FORWARD_MANY: &str = r#"
 -- KEYS[1..N]=dest_streams, KEYS[N+1]=source_stream
--- ARGV[1]=source_group, ARGV[2]=source_msg_id, ARGV[3]=output_count, ARGV[4]=run_hash_prefix,
--- ARGV[5..]=run_id/payload/stage triples
+-- ARGV[1]=source_group, ARGV[2]=source_count, ARGV[3]=output_count, ARGV[4]=run_hash_prefix,
+-- ARGV[5..]=source_msg_ids followed by run_id/payload/stage triples
 local source_group = ARGV[1]
-local source_msg_id = ARGV[2]
+local source_count = tonumber(ARGV[2])
 local output_count = tonumber(ARGV[3])
 local run_hash_prefix = ARGV[4]
 local source_stream = KEYS[output_count + 1]
+local source_ids = {}
 
 -- Preconditions (fail before writes):
--- 1) Source message must still be pending for source stream/group.
-local pending = redis.call('XPENDING', source_stream, source_group, source_msg_id, source_msg_id, 1)
-if #pending == 0 or pending[1][1] ~= source_msg_id then
-  return redis.error_reply('SOURCE_NOT_PENDING:' .. source_msg_id)
+-- 1) Every source message must still be pending for the source stream/group.
+for i = 1, source_count do
+  local source_msg_id = ARGV[4 + i]
+  local pending = redis.call('XPENDING', source_stream, source_group, source_msg_id, source_msg_id, 1)
+  if #pending == 0 or pending[1][1] ~= source_msg_id then
+    return redis.error_reply('SOURCE_NOT_PENDING:' .. source_msg_id)
+  end
+  table.insert(source_ids, source_msg_id)
 end
 
 -- 2) Destination keys must be none/stream.
@@ -171,7 +175,7 @@ local now = redis.call('TIME')[1]
 local ids = {}
 
 for i = 1, output_count do
-  local run_id_idx = 5 + (i - 1) * 3
+  local run_id_idx = 5 + source_count + (i - 1) * 3
   local payload_idx = run_id_idx + 1
   local stage_idx = run_id_idx + 2
   local run_id = ARGV[run_id_idx]
@@ -185,8 +189,8 @@ for i = 1, output_count do
   redis.call('HSET', run_hash, 'stage', stage, 'updated_at', tostring(now), stage .. '_enqueued_at', tostring(now))
 end
 
-local acked = redis.call('XACK', source_stream, source_group, source_msg_id)
-if acked ~= 1 then
+local acked = redis.call('XACK', source_stream, source_group, unpack(source_ids))
+if acked ~= source_count then
   -- Best-effort rollback for all produced fan-out entries.
   for i = 1, #ids do
     redis.pcall('XDEL', KEYS[i], ids[i])

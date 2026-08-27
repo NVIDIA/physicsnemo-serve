@@ -320,7 +320,6 @@ impl PhysicsnemoServeMetrics {
         const STREAMS: &[&str] = &[
             "prepare",
             "prefetch",
-            "batch",
             "schedule",
             "release",
             "collect",

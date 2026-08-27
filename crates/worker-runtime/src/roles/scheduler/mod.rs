@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+mod batch;
 mod discovery;
 mod parent_slots;
 mod profile;
@@ -29,13 +30,14 @@ use crate::traits::{
     BackgroundTask, BoxFuture, MessageSink, RoleEnv, TaskCriticality, WorkerRole, message_deferred,
 };
 
+pub use self::batch::BatchProfile;
+use self::batch::SchedulerRequest;
 use self::discovery::discover_resources;
 pub(crate) use self::discovery::{
     DEFAULT_GPU_DISCOVERY_INTERVAL_SECS, DEFAULT_MEMORY_UTILIZATION_PERCENT,
 };
 use self::parent_slots::{ParentSlotAcquire, ParentSlotStore, RedisParentSlotStore};
 use self::profile::ResourceManager;
-pub use self::reservation::SchedulingStrategy;
 use self::reservation::{ReservedResource, ResourceReservationTable, is_reservation_blocked_error};
 
 #[derive(Debug, Clone)]
@@ -83,18 +85,25 @@ pub(crate) fn is_scheduler_deferred_error(error: &anyhow::Error) -> bool {
     crate::traits::is_message_deferred_error(error)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug)]
+enum ScheduleDecision {
+    Blocked,
+    Reserved(Box<ReservedSchedule>),
+    Dropped,
+}
+
+#[derive(Debug)]
 enum ScheduleAttemptOutcome {
     Blocked,
-    Dispatched,
+    Dispatched(Box<ReservedSchedule>),
     Dropped,
 }
 
 impl ScheduleAttemptOutcome {
-    fn as_label(self) -> &'static str {
+    fn as_label(&self) -> &'static str {
         match self {
             Self::Blocked => "blocked",
-            Self::Dispatched => "dispatched",
+            Self::Dispatched(_) => "dispatched",
             Self::Dropped => "dropped",
         }
     }
@@ -118,6 +127,9 @@ pub struct SchedulePayload {
     /// Optional fanout profile used for parent-level concurrency limits.
     #[serde(default)]
     pub fanout_profile: Option<ScheduleFanoutProfile>,
+    /// Optional per-request batching hints from prepare hooks.
+    #[serde(default)]
+    pub batch_profile: Option<BatchProfile>,
     /// Original request payload preserved for dispatch.
     #[serde(skip, default = "default_raw_payload")]
     pub raw_payload: JsonValue,
@@ -155,6 +167,22 @@ pub struct ScheduleFanoutProfile {
     pub max_in_flight: Option<usize>,
 }
 
+#[derive(Debug, Clone)]
+struct PendingSchedule {
+    source_msg: Message,
+    payload: SchedulePayload,
+    ack_after_dispatch: Vec<Message>,
+}
+
+#[derive(Debug, Clone)]
+struct ReservedSchedule {
+    source_msg: Message,
+    payload: SchedulePayload,
+    gpu_targets: Vec<ReservedResource>,
+    ack_after_dispatch: Vec<Message>,
+    held_parent_slot: Option<String>,
+}
+
 fn default_raw_payload() -> JsonValue {
     serde_json::json!({})
 }
@@ -175,7 +203,7 @@ struct ReleasePayload {
     resource_id: u32,
 }
 
-/// Scheduler role with remote-style discovery and memory-aware best-fit routing.
+/// Scheduler role with remote-style discovery and resource-aware routing.
 #[derive(Clone)]
 pub struct SchedulerRole {
     /// Tracks discovered worker capacity and active GPU reservations.
@@ -198,8 +226,7 @@ pub struct SchedulerRole {
     release_stream: String,
     /// Shared retry budget and DLQ target for scheduler background failures.
     retry_dlq_policy: RetryDlqPolicy,
-    /// Stored for future strategy dispatch (PR-004) and test access.
-    #[allow(dead_code)]
+    /// Parsed role configuration retained for runtime behavior and test access.
     config: SchedulerRoleConfig,
 }
 
@@ -282,11 +309,8 @@ impl SchedulerRole {
 
         let (schedule_stream, release_stream) = Self::resolve_input_streams(env)?;
 
-        let reservations = ResourceReservationTable::new(
-            qm.clone(),
-            config.memory_utilization_percent,
-            config.scheduling_strategy,
-        );
+        let reservations =
+            ResourceReservationTable::new(qm.clone(), config.memory_utilization_percent);
 
         let interval = Duration::from_secs(config.gpu_discovery_interval_secs);
 
@@ -316,10 +340,12 @@ impl SchedulerRole {
             Box::new(SchedulerTask { role: role.clone() });
 
         info!(
-            scheduling_strategy = ?role.config.scheduling_strategy,
             gpu_registry_key = %role.config.gpu_registry_key,
             memory_utilization_percent = role.config.memory_utilization_percent,
             gpu_discovery_interval_secs = role.config.gpu_discovery_interval_secs,
+            batching_enabled = role.config.batching_enabled,
+            max_batch_size = role.config.max_batch_size,
+            max_batch_wait_ms = role.config.max_batch_wait_ms,
             schedule_stream = %role.schedule_stream,
             release_stream = %role.release_stream,
             "Scheduler config loaded"
@@ -424,33 +450,21 @@ impl SchedulerRole {
         true
     }
 
-    async fn next_request(&self) -> Option<QueuedRequest> {
-        let state = self.scheduler_queue_state.lock().await;
-        state.queue.front().cloned()
-    }
-
-    async fn finish_request(&self, msg: &Message) {
-        let queue_key = Self::queue_key(msg);
-        let mut state = self.scheduler_queue_state.lock().await;
-        let mut removed = false;
-        if state
-            .queue
-            .front()
-            .is_some_and(|queued| Self::queue_key(&queued.msg) == queue_key)
-        {
-            state.queue.pop_front();
-            removed = true;
-        } else if let Some(index) = state
-            .queue
-            .iter()
-            .position(|queued| Self::queue_key(&queued.msg) == queue_key)
-        {
-            state.queue.remove(index);
-            removed = true;
+    async fn finish_request(&self, msgs: &[Message]) {
+        if msgs.is_empty() {
+            return;
         }
-
-        state.pending_ids.remove(queue_key.as_str());
-        if removed {
+        let queue_keys: HashSet<String> = msgs.iter().map(Self::queue_key).collect();
+        let mut state = self.scheduler_queue_state.lock().await;
+        let previous_len = state.queue.len();
+        state
+            .queue
+            .retain(|queued| !queue_keys.contains(Self::queue_key(&queued.msg).as_str()));
+        for queue_key in &queue_keys {
+            state.pending_ids.remove(queue_key.as_str());
+        }
+        let removed_count = previous_len.saturating_sub(state.queue.len());
+        for _ in 0..removed_count {
             self.decrement_scheduler_queue_depth();
         }
     }
@@ -504,38 +518,109 @@ impl SchedulerRole {
         Ok(outputs)
     }
 
-    async fn schedule_request(
+    async fn dispatch_reserved_schedule(
         &self,
-        queued: &QueuedRequest,
+        reserved: &ReservedSchedule,
         sink: &dyn MessageSink,
-    ) -> Result<ScheduleAttemptOutcome> {
-        let mut schedule_payload = queued.payload.clone();
+    ) -> Result<()> {
+        let outputs = match self.build_dispatch_outputs(
+            &reserved.gpu_targets,
+            reserved.payload.run_id.as_str(),
+            &reserved.payload,
+        ) {
+            Ok(outputs) => outputs,
+            Err(error) => {
+                self.rollback_reserved_schedule(reserved).await;
+                return Err(error);
+            }
+        };
+        let mut source_messages = Vec::with_capacity(1 + reserved.ack_after_dispatch.len());
+        source_messages.push(reserved.source_msg.clone());
+        source_messages.extend(reserved.ack_after_dispatch.iter().cloned());
+        if let Err(dispatch_error) = sink.forward_many_from(&source_messages, &outputs).await {
+            self.rollback_reserved_schedule(reserved).await;
+            return Err(dispatch_error).context("scheduler: failed to forward scheduled outputs");
+        }
+
         info!(
-            msg_id = queued.msg.id(),
-            run_id = queued.msg.run_id(),
-            workflow = %schedule_payload.workflow,
-            parent_run_id = ?schedule_payload.parent_run_id,
+            run_id = %reserved.payload.run_id,
+            workflow = %reserved.payload.workflow,
+            dispatch_stage = %reserved.payload.dispatch_stage,
+            memory_mb = reserved.payload.memory_mb,
+            target_count = reserved.gpu_targets.len(),
+            gpu_targets = ?reserved.gpu_targets,
+            batch_size = reserved
+                .payload
+                .raw_payload
+                .get("batch_info")
+                .and_then(|info| info.get("batch_size"))
+                .and_then(serde_json::Value::as_u64),
+            "scheduler request dispatched successfully"
+        );
+        Ok(())
+    }
+
+    async fn rollback_reserved_schedule(&self, reserved: &ReservedSchedule) {
+        for gpu_target in &reserved.gpu_targets {
+            if let Err(release_error) = self
+                .reservations
+                .release(gpu_target.resource_id, reserved.payload.memory_mb)
+                .await
+            {
+                warn!(
+                    run_id = %reserved.payload.run_id,
+                    resource_id = gpu_target.resource_id,
+                    stream = %gpu_target.stream_name,
+                    memory_mb = reserved.payload.memory_mb,
+                    error = %release_error,
+                    "scheduler rollback release failed after dispatch error"
+                );
+            } else {
+                debug!(
+                    run_id = %reserved.payload.run_id,
+                    stream = %gpu_target.stream_name,
+                    "scheduler rollback released reserved memory after dispatch error"
+                );
+            }
+        }
+
+        if let Some(parent_run_id) = reserved.held_parent_slot.as_deref()
+            && let Err(release_error) = self.parent_slots.release(parent_run_id).await
+        {
+            warn!(
+                run_id = %reserved.payload.run_id,
+                parent_run_id,
+                error = %release_error,
+                "scheduler failed to release parent slot after dispatch error"
+            );
+        }
+    }
+
+    async fn schedule(&self, mut pending: PendingSchedule) -> Result<ScheduleDecision> {
+        info!(
+            msg_id = pending.source_msg.id(),
+            run_id = %pending.payload.run_id,
+            head_run_id = pending.source_msg.run_id(),
+            workflow = %pending.payload.workflow,
+            parent_run_id = ?pending.payload.parent_run_id,
             "attempting queued scheduler request"
         );
-        if let Some(parent_run_id) = schedule_payload.parent_run_id.as_deref()
+        if let Some(parent_run_id) = pending.payload.parent_run_id.as_deref()
             && !parent_run_id.trim().is_empty()
             && self.parent_state.is_terminal(parent_run_id).await?
         {
             debug!(
-                msg_id = queued.msg.id(),
-                run_id = queued.msg.run_id(),
-                workflow = %schedule_payload.workflow,
+                msg_id = pending.source_msg.id(),
+                run_id = pending.source_msg.run_id(),
+                workflow = %pending.payload.workflow,
                 parent_run_id = %parent_run_id,
                 "dropping queued scheduler request because parent run is already terminal"
             );
-            sink.ack_message(&queued.msg)
-                .await
-                .context("scheduler: failed to ack terminal parent child request")?;
-            return Ok(ScheduleAttemptOutcome::Dropped);
+            return Ok(ScheduleDecision::Dropped);
         }
 
         let held_parent_slot =
-            if let Some((parent_run_id, max_in_flight)) = fanout_gate(&schedule_payload) {
+            if let Some((parent_run_id, max_in_flight)) = fanout_gate(&pending.payload) {
                 match self
                     .parent_slots
                     .try_acquire(parent_run_id, max_in_flight)
@@ -543,9 +628,9 @@ impl SchedulerRole {
                 {
                     ParentSlotAcquire::Acquired { .. } => {
                         debug!(
-                            msg_id = queued.msg.id(),
-                            run_id = queued.msg.run_id(),
-                            workflow = %schedule_payload.workflow,
+                            msg_id = pending.source_msg.id(),
+                            run_id = pending.source_msg.run_id(),
+                            workflow = %pending.payload.workflow,
                             parent_run_id = %parent_run_id,
                             max_in_flight,
                             "acquired parent slot for queued scheduler request"
@@ -554,21 +639,21 @@ impl SchedulerRole {
                     }
                     ParentSlotAcquire::Saturated { .. } => {
                         debug!(
-                            msg_id = queued.msg.id(),
-                            run_id = queued.msg.run_id(),
-                            workflow = %schedule_payload.workflow,
+                            msg_id = pending.source_msg.id(),
+                            run_id = pending.source_msg.run_id(),
+                            workflow = %pending.payload.workflow,
                             parent_run_id = %parent_run_id,
                             max_in_flight,
                             "scheduler request blocked because parent slot is saturated"
                         );
-                        return Ok(ScheduleAttemptOutcome::Blocked);
+                        return Ok(ScheduleDecision::Blocked);
                     }
                 }
             } else {
                 None
             };
 
-        let gpu_targets = self.reservations.reserve(&mut schedule_payload).await;
+        let gpu_targets = self.reservations.reserve(&mut pending.payload).await;
         let gpu_targets = match gpu_targets {
             Ok(targets) => targets,
             Err(error) => {
@@ -584,13 +669,13 @@ impl SchedulerRole {
 
                 if is_reservation_blocked_error(&error) {
                     info!(
-                        msg_id = queued.msg.id(),
-                        run_id = queued.msg.run_id(),
-                        workflow = %schedule_payload.workflow,
+                        msg_id = pending.source_msg.id(),
+                        run_id = pending.source_msg.run_id(),
+                        workflow = %pending.payload.workflow,
                         error = %error,
                         "scheduler request remains queued because reservation is currently blocked"
                     );
-                    return Ok(ScheduleAttemptOutcome::Blocked);
+                    return Ok(ScheduleDecision::Blocked);
                 }
 
                 return Err(anyhow!(
@@ -599,75 +684,114 @@ impl SchedulerRole {
             }
         };
 
-        let outputs =
-            self.build_dispatch_outputs(&gpu_targets, queued.msg.run_id(), &schedule_payload)?;
-        if let Err(dispatch_error) = sink.forward_many(&queued.msg, &outputs).await {
-            for gpu_target in &gpu_targets {
-                if let Err(release_error) = self
-                    .reservations
-                    .release(gpu_target.resource_id, schedule_payload.memory_mb)
-                    .await
-                {
-                    warn!(
-                        run_id = queued.msg.run_id(),
-                        resource_id = gpu_target.resource_id,
-                        stream = %gpu_target.stream_name,
-                        memory_mb = schedule_payload.memory_mb,
-                        error = %release_error,
-                        "scheduler rollback release failed after dispatch error"
-                    );
-                } else {
-                    debug!(
-                        run_id = queued.msg.run_id(),
-                        stream = %gpu_target.stream_name,
-                        "scheduler rollback released reserved memory after dispatch error"
-                    );
-                }
-            }
-            if let Some(parent_run_id) = held_parent_slot.as_deref()
-                && let Err(release_error) = self.parent_slots.release(parent_run_id).await
-            {
-                warn!(
-                    run_id = queued.msg.run_id(),
-                    parent_run_id,
-                    error = %release_error,
-                    "scheduler failed to release parent slot after dispatch error"
-                );
-            }
-            return Err(dispatch_error).context("scheduler: failed to forward scheduled outputs");
-        }
+        Ok(ScheduleDecision::Reserved(Box::new(ReservedSchedule {
+            source_msg: pending.source_msg,
+            payload: pending.payload,
+            gpu_targets,
+            ack_after_dispatch: pending.ack_after_dispatch,
+            held_parent_slot,
+        })))
+    }
 
-        info!(
-            msg_id = queued.msg.id(),
-            run_id = queued.msg.run_id(),
-            workflow = %schedule_payload.workflow,
-            dispatch_stage = %schedule_payload.dispatch_stage,
-            memory_mb = schedule_payload.memory_mb,
-            target_count = gpu_targets.len(),
-            gpu_targets = ?gpu_targets,
-            "scheduler request dispatched successfully"
-        );
-        Ok(ScheduleAttemptOutcome::Dispatched)
+    async fn execute_schedule_decision(
+        &self,
+        decision: ScheduleDecision,
+        queued: &QueuedRequest,
+        sink: &dyn MessageSink,
+    ) -> Result<ScheduleAttemptOutcome> {
+        match decision {
+            ScheduleDecision::Blocked => Ok(ScheduleAttemptOutcome::Blocked),
+            ScheduleDecision::Dropped => {
+                sink.ack_message(&queued.msg)
+                    .await
+                    .context("scheduler: failed to ack terminal parent child request")?;
+                Ok(ScheduleAttemptOutcome::Dropped)
+            }
+            ScheduleDecision::Reserved(reserved) => {
+                self.dispatch_reserved_schedule(&reserved, sink).await?;
+                Ok(ScheduleAttemptOutcome::Dispatched(reserved))
+            }
+        }
+    }
+
+    async fn next_request(&self) -> Result<SchedulerRequest> {
+        let mut state = self.scheduler_queue_state.lock().await;
+        let Some(head) = state.queue.front().cloned() else {
+            return Ok(SchedulerRequest::Empty);
+        };
+        if let Some(batch_request) = self.create_batch_request(&mut state, head.clone()).await? {
+            return Ok(batch_request);
+        }
+        Ok(SchedulerRequest::Single(head))
     }
 
     async fn process_next_request(&self, sink: &dyn MessageSink) -> Result<()> {
-        let Some(queued) = self.next_request().await else {
-            return Ok(());
+        let request = self.next_request().await?;
+        let attempt_started = Instant::now();
+
+        // Normalize a single request or formed batch into the same scheduling input.
+        let (queued, queue_wait_seconds, pending_schedule) = match request {
+            SchedulerRequest::Empty => return Ok(()),
+
+            SchedulerRequest::Wait(queued) => {
+                debug!(
+                    msg_id = queued.msg.id(),
+                    run_id = queued.msg.run_id(),
+                    "scheduler queue head is waiting for batch flush threshold"
+                );
+                return Ok(());
+            }
+
+            SchedulerRequest::Single(queued) => {
+                let queue_wait_seconds = queued.enqueued_at.elapsed().as_secs_f64();
+                let pending_schedule = PendingSchedule {
+                    source_msg: queued.msg.clone(),
+                    payload: queued.payload.clone(),
+                    ack_after_dispatch: Vec::new(),
+                };
+                (queued, queue_wait_seconds, Ok(pending_schedule))
+            }
+
+            SchedulerRequest::Batch(request_batch) => {
+                let queued = request_batch.head.clone();
+                let queue_wait_seconds = request_batch.head.enqueued_at.elapsed().as_secs_f64();
+                (
+                    queued,
+                    queue_wait_seconds,
+                    request_batch.build_pending_schedule(),
+                )
+            }
         };
 
-        let queue_wait_seconds = queued.enqueued_at.elapsed().as_secs_f64();
-        let attempt_started = Instant::now();
-        let schedule_result = self.schedule_request(&queued, sink).await;
+        // Reserve resources, then perform the resulting dispatch or acknowledgement.
+        let schedule_decision = match pending_schedule {
+            Ok(pending) => self.schedule(pending).await,
+            Err(error) => Err(error),
+        };
+        let schedule_result = match schedule_decision {
+            Ok(decision) => {
+                self.execute_schedule_decision(decision, &queued, sink)
+                    .await
+            }
+            Err(error) => Err(error),
+        };
+
+        // Record the complete attempt, including preparation and dispatch.
+        self.record_scheduler_attempt_duration(
+            schedule_result
+                .as_ref()
+                .map(|outcome| outcome.as_label())
+                .unwrap_or("failed"),
+            attempt_started.elapsed().as_secs_f64(),
+        );
+
         let outcome_label = match schedule_result.as_ref() {
             Ok(outcome) => outcome.as_label(),
             Err(_) => "failed",
         };
         self.record_scheduler_attempt_outcome(outcome_label);
-        self.record_scheduler_attempt_duration(
-            outcome_label,
-            attempt_started.elapsed().as_secs_f64(),
-        );
 
+        // Finalize successful work, leave blocked work queued, or apply retry policy.
         match schedule_result {
             Ok(ScheduleAttemptOutcome::Blocked) => {
                 info!(
@@ -676,10 +800,25 @@ impl SchedulerRole {
                     "scheduler queue head remains blocked; leaving request pending"
                 );
             }
-            Ok(ScheduleAttemptOutcome::Dispatched | ScheduleAttemptOutcome::Dropped) => {
+            Ok(ScheduleAttemptOutcome::Dispatched(reserved)) => {
+                self.record_scheduler_queue_wait(outcome_label, queue_wait_seconds);
+                let mut completed_messages = reserved.ack_after_dispatch;
+                completed_messages.push(reserved.source_msg);
+                for msg in &completed_messages {
+                    self.request_failures.clear(msg);
+                }
+                self.finish_request(&completed_messages).await;
+                info!(
+                    msg_id = queued.msg.id(),
+                    run_id = queued.msg.run_id(),
+                    "scheduler request finished and was removed from the queue"
+                );
+                return Ok(());
+            }
+            Ok(ScheduleAttemptOutcome::Dropped) => {
                 self.record_scheduler_queue_wait(outcome_label, queue_wait_seconds);
                 self.request_failures.clear(&queued.msg);
-                self.finish_request(&queued.msg).await;
+                self.finish_request(std::slice::from_ref(&queued.msg)).await;
                 info!(
                     msg_id = queued.msg.id(),
                     run_id = queued.msg.run_id(),
@@ -691,6 +830,7 @@ impl SchedulerRole {
                 let error_text = err.to_string();
                 let attempts = self.request_failures.increment(&queued.msg);
 
+                // Keep transient failures at the queue head until retries are exhausted.
                 if attempts < self.retry_dlq_policy.max_retries() {
                     warn!(
                         msg_id = queued.msg.id(),
@@ -703,6 +843,7 @@ impl SchedulerRole {
                     return Ok(());
                 }
 
+                // Move persistent failures to the DLQ before removing them locally.
                 let dlq_payload = match self.retry_dlq_policy.build_dlq_payload(
                     &queued.msg,
                     self.schedule_stream.as_str(),
@@ -747,7 +888,7 @@ impl SchedulerRole {
                             }
                         }
                         self.request_failures.clear(&queued.msg);
-                        self.finish_request(&queued.msg).await;
+                        self.finish_request(std::slice::from_ref(&queued.msg)).await;
                         warn!(
                             msg_id = queued.msg.id(),
                             run_id = queued.msg.run_id(),
@@ -1147,7 +1288,6 @@ mod tests {
     use crate::config::InputStreamSpec;
     use crate::roles::parent_run_state::InMemoryParentRunStateStore;
     use crate::roles::scheduler::parent_slots::InMemoryParentSlotStore;
-    use crate::roles::scheduler::reservation::SchedulingStrategy;
     use crate::test_env;
     use serde_json::json;
     use std::collections::HashSet;
@@ -1451,6 +1591,14 @@ mod tests {
     }
 
     fn scheduler_env(prefix: &str) -> RoleEnv {
+        scheduler_env_with_config(prefix, json!({ "batching_enabled": false }))
+    }
+
+    fn scheduler_env_with_config(prefix: &str, mut config: serde_json::Value) -> RoleEnv {
+        if let Some(map) = config.as_object_mut() {
+            map.entry("batching_enabled".to_string())
+                .or_insert_with(|| json!(false));
+        }
         RoleEnv {
             role_name: "scheduler".to_string(),
             stream_prefix: prefix.to_string(),
@@ -1471,12 +1619,12 @@ mod tests {
                 },
             ],
             resolved_outputs: vec![],
-            role_config: None,
+            role_config: Some(config),
             python_runtime_envs: Default::default(),
         }
     }
 
-    fn scheduler_env_with_config(prefix: &str, config: serde_json::Value) -> RoleEnv {
+    fn scheduler_env_with_batching(prefix: &str, config: serde_json::Value) -> RoleEnv {
         RoleEnv {
             role_name: "scheduler".to_string(),
             stream_prefix: prefix.to_string(),
@@ -1509,6 +1657,17 @@ mod tests {
     fn schedule_msg(run_id: &str, payload: &str) -> scicomp_rq::Message {
         scicomp_rq::Message::new(
             "1-0",
+            "test:schedule",
+            "schedule:grp",
+            run_id,
+            payload,
+            "schedule",
+        )
+    }
+
+    fn schedule_msg_with_id(id: &str, run_id: &str, payload: &str) -> scicomp_rq::Message {
+        scicomp_rq::Message::new(
+            id,
             "test:schedule",
             "schedule:grp",
             run_id,
@@ -1570,6 +1729,102 @@ mod tests {
         .to_string()
     }
 
+    fn batchable_schedule_payload(run_id: &str, memory_mb: u64) -> String {
+        json!({
+            "run_id": run_id,
+            "workflow": "demo-batchable",
+            "workflow_id": "demo-batchable",
+            "operation": "run",
+            "resource_profile": {
+                "gpus_required": 1,
+                "memory_mb": memory_mb,
+                "executor_class": "python.gpu.demo",
+                "tags": ["demo"]
+            },
+            "stage_context": {
+                "current_stage_id": "schedule",
+                "current_phase": "schedule",
+                "pipeline": [
+                    {"id": "prepare", "phase": "prepare", "queue": "prepare", "next": "schedule"},
+                    {"id": "schedule", "phase": "schedule", "queue": "schedule", "next": "execute"},
+                    {"id": "execute", "phase": "execute", "queue": "execute.python.gpu.demo", "next": "results"},
+                    {"id": "results", "phase": "results", "queue": "results", "next": null}
+                ]
+            }
+        })
+        .to_string()
+    }
+
+    fn batchable_schedule_payload_with_max_size(
+        run_id: &str,
+        memory_mb: u64,
+        max_batch_size: usize,
+    ) -> String {
+        let mut payload: JsonValue =
+            serde_json::from_str(&batchable_schedule_payload(run_id, memory_mb)).unwrap();
+        payload["batch_profile"] = json!({
+            "enabled": true,
+            "max_batch_size": max_batch_size
+        });
+        payload.to_string()
+    }
+
+    fn batchable_schedule_payload_with_policy(
+        run_id: &str,
+        memory_mb: u64,
+        max_batch_size: usize,
+        max_wait_ms: u64,
+    ) -> String {
+        let mut payload: JsonValue =
+            serde_json::from_str(&batchable_schedule_payload(run_id, memory_mb)).unwrap();
+        payload["batch_profile"] = json!({
+            "enabled": true,
+            "max_batch_size": max_batch_size,
+            "max_wait_ms": max_wait_ms
+        });
+        payload.to_string()
+    }
+
+    fn known_profile_batchable_schedule_payload(
+        run_id: &str,
+        workflow: &str,
+        executor_class: &str,
+    ) -> String {
+        json!({
+            "run_id": run_id,
+            "workflow": workflow,
+            "workflow_id": workflow,
+            "operation": "run",
+            "runtime": {
+                "executor_class": executor_class
+            },
+            "stage_context": {
+                "current_stage_id": "schedule",
+                "current_phase": "schedule",
+                "pipeline": [
+                    {"id": "prepare", "phase": "prepare", "queue": "prepare", "next": "schedule"},
+                    {"id": "schedule", "phase": "schedule", "queue": "schedule", "next": "execute"},
+                    {"id": "execute", "phase": "execute", "queue": format!("execute.{executor_class}"), "next": "results"},
+                    {"id": "results", "phase": "results", "queue": "results", "next": null}
+                ]
+            }
+        })
+        .to_string()
+    }
+
+    fn legacy_known_profile_batchable_schedule_payload(
+        run_id: &str,
+        workflow: &str,
+        executor_class: &str,
+    ) -> String {
+        let mut payload: JsonValue = serde_json::from_str(
+            &known_profile_batchable_schedule_payload(run_id, workflow, executor_class),
+        )
+        .unwrap();
+        payload.as_object_mut().unwrap().remove("runtime");
+        payload.to_string()
+    }
+
     async fn run_task_by_name_result(
         tasks: &[Box<dyn BackgroundTask>],
         task_name: &str,
@@ -1620,6 +1875,769 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn scheduler_batches_default_profile_requests_at_max_size() {
+        let _guard = test_env::env_lock().lock().await;
+        let prev_discovery = std::env::var("SCHEDULER_DISCOVERY_JSON").ok();
+
+        set_env_var(
+            "SCHEDULER_DISCOVERY_JSON",
+            Some(
+                r#"[{"resource_id":0,"stream_name":"gpu:ns:pod:0","total_memory_mb":50000,"used_memory_mb":0,"device_kind":"gpu","executor_class":"python.gpu.demo","tags":["demo"]}]"#,
+            ),
+        );
+
+        let (_redis_server, role, tasks) = scheduler_with_test_queue_manager(
+            "scheduler-tests",
+            &scheduler_env_with_batching(
+                "test:",
+                json!({
+                    "memory_utilization_percent": 100,
+                    "batching_enabled": true,
+                    "max_batch_size": 2,
+                    "max_batch_wait_ms": 10_000
+                }),
+            ),
+        )
+        .await;
+        let sink = RecordingSink::new();
+        run_gpu_discovery(&tasks, &sink).await;
+
+        queue_schedule(
+            &role,
+            &schedule_msg_with_id("1-0", "run-a", &batchable_schedule_payload("run-a", 20_000)),
+            "schedule",
+            &sink,
+        )
+        .await;
+        queue_schedule(
+            &role,
+            &schedule_msg_with_id("1-1", "run-b", &batchable_schedule_payload("run-b", 20_000)),
+            "schedule",
+            &sink,
+        )
+        .await;
+        run_scheduler_task(&tasks, &sink).await;
+
+        let writes = sink.writes();
+        assert_eq!(writes.len(), 1);
+        let forwarded: JsonValue = serde_json::from_str(&writes[0].payload).unwrap();
+        assert_eq!(forwarded["batch_info"]["batch_size"], 2);
+        assert_eq!(forwarded["batch_info"]["flush_reason"], "max_batch_size");
+        assert_eq!(forwarded["resource_profile"]["memory_mb"], 40_000);
+        assert_eq!(forwarded["items"][0]["run_id"], "run-a");
+        assert_eq!(forwarded["items"][1]["run_id"], "run-b");
+        assert_eq!(sink.acked_ids(), vec!["1-0".to_string(), "1-1".to_string()]);
+        assert_eq!(role.queued_request_count().await, 0);
+
+        set_env_var("SCHEDULER_DISCOVERY_JSON", prev_discovery.as_deref());
+    }
+
+    #[tokio::test]
+    async fn scheduler_excludes_candidate_with_single_item_batch_limit() {
+        let _guard = test_env::env_lock().lock().await;
+        let prev_discovery = std::env::var("SCHEDULER_DISCOVERY_JSON").ok();
+        set_env_var(
+            "SCHEDULER_DISCOVERY_JSON",
+            Some(
+                r#"[{"resource_id":0,"stream_name":"gpu:ns:pod:0","total_memory_mb":50000,"used_memory_mb":0,"device_kind":"gpu","executor_class":"python.gpu.demo","tags":["demo"]}]"#,
+            ),
+        );
+
+        let (_redis_server, role, tasks) = scheduler_with_test_queue_manager(
+            "scheduler-tests",
+            &scheduler_env_with_batching(
+                "test:",
+                json!({
+                    "memory_utilization_percent": 100,
+                    "batching_enabled": true,
+                    "max_batch_size": 4,
+                    "max_batch_wait_ms": 10_000
+                }),
+            ),
+        )
+        .await;
+        let sink = RecordingSink::new();
+        run_gpu_discovery(&tasks, &sink).await;
+
+        for (message_id, run_id, max_batch_size) in [
+            ("1-0", "run-a", 2),
+            ("1-1", "run-b", 1),
+            ("1-2", "run-c", 2),
+        ] {
+            queue_schedule(
+                &role,
+                &schedule_msg_with_id(
+                    message_id,
+                    run_id,
+                    &batchable_schedule_payload_with_max_size(run_id, 10_000, max_batch_size),
+                ),
+                "schedule",
+                &sink,
+            )
+            .await;
+        }
+        run_scheduler_task(&tasks, &sink).await;
+
+        let writes = sink.writes();
+        assert_eq!(writes.len(), 1);
+        let forwarded: JsonValue = serde_json::from_str(&writes[0].payload).unwrap();
+        assert_eq!(forwarded["items"][0]["run_id"], "run-a");
+        assert_eq!(forwarded["items"][1]["run_id"], "run-c");
+        assert_eq!(role.queued_request_count().await, 1);
+
+        run_scheduler_task(&tasks, &sink).await;
+        let writes = sink.writes();
+        assert_eq!(writes.len(), 2);
+        assert_eq!(writes[1].run_id, "run-b");
+        assert_eq!(role.queued_request_count().await, 0);
+
+        set_env_var("SCHEDULER_DISCOVERY_JSON", prev_discovery.as_deref());
+    }
+
+    #[tokio::test]
+    async fn scheduler_flushes_at_smallest_accepted_candidate_batch_limit() {
+        let _guard = test_env::env_lock().lock().await;
+        let prev_discovery = std::env::var("SCHEDULER_DISCOVERY_JSON").ok();
+        set_env_var(
+            "SCHEDULER_DISCOVERY_JSON",
+            Some(
+                r#"[{"resource_id":0,"stream_name":"gpu:ns:pod:0","total_memory_mb":50000,"used_memory_mb":0,"device_kind":"gpu","executor_class":"python.gpu.demo","tags":["demo"]}]"#,
+            ),
+        );
+
+        let (_redis_server, role, tasks) = scheduler_with_test_queue_manager(
+            "scheduler-tests",
+            &scheduler_env_with_batching(
+                "test:",
+                json!({
+                    "memory_utilization_percent": 100,
+                    "batching_enabled": true,
+                    "max_batch_size": 4,
+                    "max_batch_wait_ms": 10_000
+                }),
+            ),
+        )
+        .await;
+        let sink = RecordingSink::new();
+        run_gpu_discovery(&tasks, &sink).await;
+
+        for (message_id, run_id, max_batch_size) in [
+            ("1-0", "run-a", 4),
+            ("1-1", "run-b", 2),
+            ("1-2", "run-c", 4),
+        ] {
+            queue_schedule(
+                &role,
+                &schedule_msg_with_id(
+                    message_id,
+                    run_id,
+                    &batchable_schedule_payload_with_max_size(run_id, 10_000, max_batch_size),
+                ),
+                "schedule",
+                &sink,
+            )
+            .await;
+        }
+        run_scheduler_task(&tasks, &sink).await;
+
+        let writes = sink.writes();
+        assert_eq!(writes.len(), 1);
+        let forwarded: JsonValue = serde_json::from_str(&writes[0].payload).unwrap();
+        assert_eq!(forwarded["batch_info"]["batch_size"], 2);
+        assert_eq!(forwarded["batch_info"]["flush_reason"], "max_batch_size");
+        assert_eq!(forwarded["items"][0]["run_id"], "run-a");
+        assert_eq!(forwarded["items"][1]["run_id"], "run-b");
+        assert_eq!(role.queued_request_count().await, 1);
+
+        set_env_var("SCHEDULER_DISCOVERY_JSON", prev_discovery.as_deref());
+    }
+
+    #[tokio::test]
+    async fn scheduler_batches_known_profile_requests_for_runtime_executor_class() {
+        let _guard = test_env::env_lock().lock().await;
+        let prev_discovery = std::env::var("SCHEDULER_DISCOVERY_JSON").ok();
+        let prev_profiles = std::env::var("SCHEDULER_PROFILES_JSON").ok();
+        set_env_var(
+            "SCHEDULER_DISCOVERY_JSON",
+            Some(
+                r#"[
+                    {"resource_id":0,"stream_name":"execute.python.gpu.other","total_memory_mb":50000,"used_memory_mb":0,"device_kind":"gpu","executor_class":"python.gpu.other","tags":["other"]},
+                    {"resource_id":1,"stream_name":"execute.python.gpu.demo","total_memory_mb":50000,"used_memory_mb":0,"device_kind":"gpu","executor_class":"python.gpu.demo","tags":["demo"]}
+                ]"#,
+            ),
+        );
+        set_env_var(
+            "SCHEDULER_PROFILES_JSON",
+            Some(
+                r#"{"profiles":[{"workflow":"known-profile-batch","gpus.used":1,"peak":{"memory.used":"2048 MiB"}}]}"#,
+            ),
+        );
+
+        let (_redis_server, role, tasks) = scheduler_with_test_queue_manager(
+            "scheduler-tests",
+            &scheduler_env_with_batching(
+                "test:",
+                json!({
+                    "memory_utilization_percent": 100,
+                    "batching_enabled": true,
+                    "max_batch_size": 2,
+                    "max_batch_wait_ms": 10_000
+                }),
+            ),
+        )
+        .await;
+        let sink = RecordingSink::new();
+        run_gpu_discovery(&tasks, &sink).await;
+
+        for (message_id, run_id) in [("1-0", "run-a"), ("1-1", "run-b")] {
+            queue_schedule(
+                &role,
+                &schedule_msg_with_id(
+                    message_id,
+                    run_id,
+                    &known_profile_batchable_schedule_payload(
+                        run_id,
+                        "known-profile-batch",
+                        "python.gpu.demo",
+                    ),
+                ),
+                "schedule",
+                &sink,
+            )
+            .await;
+        }
+        run_scheduler_task(&tasks, &sink).await;
+
+        let writes = sink.writes();
+        assert_eq!(writes.len(), 1);
+        assert_eq!(writes[0].stream_key, "execute.python.gpu.demo");
+        let forwarded: JsonValue = serde_json::from_str(&writes[0].payload).unwrap();
+        assert_eq!(forwarded["batch_info"]["batch_size"], 2);
+        assert_eq!(
+            forwarded["resource_profile"]["executor_class"],
+            "python.gpu.demo"
+        );
+        assert_eq!(forwarded["resource_profile"]["memory_mb"], 4_096);
+
+        set_env_var("SCHEDULER_DISCOVERY_JSON", prev_discovery.as_deref());
+        set_env_var("SCHEDULER_PROFILES_JSON", prev_profiles.as_deref());
+    }
+
+    #[tokio::test]
+    async fn scheduler_batches_legacy_known_profile_requests_for_uniform_worker_executor() {
+        let _guard = test_env::env_lock().lock().await;
+        let prev_discovery = std::env::var("SCHEDULER_DISCOVERY_JSON").ok();
+        let prev_profiles = std::env::var("SCHEDULER_PROFILES_JSON").ok();
+        set_env_var(
+            "SCHEDULER_DISCOVERY_JSON",
+            Some(
+                r#"[
+                    {"resource_id":0,"stream_name":"execute.python.gpu.demo:0","total_memory_mb":50000,"used_memory_mb":0,"device_kind":"gpu","executor_class":"python.gpu.demo","tags":["demo-a"]},
+                    {"resource_id":1,"stream_name":"execute.python.gpu.demo:1","total_memory_mb":50000,"used_memory_mb":0,"device_kind":"gpu","executor_class":"python.gpu.demo","tags":["demo-b"]}
+                ]"#,
+            ),
+        );
+        set_env_var(
+            "SCHEDULER_PROFILES_JSON",
+            Some(
+                r#"{"profiles":[{"workflow":"legacy-known-profile-batch","gpus.used":1,"peak":{"memory.used":"2048 MiB"}}]}"#,
+            ),
+        );
+
+        let (_redis_server, role, tasks) = scheduler_with_test_queue_manager(
+            "scheduler-tests",
+            &scheduler_env_with_batching(
+                "test:",
+                json!({
+                    "memory_utilization_percent": 100,
+                    "batching_enabled": true,
+                    "max_batch_size": 2,
+                    "max_batch_wait_ms": 10_000
+                }),
+            ),
+        )
+        .await;
+        let sink = RecordingSink::new();
+        run_gpu_discovery(&tasks, &sink).await;
+
+        for (message_id, run_id) in [("1-0", "run-a"), ("1-1", "run-b")] {
+            queue_schedule(
+                &role,
+                &schedule_msg_with_id(
+                    message_id,
+                    run_id,
+                    &legacy_known_profile_batchable_schedule_payload(
+                        run_id,
+                        "legacy-known-profile-batch",
+                        "python.gpu.demo",
+                    ),
+                ),
+                "schedule",
+                &sink,
+            )
+            .await;
+        }
+        run_scheduler_task(&tasks, &sink).await;
+
+        let writes = sink.writes();
+        assert_eq!(writes.len(), 1);
+        assert_eq!(writes[0].stream_key, "execute.python.gpu.demo:0");
+        let forwarded: JsonValue = serde_json::from_str(&writes[0].payload).unwrap();
+        assert_eq!(forwarded["batch_info"]["batch_size"], 2);
+        assert_eq!(
+            forwarded["resource_profile"]["executor_class"],
+            "python.gpu.demo"
+        );
+
+        set_env_var("SCHEDULER_DISCOVERY_JSON", prev_discovery.as_deref());
+        set_env_var("SCHEDULER_PROFILES_JSON", prev_profiles.as_deref());
+    }
+
+    #[tokio::test]
+    async fn scheduler_batch_wait_starts_when_request_is_enqueued() {
+        let _guard = test_env::env_lock().lock().await;
+        let prev_discovery = std::env::var("SCHEDULER_DISCOVERY_JSON").ok();
+
+        set_env_var(
+            "SCHEDULER_DISCOVERY_JSON",
+            Some(
+                r#"[{"resource_id":0,"stream_name":"gpu:ns:pod:0","total_memory_mb":50000,"used_memory_mb":0,"device_kind":"gpu","executor_class":"python.gpu.demo","tags":["demo"]}]"#,
+            ),
+        );
+
+        let (_redis_server, role, tasks) = scheduler_with_test_queue_manager(
+            "scheduler-tests",
+            &scheduler_env_with_batching(
+                "test:",
+                json!({
+                    "memory_utilization_percent": 100,
+                    "batching_enabled": true,
+                    "max_batch_size": 2,
+                    "max_batch_wait_ms": 10_000
+                }),
+            ),
+        )
+        .await;
+        let sink = RecordingSink::new();
+        run_gpu_discovery(&tasks, &sink).await;
+
+        queue_schedule(
+            &role,
+            &schedule_msg_with_id("1-0", "run-a", &batchable_schedule_payload("run-a", 10_000)),
+            "schedule",
+            &sink,
+        )
+        .await;
+        {
+            let mut state = role.scheduler_queue_state.lock().await;
+            let queued = state
+                .queue
+                .front_mut()
+                .expect("queued request should be pending");
+            queued.enqueued_at = queued
+                .enqueued_at
+                .checked_sub(Duration::from_secs(60))
+                .expect("test timestamp should support subtracting queue age");
+        }
+        run_scheduler_task(&tasks, &sink).await;
+
+        let writes = sink.writes();
+        assert_eq!(
+            writes.len(),
+            1,
+            "an aged queue head should flush immediately"
+        );
+        let forwarded: JsonValue = serde_json::from_str(&writes[0].payload).unwrap();
+        assert_eq!(forwarded["run_id"], "run-a");
+        assert!(forwarded.get("batch_info").is_none());
+        assert_eq!(role.queued_request_count().await, 0);
+
+        set_env_var("SCHEDULER_DISCOVERY_JSON", prev_discovery.as_deref());
+    }
+
+    #[tokio::test]
+    async fn scheduler_flushes_when_any_batch_candidate_reaches_its_wait_limit() {
+        let _guard = test_env::env_lock().lock().await;
+        let prev_discovery = std::env::var("SCHEDULER_DISCOVERY_JSON").ok();
+
+        set_env_var(
+            "SCHEDULER_DISCOVERY_JSON",
+            Some(
+                r#"[{"resource_id":0,"stream_name":"gpu:ns:pod:0","total_memory_mb":50000,"used_memory_mb":0,"device_kind":"gpu","executor_class":"python.gpu.demo","tags":["demo"]}]"#,
+            ),
+        );
+
+        let (_redis_server, role, tasks) = scheduler_with_test_queue_manager(
+            "scheduler-tests",
+            &scheduler_env_with_batching(
+                "test:",
+                json!({
+                    "memory_utilization_percent": 100,
+                    "batching_enabled": true,
+                    "max_batch_size": 3,
+                    "max_batch_wait_ms": 10_000
+                }),
+            ),
+        )
+        .await;
+        let sink = RecordingSink::new();
+        run_gpu_discovery(&tasks, &sink).await;
+
+        for (message_id, run_id, max_wait_ms) in [("1-0", "run-a", 10_000), ("1-1", "run-b", 100)] {
+            queue_schedule(
+                &role,
+                &schedule_msg_with_id(
+                    message_id,
+                    run_id,
+                    &batchable_schedule_payload_with_policy(run_id, 10_000, 3, max_wait_ms),
+                ),
+                "schedule",
+                &sink,
+            )
+            .await;
+        }
+        {
+            let mut state = role.scheduler_queue_state.lock().await;
+            let candidate = state
+                .queue
+                .get_mut(1)
+                .expect("second batch candidate should be pending");
+            candidate.enqueued_at = candidate
+                .enqueued_at
+                .checked_sub(Duration::from_secs(1))
+                .expect("test timestamp should support subtracting queue age");
+        }
+
+        run_scheduler_task(&tasks, &sink).await;
+
+        let writes = sink.writes();
+        assert_eq!(writes.len(), 1);
+        let forwarded: JsonValue = serde_json::from_str(&writes[0].payload).unwrap();
+        assert_eq!(forwarded["batch_info"]["batch_size"], 2);
+        assert_eq!(forwarded["batch_info"]["flush_reason"], "max_wait_ms");
+        assert_eq!(forwarded["items"][0]["run_id"], "run-a");
+        assert_eq!(forwarded["items"][1]["run_id"], "run-b");
+        assert_eq!(role.queued_request_count().await, 0);
+
+        set_env_var("SCHEDULER_DISCOVERY_JSON", prev_discovery.as_deref());
+    }
+
+    #[tokio::test]
+    async fn scheduler_processes_max_size_one_batchable_request_as_single() {
+        let _guard = test_env::env_lock().lock().await;
+        let prev_discovery = std::env::var("SCHEDULER_DISCOVERY_JSON").ok();
+
+        set_env_var(
+            "SCHEDULER_DISCOVERY_JSON",
+            Some(
+                r#"[{"resource_id":0,"stream_name":"gpu:ns:pod:0","total_memory_mb":50000,"used_memory_mb":0,"device_kind":"gpu","executor_class":"python.gpu.demo","tags":["demo"]}]"#,
+            ),
+        );
+
+        let (_redis_server, role, tasks) = scheduler_with_test_queue_manager(
+            "scheduler-tests",
+            &scheduler_env_with_batching(
+                "test:",
+                json!({
+                    "memory_utilization_percent": 100,
+                    "batching_enabled": true,
+                    "max_batch_size": 1,
+                    "max_batch_wait_ms": 10_000
+                }),
+            ),
+        )
+        .await;
+        let sink = RecordingSink::new();
+        run_gpu_discovery(&tasks, &sink).await;
+
+        queue_schedule(
+            &role,
+            &schedule_msg_with_id("1-0", "run-a", &batchable_schedule_payload("run-a", 10_000)),
+            "schedule",
+            &sink,
+        )
+        .await;
+        run_scheduler_task(&tasks, &sink).await;
+
+        let writes = sink.writes();
+        assert_eq!(writes.len(), 1);
+        let forwarded: JsonValue = serde_json::from_str(&writes[0].payload).unwrap();
+        assert!(forwarded.get("batch_info").is_none());
+        assert_eq!(forwarded["run_id"], "run-a");
+        assert_eq!(forwarded["memory_mb"], 10_000);
+        assert_eq!(sink.acked_ids(), vec!["1-0".to_string()]);
+        assert_eq!(role.queued_request_count().await, 0);
+
+        set_env_var("SCHEDULER_DISCOVERY_JSON", prev_discovery.as_deref());
+    }
+
+    #[tokio::test]
+    async fn scheduler_batches_requests_with_different_memory_requirements() {
+        let _guard = test_env::env_lock().lock().await;
+        let prev_discovery = std::env::var("SCHEDULER_DISCOVERY_JSON").ok();
+
+        set_env_var(
+            "SCHEDULER_DISCOVERY_JSON",
+            Some(
+                r#"[{"resource_id":0,"stream_name":"gpu:ns:pod:0","total_memory_mb":50000,"used_memory_mb":0,"device_kind":"gpu","executor_class":"python.gpu.demo","tags":["demo"]}]"#,
+            ),
+        );
+
+        let (_redis_server, role, tasks) = scheduler_with_test_queue_manager(
+            "scheduler-tests",
+            &scheduler_env_with_batching(
+                "test:",
+                json!({
+                    "memory_utilization_percent": 100,
+                    "batching_enabled": true,
+                    "max_batch_size": 2,
+                    "max_batch_wait_ms": 10_000
+                }),
+            ),
+        )
+        .await;
+        let sink = RecordingSink::new();
+        run_gpu_discovery(&tasks, &sink).await;
+
+        queue_schedule(
+            &role,
+            &schedule_msg_with_id("1-0", "run-a", &batchable_schedule_payload("run-a", 10_000)),
+            "schedule",
+            &sink,
+        )
+        .await;
+        queue_schedule(
+            &role,
+            &schedule_msg_with_id("1-1", "run-b", &batchable_schedule_payload("run-b", 20_000)),
+            "schedule",
+            &sink,
+        )
+        .await;
+        run_scheduler_task(&tasks, &sink).await;
+
+        let writes = sink.writes();
+        assert_eq!(writes.len(), 1);
+        let forwarded: JsonValue = serde_json::from_str(&writes[0].payload).unwrap();
+        assert_eq!(forwarded["batch_info"]["batch_size"], 2);
+        assert_eq!(forwarded["resource_profile"]["memory_mb"], 30_000);
+        assert_eq!(role.queued_request_count().await, 0);
+
+        set_env_var("SCHEDULER_DISCOVERY_JSON", prev_discovery.as_deref());
+    }
+
+    #[tokio::test]
+    async fn scheduler_processes_memory_limited_one_item_batch_as_single() {
+        let _guard = test_env::env_lock().lock().await;
+        let prev_discovery = std::env::var("SCHEDULER_DISCOVERY_JSON").ok();
+
+        set_env_var(
+            "SCHEDULER_DISCOVERY_JSON",
+            Some(
+                r#"[{"resource_id":0,"stream_name":"gpu:ns:pod:0","total_memory_mb":50000,"used_memory_mb":0,"device_kind":"gpu","executor_class":"python.gpu.demo","tags":["demo"]}]"#,
+            ),
+        );
+
+        let (_redis_server, role, tasks) = scheduler_with_test_queue_manager(
+            "scheduler-tests",
+            &scheduler_env_with_batching(
+                "test:",
+                json!({
+                    "memory_utilization_percent": 100,
+                    "batching_enabled": true,
+                    "max_batch_size": 2,
+                    "max_batch_wait_ms": 10_000
+                }),
+            ),
+        )
+        .await;
+        let sink = RecordingSink::new();
+        run_gpu_discovery(&tasks, &sink).await;
+
+        queue_schedule(
+            &role,
+            &schedule_msg_with_id("1-0", "run-a", &batchable_schedule_payload("run-a", 30_000)),
+            "schedule",
+            &sink,
+        )
+        .await;
+        queue_schedule(
+            &role,
+            &schedule_msg_with_id("1-1", "run-b", &batchable_schedule_payload("run-b", 30_000)),
+            "schedule",
+            &sink,
+        )
+        .await;
+        run_scheduler_task(&tasks, &sink).await;
+
+        let writes = sink.writes();
+        assert_eq!(writes.len(), 1);
+        let forwarded: JsonValue = serde_json::from_str(&writes[0].payload).unwrap();
+        assert!(forwarded.get("batch_info").is_none());
+        assert_eq!(forwarded["run_id"], "run-a");
+        assert_eq!(forwarded["memory_mb"], 30_000);
+        assert_eq!(sink.acked_ids(), vec!["1-0".to_string()]);
+        assert_eq!(role.queued_request_count().await, 1);
+
+        set_env_var("SCHEDULER_DISCOVERY_JSON", prev_discovery.as_deref());
+    }
+
+    #[tokio::test]
+    async fn scheduler_limits_batch_during_formation_when_full_batch_does_not_fit_memory() {
+        let _guard = test_env::env_lock().lock().await;
+        let prev_discovery = std::env::var("SCHEDULER_DISCOVERY_JSON").ok();
+
+        set_env_var(
+            "SCHEDULER_DISCOVERY_JSON",
+            Some(
+                r#"[{"resource_id":0,"stream_name":"gpu:ns:pod:0","total_memory_mb":50000,"used_memory_mb":0,"device_kind":"gpu","executor_class":"python.gpu.demo","tags":["demo"]}]"#,
+            ),
+        );
+
+        let (_redis_server, role, tasks) = scheduler_with_test_queue_manager(
+            "scheduler-tests",
+            &scheduler_env_with_batching(
+                "test:",
+                json!({
+                    "memory_utilization_percent": 100,
+                    "batching_enabled": true,
+                    "max_batch_size": 3,
+                    "max_batch_wait_ms": 10_000
+                }),
+            ),
+        )
+        .await;
+        let sink = RecordingSink::new();
+        run_gpu_discovery(&tasks, &sink).await;
+
+        for (id, run_id) in [("1-0", "run-a"), ("1-1", "run-b"), ("1-2", "run-c")] {
+            queue_schedule(
+                &role,
+                &schedule_msg_with_id(id, run_id, &batchable_schedule_payload(run_id, 20_000)),
+                "schedule",
+                &sink,
+            )
+            .await;
+        }
+        run_scheduler_task(&tasks, &sink).await;
+
+        let writes = sink.writes();
+        assert_eq!(writes.len(), 1);
+        let forwarded: JsonValue = serde_json::from_str(&writes[0].payload).unwrap();
+        assert_eq!(forwarded["batch_info"]["batch_size"], 2);
+        assert_eq!(forwarded["batch_info"]["flush_reason"], "memory_fit");
+        assert_eq!(forwarded["resource_profile"]["memory_mb"], 40_000);
+        assert_eq!(role.queued_request_count().await, 1);
+
+        set_env_var("SCHEDULER_DISCOVERY_JSON", prev_discovery.as_deref());
+    }
+
+    #[tokio::test]
+    async fn scheduler_queues_multiple_batches_on_one_gpu_stream() {
+        let _guard = test_env::env_lock().lock().await;
+        let prev_discovery = std::env::var("SCHEDULER_DISCOVERY_JSON").ok();
+
+        set_env_var(
+            "SCHEDULER_DISCOVERY_JSON",
+            Some(
+                r#"[{"resource_id":0,"stream_name":"gpu:ns:pod:0","total_memory_mb":50000,"used_memory_mb":0,"device_kind":"gpu","executor_class":"python.gpu.demo","tags":["demo"]}]"#,
+            ),
+        );
+
+        let (_redis_server, role, tasks) = scheduler_with_test_queue_manager(
+            "scheduler-tests",
+            &scheduler_env_with_batching(
+                "test:",
+                json!({
+                    "memory_utilization_percent": 100,
+                    "batching_enabled": true,
+                    "max_batch_size": 2,
+                    "max_batch_wait_ms": 10_000
+                }),
+            ),
+        )
+        .await;
+        let sink = RecordingSink::new();
+        run_gpu_discovery(&tasks, &sink).await;
+
+        for (id, run_id) in [
+            ("1-0", "run-a"),
+            ("1-1", "run-b"),
+            ("1-2", "run-c"),
+            ("1-3", "run-d"),
+        ] {
+            queue_schedule(
+                &role,
+                &schedule_msg_with_id(id, run_id, &batchable_schedule_payload(run_id, 1_000)),
+                "schedule",
+                &sink,
+            )
+            .await;
+        }
+        run_scheduler_task(&tasks, &sink).await;
+        run_scheduler_task(&tasks, &sink).await;
+        assert_eq!(sink.writes().len(), 2);
+        assert_eq!(role.queued_request_count().await, 0);
+        for write in sink.writes() {
+            let payload: JsonValue = serde_json::from_str(&write.payload).unwrap();
+            assert_eq!(payload["batch_info"]["batch_size"], 2);
+            assert_eq!(payload["resource_id"], 0);
+        }
+
+        set_env_var("SCHEDULER_DISCOVERY_JSON", prev_discovery.as_deref());
+    }
+
+    #[tokio::test]
+    async fn scheduler_bypasses_batching_for_fanout_requests() {
+        let _guard = test_env::env_lock().lock().await;
+        let prev_discovery = std::env::var("SCHEDULER_DISCOVERY_JSON").ok();
+
+        set_env_var(
+            "SCHEDULER_DISCOVERY_JSON",
+            Some(
+                r#"[{"resource_id":0,"stream_name":"gpu:ns:pod:0","total_memory_mb":50000,"used_memory_mb":0,"device_kind":"gpu","executor_class":"python.gpu.demo","tags":["demo"]}]"#,
+            ),
+        );
+
+        let (_redis_server, role, tasks) = scheduler_with_test_queue_manager(
+            "scheduler-tests",
+            &scheduler_env_with_batching(
+                "test:",
+                json!({
+                    "memory_utilization_percent": 100,
+                    "batching_enabled": true,
+                    "max_batch_size": 2,
+                    "max_batch_wait_ms": 10_000
+                }),
+            ),
+        )
+        .await;
+        let sink = RecordingSink::new();
+        run_gpu_discovery(&tasks, &sink).await;
+
+        let mut payload: JsonValue =
+            serde_json::from_str(&batchable_schedule_payload("child-a", 1_000)).unwrap();
+        payload["parent_run_id"] = json!("parent-a");
+        payload["fanout_profile"] = json!({ "max_in_flight": 2 });
+        queue_schedule(
+            &role,
+            &schedule_msg_with_id("1-0", "child-a", &payload.to_string()),
+            "schedule",
+            &sink,
+        )
+        .await;
+        run_scheduler_task(&tasks, &sink).await;
+
+        let writes = sink.writes();
+        assert_eq!(writes.len(), 1);
+        let forwarded: JsonValue = serde_json::from_str(&writes[0].payload).unwrap();
+        assert!(forwarded.get("items").is_none());
+        assert_eq!(forwarded["run_id"], "child-a");
+        assert_eq!(role.queued_request_count().await, 0);
+
+        set_env_var("SCHEDULER_DISCOVERY_JSON", prev_discovery.as_deref());
+    }
+
+    #[tokio::test]
     async fn scheduler_routes_schedule_payload_and_injects_gpu_fields() {
         let _guard = test_env::env_lock().lock().await;
         let prev_discovery = std::env::var("SCHEDULER_DISCOVERY_JSON").ok();
@@ -1633,7 +2651,7 @@ mod tests {
 
         let (_redis_server, role, tasks) = scheduler_with_test_queue_manager(
             "scheduler-tests",
-            &scheduler_env_with_config("test:", json!({ "scheduling_strategy": "best_fit" })),
+            &scheduler_env_with_config("test:", json!({})),
         )
         .await;
         let sink = RecordingSink::new();
@@ -1785,7 +2803,7 @@ mod tests {
             ],
             resolved_outputs: vec![],
             role_config: Some(json!({
-                "scheduling_strategy": "best_fit"
+                "batching_enabled": false
             })),
             python_runtime_envs: Default::default(),
         };
@@ -1820,7 +2838,8 @@ mod tests {
         )
         .await;
         run_scheduler_task(&tasks, &sink).await;
-        assert_eq!(role.queued_request_count().await, 1);
+        assert_eq!(role.queued_request_count().await, 0);
+        assert_eq!(sink.writes().len(), 2);
 
         role.handle(
             &release_msg_for_stream(
@@ -1849,11 +2868,27 @@ mod tests {
         )
         .await;
         run_scheduler_task(&tasks, &sink).await;
+        assert_eq!(sink.writes().len(), 3);
+        assert_eq!(role.queued_request_count().await, 0);
+
+        role.handle(
+            &release_msg_for_stream(
+                "run-b",
+                r#"{"run_id":"run-b","resource_id":0,"memory_mb":20000,"status":"completed"}"#,
+                "gpu_release",
+            ),
+            "gpu_release",
+            &sink,
+        )
+        .await
+        .unwrap();
+        run_scheduler_task(&tasks, &sink).await;
 
         let writes = sink.writes();
-        assert_eq!(writes.len(), 2);
+        assert_eq!(writes.len(), 3);
         assert_eq!(writes[1].run_id, "run-b");
-        assert_eq!(role.queued_request_count().await, 1);
+        assert_eq!(writes[2].run_id, "run-c");
+        assert_eq!(role.queued_request_count().await, 0);
 
         set_env_var("SCHEDULER_DISCOVERY_JSON", prev_discovery.as_deref());
     }
@@ -1871,7 +2906,7 @@ mod tests {
         );
         let (_redis_server, role, tasks) = scheduler_with_test_queue_manager(
             "scheduler-tests",
-            &scheduler_env_with_config("test:", json!({ "scheduling_strategy": "best_fit" })),
+            &scheduler_env_with_config("test:", json!({})),
         )
         .await;
         let sink = RecordingSink::new();
@@ -1945,8 +2980,7 @@ mod tests {
                 "current_stage_id": "schedule",
                 "current_phase": "schedule",
                 "pipeline": [
-                    {"id": "prepare", "phase": "prepare", "queue": "prepare", "next": "batch"},
-                    {"id": "batch", "phase": "batch", "queue": "batch", "next": "schedule"},
+                    {"id": "prepare", "phase": "prepare", "queue": "prepare", "next": "schedule"},
                     {"id": "schedule", "phase": "schedule", "queue": "schedule", "next": "execute"},
                     {"id": "execute", "phase": "execute", "queue": "execute.python.gpu.test", "next": "results"},
                     {"id": "results", "phase": "results", "queue": "results", "next": null}
@@ -1962,8 +2996,7 @@ mod tests {
                             "current_stage_id": "schedule",
                             "current_phase": "schedule",
                             "pipeline": [
-                                {"id": "prepare", "phase": "prepare", "queue": "prepare", "next": "batch"},
-                                {"id": "batch", "phase": "batch", "queue": "batch", "next": "schedule"},
+                                {"id": "prepare", "phase": "prepare", "queue": "prepare", "next": "schedule"},
                                 {"id": "schedule", "phase": "schedule", "queue": "schedule", "next": "execute"},
                                 {"id": "execute", "phase": "execute", "queue": "execute.python.gpu.test", "next": "results"},
                                 {"id": "results", "phase": "results", "queue": "results", "next": null}
@@ -2300,7 +3333,7 @@ mod tests {
         set_env_var(
             "SCHEDULER_DISCOVERY_JSON",
             Some(
-                r#"[{"resource_id":0,"stream_name":"execute.python.gpu.demo","total_memory_mb":64000,"used_memory_mb":0,"device_kind":"gpu","executor_class":"python.gpu.demo","tags":["demo","gpu"]}]"#,
+                r#"[{"resource_id":0,"stream_name":"execute.python.gpu.demo.0","total_memory_mb":64000,"used_memory_mb":0,"device_kind":"gpu","executor_class":"python.gpu.demo","tags":["demo","gpu"]},{"resource_id":1,"stream_name":"execute.python.gpu.demo.1","total_memory_mb":64000,"used_memory_mb":0,"device_kind":"gpu","executor_class":"python.gpu.demo","tags":["demo","gpu"]}]"#,
             ),
         );
         let (_redis_server, role, tasks) =
@@ -2357,7 +3390,7 @@ mod tests {
         set_env_var(
             "SCHEDULER_DISCOVERY_JSON",
             Some(
-                r#"[{"resource_id":0,"stream_name":"execute.python.gpu.demo","total_memory_mb":64000,"used_memory_mb":0,"device_kind":"gpu","executor_class":"python.gpu.demo","tags":["demo","gpu"]}]"#,
+                r#"[{"resource_id":0,"stream_name":"execute.python.gpu.demo.0","total_memory_mb":64000,"used_memory_mb":0,"device_kind":"gpu","executor_class":"python.gpu.demo","tags":["demo","gpu"]},{"resource_id":1,"stream_name":"execute.python.gpu.demo.1","total_memory_mb":64000,"used_memory_mb":0,"device_kind":"gpu","executor_class":"python.gpu.demo","tags":["demo","gpu"]},{"resource_id":2,"stream_name":"execute.python.gpu.demo.2","total_memory_mb":64000,"used_memory_mb":0,"device_kind":"gpu","executor_class":"python.gpu.demo","tags":["demo","gpu"]},{"resource_id":3,"stream_name":"execute.python.gpu.demo.3","total_memory_mb":64000,"used_memory_mb":0,"device_kind":"gpu","executor_class":"python.gpu.demo","tags":["demo","gpu"]}]"#,
             ),
         );
         let (_redis_server, role, tasks) =
@@ -2726,7 +3759,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn scheduler_release_stream_reopens_capacity() {
+    async fn scheduler_release_updates_reserved_memory_accounting() {
         let _guard = test_env::env_lock().lock().await;
         let prev_discovery = std::env::var("SCHEDULER_DISCOVERY_JSON").ok();
 
@@ -2739,7 +3772,7 @@ mod tests {
 
         let (_redis_server, role, tasks) = scheduler_with_test_queue_manager(
             "scheduler-tests",
-            &scheduler_env_with_config("test:", json!({ "scheduling_strategy": "best_fit" })),
+            &scheduler_env_with_config("test:", json!({})),
         )
         .await;
         let sink = RecordingSink::new();
@@ -2768,7 +3801,8 @@ mod tests {
         )
         .await;
         run_scheduler_task(&tasks, &sink).await;
-        assert_eq!(role.queued_request_count().await, 1);
+        assert_eq!(role.queued_request_count().await, 0);
+        assert_eq!(role.reservations.used_memory_mb(0).await, Some(40_000));
 
         role.handle(
             &release_msg(
@@ -2780,8 +3814,11 @@ mod tests {
         )
         .await
         .unwrap();
+        assert_eq!(role.reservations.used_memory_mb(0).await, Some(20_000));
 
         run_scheduler_task(&tasks, &sink).await;
+        assert_eq!(role.queued_request_count().await, 0);
+        assert_eq!(role.reservations.used_memory_mb(0).await, Some(20_000));
         queue_schedule(
             &role,
             &schedule_msg(
@@ -2793,15 +3830,30 @@ mod tests {
         )
         .await;
         run_scheduler_task(&tasks, &sink).await;
+        assert_eq!(sink.writes().len(), 3);
+        assert_eq!(role.queued_request_count().await, 0);
+        assert_eq!(role.reservations.used_memory_mb(0).await, Some(40_000));
 
-        assert_eq!(sink.writes().len(), 2);
-        assert_eq!(role.queued_request_count().await, 1);
+        role.handle(
+            &release_msg(
+                "run-b",
+                r#"{"run_id":"run-b","resource_id":0,"memory_mb":20000,"status":"completed"}"#,
+            ),
+            "release",
+            &sink,
+        )
+        .await
+        .unwrap();
+        run_scheduler_task(&tasks, &sink).await;
+        assert_eq!(sink.writes().len(), 3);
+        assert_eq!(role.queued_request_count().await, 0);
+        assert_eq!(role.reservations.used_memory_mb(0).await, Some(20_000));
 
         set_env_var("SCHEDULER_DISCOVERY_JSON", prev_discovery.as_deref());
     }
 
     #[tokio::test]
-    async fn scheduler_release_stream_reopens_capacity_after_restart() {
+    async fn scheduler_preserves_reserved_memory_accounting_after_restart() {
         let _guard = test_env::env_lock().lock().await;
         let prev_discovery = std::env::var("SCHEDULER_DISCOVERY_JSON").ok();
 
@@ -2813,7 +3865,7 @@ mod tests {
         );
 
         let (redis_server, qm) = spawn_test_queue_manager("scheduler-tests").await;
-        let env = scheduler_env_with_config("test:", json!({ "scheduling_strategy": "best_fit" }));
+        let env = scheduler_env_with_config("test:", json!({}));
         let (role_before_restart, tasks_before_restart) =
             SchedulerRole::from_env(&env, qm.clone(), retry_dlq_policy(5), None).unwrap();
         seed_registry_from_discovery_json(
@@ -2853,7 +3905,11 @@ mod tests {
         )
         .await;
         run_scheduler_task(&tasks_after_restart, &sink).await;
-        assert_eq!(role_after_restart.queued_request_count().await, 1);
+        assert_eq!(role_after_restart.queued_request_count().await, 0);
+        assert_eq!(
+            role_after_restart.reservations.used_memory_mb(0).await,
+            Some(40_000)
+        );
 
         role_after_restart
             .handle(
@@ -2866,11 +3922,19 @@ mod tests {
             )
             .await
             .unwrap();
+        assert_eq!(
+            role_after_restart.reservations.used_memory_mb(0).await,
+            Some(20_000)
+        );
 
         run_scheduler_task(&tasks_after_restart, &sink).await;
         assert_eq!(sink.writes().len(), 2);
         assert_eq!(sink.writes()[1].run_id, "run-b");
         assert_eq!(role_after_restart.queued_request_count().await, 0);
+        assert_eq!(
+            role_after_restart.reservations.used_memory_mb(0).await,
+            Some(20_000)
+        );
 
         drop(redis_server);
         set_env_var("SCHEDULER_DISCOVERY_JSON", prev_discovery.as_deref());
@@ -3132,7 +4196,6 @@ mod tests {
 
         let config = serde_json::json!({
             "gpu_registry_key": "custom:registry",
-            "scheduling_strategy": "best_fit",
             "gpu_discovery_interval_secs": 15
         });
         let (_redis_server, role, _) = scheduler_with_test_queue_manager(
@@ -3141,7 +4204,6 @@ mod tests {
         )
         .await;
         assert_eq!(role.config.gpu_registry_key, "custom:registry");
-        assert_eq!(role.config.scheduling_strategy, SchedulingStrategy::BestFit);
         assert_eq!(role.config.gpu_discovery_interval_secs, 15);
 
         set_env_var("SCHEDULER_DISCOVERY_JSON", prev_discovery.as_deref());
@@ -3159,10 +4221,6 @@ mod tests {
         let (_redis_server, role, _) =
             scheduler_with_test_queue_manager("scheduler-tests", &scheduler_env("test:")).await;
         assert_eq!(role.config.gpu_registry_key, "gpu:registry");
-        assert_eq!(
-            role.config.scheduling_strategy,
-            SchedulingStrategy::RoundRobin
-        );
         assert_eq!(
             role.config.gpu_discovery_interval_secs,
             DEFAULT_GPU_DISCOVERY_INTERVAL_SECS

@@ -309,6 +309,14 @@ impl MessageSink for RedisTransport {
         msg: &'a Message,
         outputs: &'a [Output],
     ) -> BoxFuture<'a, Result<Vec<String>>> {
+        self.forward_many_from(std::slice::from_ref(msg), outputs)
+    }
+
+    fn forward_many_from<'a>(
+        &'a self,
+        msgs: &'a [Message],
+        outputs: &'a [Output],
+    ) -> BoxFuture<'a, Result<Vec<String>>> {
         Box::pin(async move {
             let prefixed: Vec<Output> = outputs
                 .iter()
@@ -325,7 +333,7 @@ impl MessageSink for RedisTransport {
                 })
                 .collect();
             self.qm
-                .forward_many(msg, &prefixed)
+                .forward_many_from(msgs, &prefixed)
                 .await
                 .map_err(Into::into)
         })

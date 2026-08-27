@@ -48,6 +48,7 @@ from plugin_runtime import (  # noqa: E402
     resolve_phase_hook,
     serialize_postprocess_result,
     serialize_prepare_result,
+    validate_batch_execution_contract,
 )
 from plugin_sdk import (  # noqa: E402
     workflow_form_schema,
@@ -355,6 +356,7 @@ def validate_plugin(plugin_root: Path) -> dict[str, Any]:
     )
 
     _validate_readiness_config(manifest)
+    validate_batch_execution_contract(module, workflow_id)
 
     phases = plugin_phases_from_manifest(manifest)
     for phase in phases:
@@ -1167,8 +1169,11 @@ def _run_local_needs_cpu_direct_pipeline(
         return False
     if not _manifest_uses_compact_pipeline_profile(manifest):
         return False
+    pipeline = manifest.get("pipeline", {})
+    if str(pipeline.get("profile") or "").strip() == "batch":
+        return False
     if any(
-        str(stage.get("phase") or "").strip() in {"batch", "fanout"}
+        str(stage.get("phase") or "").strip() == "fanout"
         for stage in _pipeline_stages(manifest)
     ):
         return False
@@ -1726,12 +1731,6 @@ def _build_runtime_config(
                 "inputs": [_input_stream_spec(queue)],
                 "outputs": [],
             }
-        elif phase == "batch" and handler == "batch":
-            add_stream(queue)
-            roles["batch"] = {
-                "inputs": [_input_stream_spec(queue)],
-                "outputs": [],
-            }
         elif phase == "collect" and handler == "collect":
             add_stream(queue)
             roles["collect"] = {
@@ -1766,6 +1765,9 @@ def _build_runtime_config(
                     # Keep local discovery responsive so users can submit example
                     # runs immediately after the local stack reports ready.
                     "gpu_discovery_interval_secs": 1,
+                    "batching_enabled": True,
+                    "max_batch_size": 4,
+                    "max_batch_wait_ms": 200,
                 },
             }
         elif phase == "postprocess" and handler == "plugin_phase":
@@ -1837,7 +1839,6 @@ def _runtime_roles_for_pipeline(
     for candidate in (
         "prepare",
         "fanout",
-        "batch",
         "prefetch",
         "scheduler",
         "collect",
@@ -1877,8 +1878,6 @@ def _runtime_roles_for_pipeline(
                 if candidate in {"prepare", "postprocess"}
                 else str(stage.get("handler")) == "fanout"
                 if candidate == "fanout"
-                else str(stage.get("handler")) == "batch"
-                if candidate == "batch"
                 else str(stage.get("handler")) == "collect"
                 if candidate == "collect"
                 else str(stage.get("handler")) == candidate

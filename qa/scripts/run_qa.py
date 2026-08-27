@@ -788,8 +788,30 @@ def stream_endpoint_logs(
             stop_event.wait(interval)
 
 
+def _health_response_ready(response) -> tuple[bool, str]:
+    """Return whether a successful health response reports application readiness."""
+    if response.status_code != 200:
+        return False, f"HTTP {response.status_code}"
+
+    text = response.text.strip()
+    if text.lower() == "ok":
+        return True, "ok"
+
+    try:
+        payload = response.json()
+    except (TypeError, ValueError):
+        return False, f"HTTP 200, unexpected body {text[:80]!r}"
+
+    status = ""
+    if isinstance(payload, dict):
+        status = str(payload.get("status", "")).strip().lower()
+    if status in {"healthy", "ok"}:
+        return True, status
+    return False, f"HTTP 200, status={status or 'missing'}"
+
+
 def health_check(url: str, token: str, timeout: int = HEALTH_POLL_TIMEOUT) -> bool:
-    """Poll the service health endpoint until it responds 200."""
+    """Poll until the health endpoint reports that the application is ready."""
     import requests
 
     health_url = url.rstrip("/") + "/health"
@@ -803,11 +825,12 @@ def health_check(url: str, token: str, timeout: int = HEALTH_POLL_TIMEOUT) -> bo
                 headers={"Authorization": f"Bearer {token}"},
                 timeout=10,
             )
-            if resp.status_code == 200:
-                print(f"    Health OK ({resp.status_code})")
+            ready, detail = _health_response_ready(resp)
+            if ready:
+                print(f"    Health OK ({resp.status_code}, {detail})")
                 return True
             remaining = int(deadline - time.time())
-            print(f"    Not ready (HTTP {resp.status_code}), {remaining}s remaining...")
+            print(f"    Not ready ({detail}), {remaining}s remaining...")
         except (requests.ConnectionError, requests.Timeout, OSError) as e:
             remaining = int(deadline - time.time())
             print(f"    Not ready ({e}), {remaining}s remaining...")

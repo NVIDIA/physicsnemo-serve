@@ -856,15 +856,18 @@ class WorkflowExecutor:
             )
 
         module = self._load_plugin_module(workflow_id, plugin_root / entrypoint_name)
-        batch_hook = self._resolve_execute_phase_hook(
-            module,
-            workflow_id=workflow_id,
-            manifest=manifest,
-            runtime=runtime,
-            payload=payload,
-            entrypoint_name=entrypoint_name,
-            phase="execute_batch",
-        )
+        try:
+            batch_hook = self._resolve_execute_phase_hook(
+                module,
+                workflow_id=workflow_id,
+                manifest=manifest,
+                runtime=runtime,
+                payload=payload,
+                entrypoint_name=entrypoint_name,
+                phase="execute_batch",
+            )
+        except ValueError:
+            batch_hook = None
         operation = payload.get("operation")
         if operation is None:
             operation = (
@@ -1001,6 +1004,48 @@ class WorkflowExecutor:
             if len(all_parent_run_ids) == 1:
                 response["parent_run_id"] = next(iter(all_parent_run_ids))
             return response
+
+        if batch_hook is None:
+            execution_time = time.time() - start_time
+            for index, item_ctx, raw_item in active_items:
+                item_payload = dict(raw_item.get("payload") or {})
+                item_payload.setdefault("batch_id", batch_id)
+                item_payload.setdefault("batch_info", batch_info)
+                item_payload.setdefault("resource_id", payload.get("resource_id"))
+                item_payload.setdefault("memory_mb", payload.get("memory_mb"))
+                if "resource_profile" not in item_payload and isinstance(
+                    payload.get("resource_profile"), dict
+                ):
+                    item_payload["resource_profile"] = payload["resource_profile"]
+                item_parameters = item_payload.get(
+                    "parameters", item_payload.get("inputs", item_payload)
+                )
+                if not isinstance(item_parameters, dict):
+                    item_parameters = {}
+                normalized_result = self._execute_plugin_workflow(
+                    workflow_name,
+                    item_ctx["run_id"],
+                    item_parameters,
+                    item_payload,
+                )
+                normalized_result.setdefault("run_id", item_ctx["run_id"])
+                normalized_result.setdefault("batch_info", batch_info)
+                batch_results_by_index[index] = {
+                    "run_id": item_ctx["run_id"],
+                    "batch_info": batch_info,
+                    "payload": raw_item.get("payload"),
+                    "result": normalized_result,
+                }
+
+            batch_results = [
+                entry for entry in batch_results_by_index if isinstance(entry, dict)
+            ]
+            return {
+                "run_id": batch_id,
+                "status": _batch_result_status(batch_results),
+                "execution_time_seconds": execution_time,
+                "batch_results": batch_results,
+            }
 
         batch_ctx = build_plugin_context(batch_payload_for_context)
         batch_ctx["items"] = item_contexts

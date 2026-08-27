@@ -514,7 +514,7 @@ fn match_profile_for_payload(profiles: &Profiles, payload: &SchedulePayload) -> 
         return None;
     };
 
-    info!(
+    debug!(
         workflow = %wf,
         profile_workflow = %matched.workflow.trim(),
         profile_model = profile_model_field(matched),
@@ -682,6 +682,7 @@ mod tests {
             workflow_id: None,
             parent_run_id: None,
             fanout_profile: None,
+            batch_profile: None,
             raw_payload: raw,
             resource_profile: None,
             gpus_required: 0,

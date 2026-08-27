@@ -234,6 +234,21 @@ fn manifest_from_yaml_expands_compact_profile_defaults() {
 }
 
 #[test]
+fn manifest_from_yaml_expands_batch_profile_without_intermediate_stage() {
+    let yaml = compact_profile_manifest_yaml().replace("profile: simple", "profile: batch");
+    let manifest = PluginManifest::from_yaml_str(&yaml).expect("batch manifest should parse");
+
+    let phases: Vec<&str> = manifest
+        .pipeline
+        .stages
+        .iter()
+        .map(|stage| stage.phase.as_str())
+        .collect();
+    assert_eq!(phases, vec!["prepare", "schedule", "execute", "results"]);
+    manifest.validate().expect("batch profile should validate");
+}
+
+#[test]
 fn manifest_from_yaml_accepts_default_pipeline_alias() {
     let manifest = PluginManifest::from_yaml_str(
         r#"
@@ -315,6 +330,21 @@ fn manifest_preserves_plugin_configuration() {
 
     let encoded = serde_json::to_value(&manifest).expect("manifest should serialize");
     assert_eq!(encoded["configuration"]["provider"]["version"], "0.0.2");
+}
+
+#[test]
+fn manifest_validation_rejects_unsupported_stage_handler() {
+    let yaml = minimal_manifest_yaml().replacen("handler: schedule", "handler: obsolete", 1);
+    let manifest = PluginManifest::from_yaml_str(&yaml).expect("manifest should parse");
+
+    let error = manifest
+        .validate()
+        .expect_err("unsupported stage handler must be rejected");
+    assert!(
+        error
+            .to_string()
+            .contains("unsupported phase/handler combination 'schedule/obsolete'")
+    );
 }
 
 #[test]

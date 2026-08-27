@@ -8,6 +8,8 @@
 //! All queue-domain Redis stream operations (read, enqueue, handoff, ack,
 //! claim, group management) live here.
 
+use std::collections::HashSet;
+
 use tracing::warn;
 
 use crate::builder;
@@ -58,6 +60,31 @@ fn validate_message_context(message: &Message) -> Result<()> {
         return Err(QueueError::Config(
             "message.run_id must be non-empty".into(),
         ));
+    }
+    Ok(())
+}
+
+fn validate_forward_many_sources(messages: &[Message]) -> Result<()> {
+    let Some(first) = messages.first() else {
+        return Err(QueueError::Config(
+            "forward_many requires at least one source message".into(),
+        ));
+    };
+    validate_message_context(first)?;
+    let mut source_ids = HashSet::with_capacity(messages.len());
+    source_ids.insert(first.id());
+    for message in &messages[1..] {
+        validate_message_context(message)?;
+        if message.stream() != first.stream() || message.group() != first.group() {
+            return Err(QueueError::Config(
+                "forward_many source messages must share a stream and consumer group".into(),
+            ));
+        }
+        if !source_ids.insert(message.id()) {
+            return Err(QueueError::Config(
+                "forward_many source message IDs must be unique".into(),
+            ));
+        }
     }
     Ok(())
 }
@@ -346,10 +373,12 @@ impl QueueManager {
     async fn eval_forward_many_with_sha(
         &self,
         sha: &str,
-        message: &Message,
+        messages: &[Message],
         outputs: &[(String, String, String, String)],
     ) -> Result<Vec<String>> {
+        let message = &messages[0];
         let run_hash_prefix = keys::RUN_HASH_PREFIX;
+        let source_count = messages.len();
         let output_count = outputs.len();
         let mut conn = self.conn.clone();
 
@@ -362,9 +391,12 @@ impl QueueManager {
         cmd.arg(&message.stream);
 
         cmd.arg(&message.group)
-            .arg(&message.id)
+            .arg(source_count)
             .arg(output_count)
             .arg(run_hash_prefix);
+        for source in messages {
+            cmd.arg(&source.id);
+        }
         for (_, run_id, payload, stage) in outputs {
             cmd.arg(run_id).arg(payload).arg(stage);
         }
@@ -585,8 +617,19 @@ impl QueueManager {
 
     /// Forward a message to multiple destination streams atomically.
     pub async fn forward_many(&self, message: &Message, outputs: &[Output]) -> Result<Vec<String>> {
-        validate_message_context(message)?;
+        self.forward_many_from(std::slice::from_ref(message), outputs)
+            .await
+    }
+
+    /// Forward to multiple destinations and atomically acknowledge all source messages.
+    pub async fn forward_many_from(
+        &self,
+        messages: &[Message],
+        outputs: &[Output],
+    ) -> Result<Vec<String>> {
+        validate_forward_many_sources(messages)?;
         validate_forward_many_outputs(outputs)?;
+        let message = &messages[0];
         let resolved_outputs: Vec<(String, String, String, String)> = outputs
             .iter()
             .map(|output| {
@@ -604,7 +647,7 @@ impl QueueManager {
 
         let sha = self.load_forward_many_script().await?;
         match self
-            .eval_forward_many_with_sha(&sha, message, &resolved_outputs)
+            .eval_forward_many_with_sha(&sha, messages, &resolved_outputs)
             .await
         {
             Ok(ids) => Ok(ids),
@@ -614,7 +657,7 @@ impl QueueManager {
                     "forward_many EVALSHA returned NOSCRIPT, reloading script and retrying once"
                 );
                 let reloaded_sha = self.force_reload_forward_many_script().await?;
-                self.eval_forward_many_with_sha(&reloaded_sha, message, &resolved_outputs)
+                self.eval_forward_many_with_sha(&reloaded_sha, messages, &resolved_outputs)
                     .await
                     .map_err(|retry_err| {
                         QueueError::Script(format!(
@@ -670,8 +713,8 @@ mod tests {
     use std::time::Duration;
 
     use super::{
-        validate_enqueue_stream_name, validate_forward_many_outputs, validate_message_context,
-        validate_payload_json,
+        validate_enqueue_stream_name, validate_forward_many_outputs, validate_forward_many_sources,
+        validate_message_context, validate_payload_json,
     };
     use crate::{LogicalStreamName, Message, Output, QueueError, QueueManager, StreamKey};
 
@@ -804,6 +847,81 @@ mod tests {
         assert!(
             result.is_ok(),
             "forward_many should accept at least one output destination"
+        );
+    }
+
+    #[test]
+    fn validate_forward_many_sources_requires_same_stream_and_group() {
+        let messages = vec![
+            Message::new(
+                "1-0",
+                "stream:schedule",
+                "schedule:grp",
+                "run-1",
+                "{}",
+                "schedule",
+            ),
+            Message::new(
+                "1-1",
+                "stream:other",
+                "schedule:grp",
+                "run-2",
+                "{}",
+                "schedule",
+            ),
+        ];
+        assert!(validate_forward_many_sources(&messages).is_err());
+    }
+
+    #[test]
+    fn validate_forward_many_sources_accepts_batch_members() {
+        let messages = vec![
+            Message::new(
+                "1-0",
+                "stream:schedule",
+                "schedule:grp",
+                "run-1",
+                "{}",
+                "schedule",
+            ),
+            Message::new(
+                "1-1",
+                "stream:schedule",
+                "schedule:grp",
+                "run-2",
+                "{}",
+                "schedule",
+            ),
+        ];
+        assert!(validate_forward_many_sources(&messages).is_ok());
+    }
+
+    #[test]
+    fn validate_forward_many_sources_rejects_duplicate_message_ids() {
+        let messages = vec![
+            Message::new(
+                "1-0",
+                "stream:schedule",
+                "schedule:grp",
+                "run-1",
+                "{}",
+                "schedule",
+            ),
+            Message::new(
+                "1-0",
+                "stream:schedule",
+                "schedule:grp",
+                "run-2",
+                "{}",
+                "schedule",
+            ),
+        ];
+        let error = validate_forward_many_sources(&messages)
+            .expect_err("duplicate source message IDs must be rejected");
+        assert!(
+            error
+                .to_string()
+                .contains("source message IDs must be unique")
         );
     }
 

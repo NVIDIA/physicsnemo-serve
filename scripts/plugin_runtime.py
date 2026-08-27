@@ -98,6 +98,18 @@ PIPELINE_RECOMMENDED_CHECK_PHASE = {
     "batch": "prepare",
     "ensemble": "prepare",
 }
+SUPPORTED_PIPELINE_STAGE_HANDLERS = {
+    ("prepare", "plugin_phase"),
+    ("prefetch", "prefetch"),
+    ("fanout", "fanout"),
+    ("schedule", "schedule"),
+    ("execute", "plugin_phase"),
+    ("collect", "collect"),
+    ("postprocess", "plugin_phase"),
+    ("publish", "plugin_phase"),
+    ("publish", "publish_outputs"),
+    ("results", "persist_results"),
+}
 
 
 def _supported_runtime_profiles() -> str:
@@ -145,7 +157,7 @@ def _build_pipeline_phases(profile_name: str, options: dict[str, Any]) -> list[s
     elif profile_name == "postprocess":
         phases = ["prepare", "schedule", "execute", "postprocess"]
     elif profile_name == "batch":
-        phases = ["prepare", "batch", "schedule", "execute"]
+        phases = ["prepare", "schedule", "execute"]
     elif profile_name == "ensemble":
         phases = ["prepare"]
         prefetch_scope = options.get("prefetch")
@@ -187,8 +199,6 @@ def _stage_definition(phase: str, execute_queue: str) -> dict[str, Any]:
             "handler": "prefetch",
             "queue": "prefetch",
         }
-    if phase == "batch":
-        return {"id": "batch", "phase": "batch", "handler": "batch", "queue": "batch"}
     if phase == "fanout":
         return {
             "id": "fanout",
@@ -281,6 +291,22 @@ def load_plugin_manifest(manifest_path: Path) -> dict[str, Any]:
     return expand_plugin_manifest(manifest)
 
 
+def _validate_pipeline_stage_handlers(stages: Any) -> None:
+    if not isinstance(stages, list):
+        raise ValueError("Plugin manifest pipeline.stages must be an array")
+    for stage in stages:
+        if not isinstance(stage, dict):
+            raise ValueError("Plugin manifest pipeline stages must be objects")
+        phase = str(stage.get("phase") or "").strip()
+        handler = str(stage.get("handler") or "").strip()
+        if (phase, handler) not in SUPPORTED_PIPELINE_STAGE_HANDLERS:
+            stage_id = str(stage.get("id") or "").strip()
+            raise ValueError(
+                f"Plugin pipeline stage '{stage_id}' uses unsupported "
+                f"phase/handler combination '{phase}/{handler}'"
+            )
+
+
 def expand_plugin_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
     expanded = copy.deepcopy(manifest)
 
@@ -327,6 +353,8 @@ def expand_plugin_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
         pipeline["stages"] = _build_pipeline_stages(
             pipeline_profile, options, execute_queue
         )
+    if "stages" in pipeline:
+        _validate_pipeline_stage_handlers(pipeline["stages"])
 
     runtime.setdefault("kind", "python")
     runtime.setdefault("entrypoint", "workflow.py")
@@ -999,6 +1027,23 @@ def resolve_phase_hook(
         f"Plugin workflow '{workflow_id}' entrypoint does not define {phase}(ctx), "
         "nor does its workflow object expose that method"
     )
+
+
+def validate_batch_execution_contract(module: Any, workflow_id: str) -> None:
+    """Require legacy batch hooks to retain the normal execution path."""
+    try:
+        resolve_phase_hook(module, workflow_id, "execute_batch")
+    except ValueError:
+        return
+
+    try:
+        resolve_phase_hook(module, workflow_id, "execute")
+    except ValueError as exc:
+        raise ValueError(
+            f"Plugin workflow '{workflow_id}' defines execute_batch(items, ctx) but "
+            "does not define execute(ctx). Batch-capable plugins must support normal "
+            "single-request execution when no compatible batch partner is available."
+        ) from exc
 
 
 def plugin_phases_from_manifest(manifest: dict[str, Any]) -> list[str]:

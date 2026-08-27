@@ -62,7 +62,8 @@ runtime:
 - `postprocess`
   - `prepare -> schedule -> execute -> postprocess -> results`
 - `batch`
-  - `prepare -> batch -> schedule -> execute -> results`
+  - `prepare -> schedule -> execute -> results`
+  - compatible requests are grouped by the scheduler
 - `ensemble`
   - `prepare -> fanout -> schedule -> execute -> collect -> results`
 
@@ -162,9 +163,10 @@ Plugins provide Python hooks. The framework decides where they run.
 - `run_batch(items, ctx)`
   - preferred typed batch hook for shared setup across compatible items
   - batch-capable workflows may implement this without also defining `run(inputs, ctx)`
-  - single-item execution can still route through this hook with a one-item batch
+  - the inherited SDK `execute()` adapter routes normal single-item execution through this hook with one item
 - `execute_batch(items, ctx)`
   - legacy batch hook retained for compatibility; new SDK plugins should prefer `run_batch(items, ctx)`
+  - module-level plugins that define this hook must also define `execute(ctx)`, because the scheduler may dispatch a request normally when no compatible batch partner is available
 - `postprocess(result, ctx) -> PostprocessOutcome`
   - optional final shaping, aggregation, or publication request stage
   - return `PostprocessOutcome(payload=..., status=..., result_ops=[...])` when overriding final status or requesting built-in side effects
@@ -264,7 +266,6 @@ Do not keep request-scoped state on the shared workflow instance:
 Framework-owned stages:
 
 - `prefetch`
-- `batch`
 - `fanout`
 - `schedule`
 - `collect`
@@ -286,7 +287,7 @@ Common fields:
 - `prefetch_plan`
   - consumed by `prefetch`
 - `batch_profile`
-  - consumed by `batch` as a scheduler hint for grouping compatible requests
+  - consumed by `schedule` as an optional scheduler hint for grouping compatible requests
 - `fanout_profile`
   - consumed by `fanout`, `schedule`, and `collect`
 - `fanout_items`
@@ -295,12 +296,18 @@ Common fields:
 If `prepare()` creates temporary files, write them under `ctx.run_dir` and pass
 their paths through `inputs` or `fanout_items`.
 
-`batch_profile` is only a scheduler hint. It tells the framework when requests may
-share a worker invocation; it does not force authors to implement a special hook.
-Plugins may keep using `run(inputs, ctx)` and let the default adapter execute items
-one by one inside the batch, or implement `run_batch(items, ctx)` when shared setup
-is valuable. When a workflow only implements `run_batch(items, ctx)`, normal
-single-item execution still routes through that hook with a one-item batch.
+The scheduler considers every non-fanout request for batching. `batch_profile`
+overrides the scheduler defaults for compatible grouping, maximum size, maximum
+wait, and memory scaling. It does not force authors to implement a special hook:
+plugins may keep using `run(inputs, ctx)` and let the default adapter execute
+items one by one inside the batch, or implement `run_batch(items, ctx)` when
+shared setup is valuable. When a workflow only implements `run_batch(items, ctx)`,
+the inherited SDK `execute()` adapter routes normal single-item execution through
+that hook with one item. Batching is an optimization rather than a required
+dispatch format: if no compatible partner is available when the batching window
+closes, the scheduler may dispatch the request normally. Legacy module-level
+plugins that define `execute_batch(items, ctx)` must therefore also define
+`execute(ctx)`.
 
 ## Output Registration
 

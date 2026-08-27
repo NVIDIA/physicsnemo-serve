@@ -156,7 +156,10 @@ fn pipeline_config() -> RuntimeConfig {
                     {"stream": "release", "max_dequeue_items": 2,
                      "poll_interval_ms": 10, "block_ms": 50}
                 ],
-                "outputs": []
+                "outputs": [],
+                "config": {
+                    "batching_enabled": false
+                }
             },
             "results": {
                 "inputs": [{"stream": "results", "max_dequeue_items": 8,
@@ -314,7 +317,7 @@ async fn full_pipeline_with_dynamic_gpu_discovery() {
 }
 
 #[tokio::test]
-async fn scheduler_selects_another_gpu_when_first_is_memory_saturated() {
+async fn scheduler_round_robins_requests_across_gpus() {
     let _guard = ENV_LOCK.lock().await;
     let prev_discovery = std::env::var("SCHEDULER_DISCOVERY_JSON").ok();
     set_env_var(
@@ -365,7 +368,7 @@ async fn scheduler_selects_another_gpu_when_first_is_memory_saturated() {
 
     let on_a = transport.pending_in("gpu_a").len();
     let on_b = transport.pending_in("gpu_b").len();
-    assert_eq!(on_a, 1, "first job should consume gpu_a headroom");
+    assert_eq!(on_a, 1, "first job should be routed to gpu_a");
     assert_eq!(on_b, 1, "second job should be routed to gpu_b");
 
     set_env_var("SCHEDULER_DISCOVERY_JSON", prev_discovery.as_deref());

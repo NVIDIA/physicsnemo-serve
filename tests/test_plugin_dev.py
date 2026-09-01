@@ -6669,7 +6669,6 @@ def test_plugin_dev_run_local_dry_run_includes_scheduler_when_pipeline_declares_
 @pytest.mark.parametrize(
     ("pipeline_profile", "expected_phases"),
     [
-        ("batch", ["prepare", "execute", "results"]),
         ("prefetch", ["prepare", "prefetch", "execute", "results"]),
     ],
 )

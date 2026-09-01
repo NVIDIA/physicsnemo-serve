@@ -93,7 +93,9 @@ def test_one_item_exception_does_not_affect_siblings():
         return f"failed-{item}"
 
     try:
-        results = coordinator.execute([0, 1], execute, handle_exception=handle_exception)
+        results = coordinator.execute(
+            [0, 1], execute, handle_exception=handle_exception
+        )
         assert results == ["failed-0", "result-1"]
     finally:
         coordinator.close()

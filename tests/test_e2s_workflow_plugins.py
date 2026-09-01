@@ -1477,7 +1477,9 @@ def test_workflow_executor_env_parallelism_reaches_e2s_deterministic_inference(
     assert all(Path(path).exists() for path in output_paths)
     inference_markers = list(sync_dir.glob("inference-*"))
     assert len(inference_markers) == item_count
-    assert all(marker.read_text(encoding="utf-8") == "True" for marker in inference_markers)
+    assert all(
+        marker.read_text(encoding="utf-8") == "True" for marker in inference_markers
+    )
 
 
 # ===========================================================================

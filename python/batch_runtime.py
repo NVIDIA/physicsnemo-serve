@@ -63,7 +63,9 @@ class BatchExecutionCoordinator:
     def __init__(self, max_parallel_items: int | None = None) -> None:
         if max_parallel_items is None:
             max_parallel_items = max_parallel_items_from_env()
-        if isinstance(max_parallel_items, bool) or not isinstance(max_parallel_items, int):
+        if isinstance(max_parallel_items, bool) or not isinstance(
+            max_parallel_items, int
+        ):
             raise ValueError("max_parallel_items must be a positive integer")
         if max_parallel_items < 1:
             raise ValueError("max_parallel_items must be a positive integer")

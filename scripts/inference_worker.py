@@ -903,8 +903,10 @@ class WorkflowExecutor:
             # Walk the MRO down to (but not including) PluginWorkflow so that
             # hooks defined in plugin-specific base classes are recognized.
             plugin_mro = [
-                c for c in cls.__mro__
-                if c is not PluginWorkflow and c is not object
+                c
+                for c in cls.__mro__
+                if c is not PluginWorkflow
+                and c is not object
                 and not issubclass(PluginWorkflow, c)
             ]
             has_run_batch = any("run_batch" in c.__dict__ for c in plugin_mro)
@@ -1037,8 +1039,12 @@ class WorkflowExecutor:
             if parent_run_terminal(self.redis_client, parent_run_id):
                 elapsed = time.time() - start_time
                 _update_execution_state(
-                    self.redis_client, workflow_id, item_run_id,
-                    "cancelled", elapsed, None,
+                    self.redis_client,
+                    workflow_id,
+                    item_run_id,
+                    "cancelled",
+                    elapsed,
+                    None,
                     "Cancelled because parent run is already terminal",
                 )
                 result = _cancelled_batch_item_result(
@@ -1071,8 +1077,13 @@ class WorkflowExecutor:
             elapsed = time.time() - start_time
             item_run_id = item["run_id"]
             _update_execution_state(
-                self.redis_client, workflow_id, item_run_id,
-                "failed", elapsed, None, str(exc),
+                self.redis_client,
+                workflow_id,
+                item_run_id,
+                "failed",
+                elapsed,
+                None,
+                str(exc),
             )
             return {
                 "run_id": item_run_id,

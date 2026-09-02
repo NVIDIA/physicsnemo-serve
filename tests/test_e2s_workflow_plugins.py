@@ -1419,7 +1419,7 @@ def test_workflow_executor_env_parallelism_reaches_e2s_deterministic_inference(
     monkeypatch.setenv("PLUGIN_DIR", str(REPO_ROOT / "plugins"))
     monkeypatch.setenv("DEFAULT_OUTPUT_DIR", str(tmp_path / "outputs"))
     monkeypatch.setenv("PHYSICSNEMO_SERVE_ENABLED_PLUGIN_ID", "e2s-deterministic")
-    monkeypatch.setenv("PHYSICSNEMO_SERVE_MAX_PARALLEL_ITEMS", str(item_count))
+    monkeypatch.setenv("PHYSICSNEMO_SERVE_MAX_BATCH_PARALLEL_ITEMS", str(item_count))
     monkeypatch.delenv("REDIS_URL", raising=False)
 
     worker_module = _load_module(

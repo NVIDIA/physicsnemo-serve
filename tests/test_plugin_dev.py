@@ -2389,7 +2389,7 @@ def test_inference_worker_parallel_batch_uses_isolated_main_thread_processes(
 
     monkeypatch.setenv("PLUGIN_DIR", str(plugin_root.parent))
     monkeypatch.setenv("DEFAULT_OUTPUT_DIR", str(tmp_path / "outputs"))
-    monkeypatch.setenv("PHYSICSNEMO_SERVE_MAX_PARALLEL_ITEMS", "2")
+    monkeypatch.setenv("PHYSICSNEMO_SERVE_MAX_BATCH_PARALLEL_ITEMS", "2")
     monkeypatch.delenv("REDIS_URL", raising=False)
 
     items = []
@@ -2473,6 +2473,73 @@ def test_inference_worker_uses_run_batch_for_single_item_execution(
             "run_ids": ["single-run-1"],
         }
     ]
+
+
+def test_inference_worker_parallel_batch_persists_child_failure_details(
+    tmp_path: Path, monkeypatch, capsys
+):
+    plugin_root = create_module_execute_only_plugin(tmp_path)
+    module = load_inference_worker_module()
+
+    monkeypatch.setenv("PLUGIN_DIR", str(plugin_root.parent))
+    monkeypatch.setenv("DEFAULT_OUTPUT_DIR", str(tmp_path / "outputs"))
+    monkeypatch.setenv("PHYSICSNEMO_SERVE_MAX_BATCH_PARALLEL_ITEMS", "2")
+    monkeypatch.delenv("REDIS_URL", raising=False)
+
+    discarded_diagnostic = "discarded child diagnostic\n"
+    child_traceback = (
+        discarded_diagnostic
+        + ("x" * module.MAX_CHILD_ERROR_CHARS)
+        + "\nValueError: invalid plugin input"
+    )
+
+    def fail_item_process(command, **kwargs):
+        assert kwargs["stderr"] is subprocess.PIPE
+        return subprocess.CompletedProcess(
+            command,
+            returncode=1,
+            stdout="",
+            stderr=child_traceback,
+        )
+
+    monkeypatch.setattr(module.subprocess, "run", fail_item_process)
+
+    run_id = "parallel-failure:item:0"
+    executor = module.WorkflowExecutor(DummyRedis())
+    try:
+        result = executor.execute(
+            plugin_root.name,
+            "parallel-failure",
+            {},
+            payload={
+                "workflow_id": plugin_root.name,
+                "operation": "run",
+                "items": [
+                    {
+                        "run_id": run_id,
+                        "payload": {
+                            "run_id": run_id,
+                            "workflow_id": plugin_root.name,
+                            "operation": "run",
+                            "parameters": {"value": 1},
+                        },
+                    }
+                ],
+            },
+        )
+    finally:
+        executor.close()
+
+    item_result = result["batch_results"][0]["result"]
+    expected_error = "ValueError: invalid plugin input"
+    assert result["status"] == "failed"
+    assert item_result["status"] == "failed"
+    assert expected_error in item_result["error"]
+    assert discarded_diagnostic not in item_result["error"]
+    assert expected_error in item_result["error_traceback"]
+    captured_stderr = capsys.readouterr().err
+    assert expected_error in captured_stderr
+    assert discarded_diagnostic in captured_stderr
 
 
 def test_inference_worker_builds_structured_results_envelope_for_direct_execute_completion():

@@ -33,20 +33,20 @@ def max_parallel_items_from_env(default: int = 1) -> int:
     """Return the configured worker-wide item concurrency limit.
 
     Defaults to 1 (sequential). Override with
-    PHYSICSNEMO_SERVE_MAX_PARALLEL_ITEMS.
+    PHYSICSNEMO_SERVE_MAX_BATCH_PARALLEL_ITEMS.
     """
-    raw = os.environ.get("PHYSICSNEMO_SERVE_MAX_PARALLEL_ITEMS")
+    raw = os.environ.get("PHYSICSNEMO_SERVE_MAX_BATCH_PARALLEL_ITEMS")
     if raw is None or not raw.strip():
         return default
     try:
         value = int(raw)
     except ValueError as exc:
         raise ValueError(
-            "PHYSICSNEMO_SERVE_MAX_PARALLEL_ITEMS must be a positive integer"
+            "PHYSICSNEMO_SERVE_MAX_BATCH_PARALLEL_ITEMS must be a positive integer"
         ) from exc
     if value < 1:
         raise ValueError(
-            "PHYSICSNEMO_SERVE_MAX_PARALLEL_ITEMS must be a positive integer"
+            "PHYSICSNEMO_SERVE_MAX_BATCH_PARALLEL_ITEMS must be a positive integer"
         )
     return value
 

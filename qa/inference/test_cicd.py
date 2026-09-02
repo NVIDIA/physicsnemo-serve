@@ -273,7 +273,8 @@ def _get_execution_status_details(client, adapter, workflow_name, exec_id):
     resp = client.get(client.base_url + adapter.status_url(workflow_name, exec_id))
     _log_api_response(f"Status execution={exec_id}", resp)
     resp.raise_for_status()
-    parsed = adapter.parse_status_response(resp.json())
+    response_payload = resp.json()
+    parsed = adapter.parse_status_response(response_payload)
 
     progress = parsed.get("progress")
     position = parsed.get("position")
@@ -300,6 +301,7 @@ def _get_execution_status_details(client, adapter, workflow_name, exec_id):
         "queue_position": queue_position,
         "step": progress_text,
         "duration": duration_text,
+        "batch_info": response_payload.get("batch_info"),
     }
 
 
@@ -661,6 +663,61 @@ def test_earth2_ensemble_fanout(client, adapter):
         adapter=adapter,
         timeout=STORMCAST_TIMEOUT,
     )
+
+
+@pytest.mark.rust_only
+def test_scheduler_batches_four_compatible_requests(client, adapter):
+    """Verify four compatible requests are dispatched as one scheduler batch."""
+    workflow_name = "earth2-deterministic"
+    request_count = 4
+    test_params = {
+        "model": "dlwp",
+        "start_time": "2024-01-01T00:00:00",
+        "nsteps": 1,
+    }
+    skip_if_workflow_disabled(adapter, workflow_name)
+
+    exec_ids = _submit_workflows_concurrently(
+        client,
+        adapter,
+        workflow_name,
+        test_params,
+        count=request_count,
+    )
+    assert len(set(exec_ids)) == request_count
+
+    _wait_for_all_executions(
+        client,
+        adapter,
+        workflow_name,
+        exec_ids,
+        timeout=MULTIGPU_TIMEOUT,
+    )
+
+    batch_infos = []
+    for exec_id in exec_ids:
+        status_details = _get_execution_status_details(
+            client, adapter, workflow_name, exec_id
+        )
+        batch_info = status_details.get("batch_info")
+        assert isinstance(batch_info, dict), (
+            f"Execution[{exec_id}] did not include batch_info: {status_details}"
+        )
+        batch_infos.append(batch_info)
+
+    batch_ids = {
+        str(batch_info.get("batch_id") or "").strip() for batch_info in batch_infos
+    }
+    assert "" not in batch_ids
+    assert len(batch_ids) == 1, (
+        f"Requests were not dispatched in one batch: batch_infos={batch_infos}"
+    )
+    assert {batch_info.get("batch_size") for batch_info in batch_infos} == {
+        request_count
+    }
+    assert {batch_info.get("flush_reason") for batch_info in batch_infos} == {
+        "max_batch_size"
+    }
 
 
 @pytest.mark.rust_only

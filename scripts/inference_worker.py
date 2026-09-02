@@ -113,6 +113,7 @@ PARENT_TERMINAL_PREFIX = os.environ.get(
     "PHYSICSNEMO_SERVE_PARENT_TERMINAL_PREFIX", "parent_terminal"
 )
 ITEM_RUNNER_PATH = SCRIPT_DIR / "inference_item_runner.py"
+MAX_CHILD_ERROR_CHARS = 16 * 1024
 
 
 def _execute_plugin_item_subprocess(
@@ -129,20 +130,28 @@ def _execute_plugin_item_subprocess(
         "payload": payload,
     }
     child_env = os.environ.copy()
-    child_env["PHYSICSNEMO_SERVE_MAX_PARALLEL_ITEMS"] = "1"
+    child_env["PHYSICSNEMO_SERVE_MAX_BATCH_PARALLEL_ITEMS"] = "1"
     completed = subprocess.run(
         [sys.executable, str(ITEM_RUNNER_PATH)],
         input=json.dumps(request),
         text=True,
         stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         env=child_env,
         check=False,
     )
+    if completed.stderr:
+        sys.stderr.write(completed.stderr)
+        sys.stderr.flush()
     if completed.returncode != 0:
-        raise RuntimeError(
+        message = (
             f"Plugin item process for run {run_id} exited with status "
             f"{completed.returncode}"
         )
+        child_error = completed.stderr.strip()
+        if child_error:
+            message = f"{message}:\n{child_error[-MAX_CHILD_ERROR_CHARS:]}"
+        raise RuntimeError(message)
     try:
         result = json.loads(completed.stdout)
     except json.JSONDecodeError as exc:

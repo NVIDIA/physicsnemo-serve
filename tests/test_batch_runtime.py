@@ -16,13 +16,13 @@ from batch_runtime import (
 
 
 def test_parallel_item_configuration_defaults_to_rollout_safe_one(monkeypatch):
-    monkeypatch.delenv("PHYSICSNEMO_SERVE_MAX_PARALLEL_ITEMS", raising=False)
+    monkeypatch.delenv("PHYSICSNEMO_SERVE_MAX_BATCH_PARALLEL_ITEMS", raising=False)
     assert max_parallel_items_from_env() == 1
 
 
 @pytest.mark.parametrize("value", ["0", "-1", "many"])
 def test_parallel_item_configuration_rejects_invalid_values(monkeypatch, value):
-    monkeypatch.setenv("PHYSICSNEMO_SERVE_MAX_PARALLEL_ITEMS", value)
+    monkeypatch.setenv("PHYSICSNEMO_SERVE_MAX_BATCH_PARALLEL_ITEMS", value)
     with pytest.raises(ValueError, match="positive integer"):
         max_parallel_items_from_env()
 

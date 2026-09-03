@@ -131,6 +131,31 @@ run and launch only the direct comparison job. The handoff stores no tokens and
 uses only mount-relative paths; the job rechecks report and input digests before
 execution.
 
+## Parallel Batch CI/CD Check
+
+The Rust `cicd` suite includes a live parallel-batch check using the lightweight
+`e2s-example-user` workflow. The QA runner configures that workflow's Lepton
+container with `PHYSICSNEMO_SERVE_MAX_BATCH_PARALLEL_ITEMS=4`, submits four
+compatible 15-second requests concurrently, and requires them to form one
+four-item scheduler batch. It then compares wall time with the sum of the four
+reported item durations to prove that the worker executed the items with
+overlap instead of taking the sequential coordinator path.
+
+Run only this check with:
+
+```bash
+python -u qa/scripts/run_qa.py \
+  --service rust \
+  --image-tag v0.1.0 \
+  --suite cicd \
+  --workflows e2s-example-user \
+  -k test_batch_coordinator_executes_four_items_in_parallel
+```
+
+The four-way container setting is automatic only for `e2s-example-user` in
+Rust `cicd` and `full` runs. Other workflow deployments keep the default
+single-item execution limit.
+
 ## Multi-GPU CI/CD Check
 
 The `cicd` suite includes a Rust-only `multigpu` test. It reads visible GPU IDs

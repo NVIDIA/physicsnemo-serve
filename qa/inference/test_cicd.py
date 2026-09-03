@@ -37,6 +37,10 @@ CICD_TIMEOUT = 300
 MULTIGPU_TIMEOUT = 1800
 MULTIGPU_POLL_INTERVAL = 10
 API_LOG_BODY_LIMIT = 10000
+PARALLEL_BATCH_REQUEST_COUNT = 4
+PARALLEL_BATCH_DELAY_SECONDS = 15
+PARALLEL_BATCH_POLL_INTERVAL = 1
+PARALLEL_BATCH_MAX_WALL_TO_ITEM_RATIO = 0.45
 GPU_METRIC_RE = re.compile(
     r"^physicsnemo_serve_gpu_(?:compute_utilization_percent|"
     r"memory_(?:bus_utilization_percent|used_bytes|total_bytes))"
@@ -319,7 +323,14 @@ def _log_result_api_response(client, adapter, workflow_name, exec_id):
     _log_api_response(f"Result execution={exec_id}", resp)
 
 
-def _wait_for_all_executions(client, adapter, workflow_name, exec_ids, timeout):
+def _wait_for_all_executions(
+    client,
+    adapter,
+    workflow_name,
+    exec_ids,
+    timeout,
+    poll_interval=MULTIGPU_POLL_INTERVAL,
+):
     pending = set(exec_ids)
     deadline = time.time() + timeout
     while pending and time.time() < deadline:
@@ -337,7 +348,7 @@ def _wait_for_all_executions(client, adapter, workflow_name, exec_ids, timeout):
                 _log_result_api_response(client, adapter, workflow_name, exec_id)
                 raise RuntimeError(f"Execution[{exec_id}] ended with status={status}")
         if pending:
-            time.sleep(MULTIGPU_POLL_INTERVAL)
+            time.sleep(poll_interval)
 
     if pending:
         raise RuntimeError(
@@ -354,6 +365,49 @@ def _result_execution(client, adapter, workflow_name, exec_id):
     if not isinstance(execution, dict):
         raise AssertionError(f"Result for {exec_id} did not include execution metadata")
     return execution
+
+
+def _assert_same_scheduler_batch(
+    client, adapter, workflow_name, exec_ids, expected_size
+):
+    batch_infos = []
+    for exec_id in exec_ids:
+        status_details = _get_execution_status_details(
+            client, adapter, workflow_name, exec_id
+        )
+        batch_info = status_details.get("batch_info")
+        assert isinstance(batch_info, dict), (
+            f"Execution[{exec_id}] did not include batch_info: {status_details}"
+        )
+        batch_infos.append(batch_info)
+
+    batch_ids = {
+        str(batch_info.get("batch_id") or "").strip() for batch_info in batch_infos
+    }
+    assert "" not in batch_ids
+    assert len(batch_ids) == 1, (
+        f"Requests were not dispatched in one batch: batch_infos={batch_infos}"
+    )
+    assert {batch_info.get("batch_size") for batch_info in batch_infos} == {
+        expected_size
+    }
+    assert {batch_info.get("flush_reason") for batch_info in batch_infos} == {
+        "max_batch_size"
+    }
+
+
+def _positive_execution_duration(execution, exec_id):
+    raw_duration = execution.get("execution_time_seconds")
+    try:
+        duration = float(raw_duration)
+    except (TypeError, ValueError) as exc:
+        raise AssertionError(
+            f"Execution[{exec_id}] has invalid execution_time_seconds: {raw_duration!r}"
+        ) from exc
+    assert duration > 0, (
+        f"Execution[{exec_id}] execution_time_seconds must be positive: {duration}"
+    )
+    return duration
 
 
 def _result_gpu_stream(client, adapter, workflow_name, exec_id):
@@ -694,30 +748,71 @@ def test_scheduler_batches_four_compatible_requests(client, adapter):
         timeout=MULTIGPU_TIMEOUT,
     )
 
-    batch_infos = []
-    for exec_id in exec_ids:
-        status_details = _get_execution_status_details(
-            client, adapter, workflow_name, exec_id
-        )
-        batch_info = status_details.get("batch_info")
-        assert isinstance(batch_info, dict), (
-            f"Execution[{exec_id}] did not include batch_info: {status_details}"
-        )
-        batch_infos.append(batch_info)
-
-    batch_ids = {
-        str(batch_info.get("batch_id") or "").strip() for batch_info in batch_infos
-    }
-    assert "" not in batch_ids
-    assert len(batch_ids) == 1, (
-        f"Requests were not dispatched in one batch: batch_infos={batch_infos}"
+    _assert_same_scheduler_batch(
+        client,
+        adapter,
+        workflow_name,
+        exec_ids,
+        expected_size=request_count,
     )
-    assert {batch_info.get("batch_size") for batch_info in batch_infos} == {
-        request_count
+
+
+@pytest.mark.rust_only
+def test_batch_coordinator_executes_four_items_in_parallel(client, adapter):
+    """Verify one scheduler batch executes four lightweight items concurrently."""
+    workflow_name = "example_user_workflow"
+    test_params = {
+        "task_name": "parallel_batch_cicd_test",
+        "num_iterations": 1,
+        "delay_seconds": PARALLEL_BATCH_DELAY_SECONDS,
+        "generate_output": False,
     }
-    assert {batch_info.get("flush_reason") for batch_info in batch_infos} == {
-        "max_batch_size"
-    }
+    skip_if_workflow_disabled(adapter, workflow_name)
+
+    started_at = time.monotonic()
+    exec_ids = _submit_workflows_concurrently(
+        client,
+        adapter,
+        workflow_name,
+        test_params,
+        count=PARALLEL_BATCH_REQUEST_COUNT,
+    )
+    assert len(set(exec_ids)) == PARALLEL_BATCH_REQUEST_COUNT
+
+    _wait_for_all_executions(
+        client,
+        adapter,
+        workflow_name,
+        exec_ids,
+        timeout=CICD_TIMEOUT,
+        poll_interval=PARALLEL_BATCH_POLL_INTERVAL,
+    )
+    wall_time_seconds = time.monotonic() - started_at
+
+    _assert_same_scheduler_batch(
+        client,
+        adapter,
+        workflow_name,
+        exec_ids,
+        expected_size=PARALLEL_BATCH_REQUEST_COUNT,
+    )
+    item_durations = [
+        _positive_execution_duration(
+            _result_execution(client, adapter, workflow_name, exec_id), exec_id
+        )
+        for exec_id in exec_ids
+    ]
+    summed_item_seconds = sum(item_durations)
+    maximum_parallel_wall_time = (
+        summed_item_seconds * PARALLEL_BATCH_MAX_WALL_TO_ITEM_RATIO
+    )
+
+    assert wall_time_seconds < maximum_parallel_wall_time, (
+        "Batch items did not demonstrate four-way execution overlap: "
+        f"wall_time_seconds={wall_time_seconds:.3f}, "
+        f"item_durations={item_durations}, "
+        f"maximum_parallel_wall_time={maximum_parallel_wall_time:.3f}"
+    )
 
 
 @pytest.mark.rust_only

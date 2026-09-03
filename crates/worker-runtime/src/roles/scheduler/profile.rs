@@ -1015,9 +1015,9 @@ mod tests {
     }
 
     /// Integration test: validates that the real profiles.json matches each
-    /// e2s-* plugin's default_request.json via the actual ResourceManager lookup.
+    /// profiled plugin's default_request.json via the actual ResourceManager lookup.
     #[tokio::test]
-    async fn profiles_json_matches_all_e2s_plugins() {
+    async fn profiles_json_matches_all_profiled_plugins() {
         let _guard = test_env::env_lock().lock().await;
         let prev_json = std::env::var(ENV_PROFILES_JSON).ok();
         let prev_path = std::env::var(ENV_PROFILES_PATH).ok();
@@ -1036,6 +1036,7 @@ mod tests {
             "e2s-deterministic",
             "e2s-deterministic-fcn",
             "e2s-ensemble",
+            "physicsnemo-cfd-surface-benchmark",
         ];
 
         let mut failures: Vec<String> = Vec::new();
@@ -1077,6 +1078,10 @@ mod tests {
                         profile.peak_memory_mib().is_some(),
                         "plugin {plugin_name}: peak_memory_mib() returned None"
                     );
+                    if plugin_name == "physicsnemo-cfd-surface-benchmark" {
+                        assert_eq!(profile.gpus_used, 1);
+                        assert_eq!(profile.peak_memory_mib(), Some(13_312));
+                    }
                 }
                 None => {
                     failures.push(format!(

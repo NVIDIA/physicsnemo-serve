@@ -379,7 +379,7 @@ def test_normalize_surface_request_enforces_case_id_length_boundary():
         )
 
 
-def test_prepare_emits_integrity_prefetch_and_gpu_profile(tmp_path: Path):
+def test_prepare_emits_integrity_prefetch_without_explicit_gpu_profile(tmp_path: Path):
     workflow = surface.SurfaceBenchmarkWorkflow(MANIFEST_PATH)
     result = workflow.prepare(
         RawRequest(
@@ -416,10 +416,7 @@ def test_prepare_emits_integrity_prefetch_and_gpu_profile(tmp_path: Path):
             "media_type": "model/stl",
         },
     ]
-    assert result.resource_profile.executor_class == "physicsnemo-cfd-gpu"
-    assert result.resource_profile.gpus_required == 1
-    assert result.resource_profile.memory_mb == 65000
-    assert result.resource_profile.tags == ["physicsnemo-cfd", "gpu"]
+    assert result.resource_profile is None
 
 
 def test_build_resolved_config_uses_only_fixed_models_and_paths(tmp_path: Path):

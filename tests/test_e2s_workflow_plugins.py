@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import sys
 from collections import OrderedDict
 from pathlib import Path
@@ -280,6 +281,115 @@ def _load_module(module_name: str, file_path: Path):
     sys.modules[module_name] = module
     spec.loader.exec_module(module)
     return module
+
+
+def _install_subprocess_earth2_fakes(
+    tmp_path: Path,
+    monkeypatch,
+    *,
+    expected_processes: int,
+) -> Path:
+    """Install disk-backed fakes inherited by fresh item interpreters."""
+    fake_root = tmp_path / "subprocess-fakes"
+    sync_dir = tmp_path / "inference-sync"
+    fake_root.mkdir(parents=True, exist_ok=True)
+    (fake_root / "sitecustomize.py").write_text(
+        """
+from __future__ import annotations
+
+import os
+import signal
+import sys
+import threading
+import time
+from pathlib import Path
+from types import ModuleType
+
+signal.signal(signal.SIGUSR1, signal.SIG_IGN)
+
+earth2studio = ModuleType("earth2studio")
+earth2studio.__path__ = []
+run = ModuleType("earth2studio.run")
+data = ModuleType("earth2studio.data")
+models = ModuleType("earth2studio.models")
+models.__path__ = []
+px = ModuleType("earth2studio.models.px")
+io_module = ModuleType("earth2studio.io")
+
+
+class FakeModelType:
+    @classmethod
+    def load_default_package(cls):
+        return object()
+
+    @classmethod
+    def load_model(cls, _package):
+        return object()
+
+
+class GFS:
+    def __init__(self, **_kwargs):
+        pass
+
+
+class ZarrBackend:
+    def __init__(self, path, **_kwargs):
+        self.path = Path(path)
+
+    def finalize(self):
+        self.path.mkdir(parents=True, exist_ok=True)
+        (self.path / ".written").write_text("ok", encoding="utf-8")
+        return self
+
+
+def deterministic(_times, _nsteps, _model, _data, io):
+    sync_dir = Path(os.environ["E2S_TEST_INFERENCE_SYNC_DIR"])
+    sync_dir.mkdir(parents=True, exist_ok=True)
+    marker = sync_dir / f"inference-{os.getpid()}"
+    marker.write_text(
+        str(threading.current_thread() is threading.main_thread()),
+        encoding="utf-8",
+    )
+    deadline = time.monotonic() + 10
+    expected = int(os.environ["E2S_TEST_EXPECTED_PROCESSES"])
+    while len(list(sync_dir.glob("inference-*"))) < expected:
+        if time.monotonic() >= deadline:
+            raise TimeoutError("Earth2 inference processes did not overlap")
+        time.sleep(0.01)
+    return io
+
+
+run.deterministic = deterministic
+data.GFS = GFS
+px.DLWP = FakeModelType
+px.FCN = FakeModelType
+px.FCN3 = FakeModelType
+io_module.ZarrBackend = ZarrBackend
+earth2studio.run = run
+earth2studio.data = data
+earth2studio.models = models
+earth2studio.io = io_module
+models.px = px
+
+sys.modules["earth2studio"] = earth2studio
+sys.modules["earth2studio.run"] = run
+sys.modules["earth2studio.data"] = data
+sys.modules["earth2studio.models"] = models
+sys.modules["earth2studio.models.px"] = px
+sys.modules["earth2studio.io"] = io_module
+""".strip(),
+        encoding="utf-8",
+    )
+
+    existing_pythonpath = os.environ.get("PYTHONPATH", "")
+    pythonpath = str(fake_root)
+    if existing_pythonpath:
+        pythonpath = f"{pythonpath}{os.pathsep}{existing_pythonpath}"
+    monkeypatch.setenv("PYTHONPATH", pythonpath)
+    monkeypatch.setenv("E2S_TEST_INFERENCE_SYNC_DIR", str(sync_dir))
+    monkeypatch.setenv("E2S_TEST_EXPECTED_PROCESSES", str(expected_processes))
+    monkeypatch.setenv("PHYSICSNEMO_SERVE_E2S_ZARR_BACKEND", "python")
+    return sync_dir
 
 
 def _raw_request(**raw_fields) -> RawRequest:
@@ -583,7 +693,7 @@ def _install_fake_earth2_runtime(
                 gfs_close_calls.append((loop, s3creator))
 
     class FakeDataSource:
-        def __init__(self) -> None:
+        def __init__(self, **_kwargs) -> None:
             if data_source_init_calls is not None:
                 data_source_init_calls.append("GFS")
             self.fs = FakeFilesystem()
@@ -1216,6 +1326,32 @@ def test_e2s_deterministic_cleanup_releases_runtime_resources_and_torch_memory(
     assert cuda_empty_cache_calls == ["empty_cache"]
 
 
+def test_e2s_deterministic_gfs_cache_is_request_scoped(tmp_path: Path, monkeypatch):
+    _install_fake_earth2_runtime(monkeypatch)
+    module = _load_module(
+        "e2s_deterministic_request_scoped_gfs",
+        PLUGIN_DETERMINISTIC / "workflow.py",
+    )
+
+    first_workflow = module.WORKFLOW()
+    second_workflow = module.WORKFLOW()
+    first_gfs = first_workflow._data_for_source("gfs")
+    second_gfs = second_workflow._data_for_source("gfs")
+    first_cache = Path(first_gfs.cache)
+    second_cache = Path(second_gfs.cache)
+
+    assert first_gfs is not second_gfs
+    assert first_cache != second_cache
+    assert first_cache.is_dir()
+    assert second_cache.is_dir()
+
+    first_workflow.cleanup()
+    second_workflow.cleanup()
+
+    assert not first_cache.exists()
+    assert not second_cache.exists()
+
+
 def test_earth2_workflow_cleanup_removes_staged_zarr_output_after_failure(
     tmp_path: Path, monkeypatch
 ):
@@ -1269,6 +1405,81 @@ def test_earth2_workflow_cleanup_closes_http_filesystem_session():
     workflow.cleanup()
 
     assert http_close_calls == ["http-loop"]
+
+
+def test_workflow_executor_env_parallelism_reaches_e2s_deterministic_inference(
+    tmp_path: Path, monkeypatch
+):
+    item_count = 4
+    sync_dir = _install_subprocess_earth2_fakes(
+        tmp_path,
+        monkeypatch,
+        expected_processes=item_count,
+    )
+    monkeypatch.setenv("PLUGIN_DIR", str(REPO_ROOT / "plugins"))
+    monkeypatch.setenv("DEFAULT_OUTPUT_DIR", str(tmp_path / "outputs"))
+    monkeypatch.setenv("PHYSICSNEMO_SERVE_ENABLED_PLUGIN_ID", "e2s-deterministic")
+    monkeypatch.setenv("PHYSICSNEMO_SERVE_MAX_BATCH_PARALLEL_ITEMS", str(item_count))
+    monkeypatch.delenv("REDIS_URL", raising=False)
+
+    worker_module = _load_module(
+        "inference_worker_e2s_parallel_integration",
+        SCRIPTS_DIR / "inference_worker.py",
+    )
+    executor = worker_module.WorkflowExecutor(None)
+    runtime = {"entrypoint": "workflow.py", "kind": "python"}
+    items = []
+    for index in range(item_count):
+        run_id = f"parallel-batch:item:{index}"
+        parameters = {
+            "forecast_times": [f"2024-01-0{index + 1}T00:00:00"],
+            "nsteps": 2,
+            "model_type": "fcn",
+            "create_plots": False,
+        }
+        items.append(
+            {
+                "run_id": run_id,
+                "payload": {
+                    "run_id": run_id,
+                    "workflow_id": "e2s-deterministic",
+                    "operation": "run",
+                    "parameters": parameters,
+                    "runtime": runtime,
+                },
+            }
+        )
+
+    try:
+        assert executor._batch_coordinator.max_parallel_items == item_count
+        result = executor.execute(
+            "e2s-deterministic",
+            "parallel-batch",
+            {},
+            payload={
+                "workflow_id": "e2s-deterministic",
+                "operation": "run",
+                "runtime": runtime,
+                "items": items,
+            },
+        )
+    finally:
+        executor.close()
+
+    assert result["status"] == "succeeded"
+    assert [entry["run_id"] for entry in result["batch_results"]] == [
+        item["run_id"] for item in items
+    ]
+    item_results = [entry["result"] for entry in result["batch_results"]]
+    assert all(item_result["status"] == "succeeded" for item_result in item_results)
+    output_paths = [item_result["output_path"] for item_result in item_results]
+    assert len(set(output_paths)) == item_count
+    assert all(Path(path).exists() for path in output_paths)
+    inference_markers = list(sync_dir.glob("inference-*"))
+    assert len(inference_markers) == item_count
+    assert all(
+        marker.read_text(encoding="utf-8") == "True" for marker in inference_markers
+    )
 
 
 # ===========================================================================

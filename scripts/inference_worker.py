@@ -43,6 +43,7 @@ import json
 import logging
 import os
 import signal
+import subprocess
 import sys
 import threading
 import time
@@ -71,6 +72,7 @@ from plugin_runtime import (  # noqa: E402
     workflow_is_cacheable,
 )
 from plugin_sdk import PluginCancelledError, cleanup_python_and_torch_runtime  # noqa: E402
+from batch_runtime import BatchExecutionCoordinator, RUN_ITEM  # noqa: E402
 
 if TYPE_CHECKING:
     import redis as redis_lib
@@ -110,6 +112,58 @@ DEFAULT_PLUGIN_MANIFEST_NAME = "plugin.yaml"
 PARENT_TERMINAL_PREFIX = os.environ.get(
     "PHYSICSNEMO_SERVE_PARENT_TERMINAL_PREFIX", "parent_terminal"
 )
+ITEM_RUNNER_PATH = SCRIPT_DIR / "inference_item_runner.py"
+MAX_CHILD_ERROR_CHARS = 16 * 1024
+
+
+def _execute_plugin_item_subprocess(
+    workflow_name: str,
+    run_id: str,
+    parameters: dict[str, Any],
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    """Execute one ordinary plugin request in its own Python interpreter."""
+    request = {
+        "workflow_name": workflow_name,
+        "run_id": run_id,
+        "parameters": parameters,
+        "payload": payload,
+    }
+    child_env = os.environ.copy()
+    child_env["PHYSICSNEMO_SERVE_MAX_BATCH_PARALLEL_ITEMS"] = "1"
+    completed = subprocess.run(
+        [sys.executable, str(ITEM_RUNNER_PATH)],
+        input=json.dumps(request),
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=child_env,
+        check=False,
+    )
+    if completed.stderr:
+        sys.stderr.write(completed.stderr)
+        sys.stderr.flush()
+    if completed.returncode != 0:
+        message = (
+            f"Plugin item process for run {run_id} exited with status "
+            f"{completed.returncode}"
+        )
+        child_error = completed.stderr.strip()
+        if child_error:
+            message = f"{message}:\n{child_error[-MAX_CHILD_ERROR_CHARS:]}"
+        raise RuntimeError(message)
+    try:
+        result = json.loads(completed.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(
+            f"Plugin item process for run {run_id} returned invalid JSON"
+        ) from exc
+    if not isinstance(result, dict):
+        raise TypeError(
+            f"Plugin item process for run {run_id} returned "
+            f"{type(result).__name__}, expected object"
+        )
+    return result
 
 
 def _torch_cuda_runtime() -> Any | None:
@@ -599,6 +653,8 @@ class WorkflowExecutor:
         self._workflow_cache: dict[str, Any] = {}
         self._workflow_cache_entries: dict[str, dict[str, Any]] = {}
         self._workflow_cache_lock = threading.RLock()
+        self._batch_coordinator = BatchExecutionCoordinator()
+        self._legacy_batch_warnings: set[str] = set()
 
     def execute(
         self,
@@ -838,7 +894,240 @@ class WorkflowExecutor:
             )
             raise
 
+    def _uses_legacy_batch_only_api(self, module: Any) -> bool:
+        """Return True when the module has batch hooks but no run() method."""
+        from plugin_sdk import PluginWorkflow
+
+        # Do not invoke build_workflow() solely to inspect its hooks: construction
+        # may load expensive models. Legacy batch-only hooks returned exclusively
+        # by that factory are therefore not detected here; no current in-repo
+        # batch-only plugin relies on that export form.
+        workflow_cls = getattr(module, "WORKFLOW", None)
+        if workflow_cls is not None:
+            if not isinstance(workflow_cls, type):
+                # Factory or callable WORKFLOW — cannot inspect without
+                # instantiation. Route conservatively through the legacy path.
+                return True
+            cls = workflow_cls
+            # Walk the MRO down to (but not including) PluginWorkflow so that
+            # hooks defined in plugin-specific base classes are recognized.
+            plugin_mro = [
+                c
+                for c in cls.__mro__
+                if c is not PluginWorkflow
+                and c is not object
+                and not issubclass(PluginWorkflow, c)
+            ]
+            has_run_batch = any("run_batch" in c.__dict__ for c in plugin_mro)
+            has_execute_batch = any(
+                "execute_batch" in c.__dict__ for c in plugin_mro
+            ) or callable(getattr(module, "execute_batch", None))
+            has_run = any("run" in c.__dict__ for c in plugin_mro)
+            has_execute = callable(getattr(module, "execute", None))
+            return (has_run_batch or has_execute_batch) and not (has_run or has_execute)
+        has_run_batch = callable(getattr(module, "run_batch", None))
+        has_execute_batch = callable(getattr(module, "execute_batch", None))
+        has_run = callable(getattr(module, "run", None))
+        has_execute = callable(getattr(module, "execute", None))
+        return (has_run_batch or has_execute_batch) and not (has_run or has_execute)
+
     def _execute_plugin_batch_workflow(
+        self,
+        workflow_name: str,
+        batch_id: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        workflow_id = payload.get("workflow_id", workflow_name)
+        plugin_root, manifest = _resolve_plugin_manifest(workflow_id)
+        runtime = manifest.get("runtime", {})
+        entrypoint_name = runtime.get("entrypoint") or payload.get("runtime", {}).get(
+            "entrypoint"
+        )
+        if not entrypoint_name:
+            raise ValueError(
+                f"Plugin workflow '{workflow_id}' is missing runtime.entrypoint"
+            )
+
+        module = self._load_plugin_module(workflow_id, plugin_root / entrypoint_name)
+
+        if self._uses_legacy_batch_only_api(module):
+            if workflow_id not in self._legacy_batch_warnings:
+                logger.warning(
+                    "Plugin workflow %s uses a batch-only API; run_batch()/"
+                    "execute_batch() support is deprecated. Implement run() for one item.",
+                    workflow_id,
+                )
+                self._legacy_batch_warnings.add(workflow_id)
+            return self._execute_legacy_plugin_batch_workflow(
+                workflow_name, batch_id, payload
+            )
+
+        operation = payload.get("operation") or (
+            manifest.get("ingress", {}).get("operations", {}).get("default", "run")
+        )
+        services = dict(payload.get("services") or {})
+        services.setdefault("redis_url", os.environ.get("REDIS_URL"))
+        services.setdefault("default_output_dir", os.environ.get("DEFAULT_OUTPUT_DIR"))
+        service_objects = dict(payload.get("service_objects") or {})
+        service_objects.setdefault("redis_client", self.redis_client)
+
+        raw_items = payload.get("items", [])
+        if not isinstance(raw_items, list) or not raw_items:
+            raise ValueError(f"Plugin batch workflow '{workflow_id}' is missing items")
+        batch_info = _normalize_batch_info(batch_id, payload, len(raw_items))
+
+        items: list[dict[str, Any]] = []
+        raw_payloads: list[dict[str, Any]] = []
+        for raw_item in raw_items:
+            if not isinstance(raw_item, dict):
+                raise TypeError(
+                    f"Plugin batch workflow '{workflow_id}' items must be objects"
+                )
+            raw_payload = raw_item.get("payload")
+            if not isinstance(raw_payload, dict):
+                raise TypeError(
+                    f"Plugin batch workflow '{workflow_id}' item payload must be an object"
+                )
+            item_payload = dict(raw_payload)
+            # Batching is a worker implementation detail. The child receives the
+            # same envelope it would receive for a single request.
+            item_payload.pop("batch_id", None)
+            item_payload.pop("batch_info", None)
+            item_payload.pop("items", None)
+            item_payload.pop("service_objects", None)
+            item_run_id = str(
+                raw_item.get("run_id") or item_payload.get("run_id") or ""
+            ).strip()
+            if not item_run_id:
+                raise ValueError(
+                    f"Plugin batch workflow '{workflow_id}' item is missing run_id"
+                )
+            # Extract parameters from the original payload before batch metadata
+            # is added, so the fallback (using payload itself as parameters) does
+            # not pick up framework fields like batch_id or batch_info.
+            item_parameters = raw_payload.get(
+                "parameters", raw_payload.get("inputs", raw_payload)
+            )
+            if not isinstance(item_parameters, dict):
+                item_parameters = {}
+            parent_run_id = _batch_item_parent_run_id(raw_item, item_payload)
+            if parent_run_id:
+                item_payload["parent_run_id"] = parent_run_id
+            item_payload.setdefault("operation", operation)
+            item_payload.setdefault("resource_id", payload.get("resource_id"))
+            item_payload.setdefault("memory_mb", payload.get("memory_mb"))
+            if "services" not in item_payload and isinstance(
+                payload.get("services"), dict
+            ):
+                item_payload["services"] = payload["services"]
+            if "resource_profile" not in item_payload and isinstance(
+                payload.get("resource_profile"), dict
+            ):
+                item_payload["resource_profile"] = payload["resource_profile"]
+            item_payload.setdefault("workflow_id", workflow_id)
+            items.append(
+                {
+                    "run_id": item_run_id,
+                    "parameters": item_parameters,
+                    "payload": item_payload,
+                    "parent_run_id": parent_run_id,
+                    "batch_info": batch_info,
+                }
+            )
+            raw_payloads.append(raw_payload)
+
+        start_time = time.time()
+
+        def preflight(item: dict[str, Any]) -> Any:
+            item_run_id = item["run_id"]
+            item_parameters = item["parameters"]
+            parent_run_id = item["parent_run_id"]
+            _initialize_execution_state(
+                self.redis_client, workflow_id, item_run_id, item_parameters
+            )
+            if parent_run_terminal(self.redis_client, parent_run_id):
+                elapsed = time.time() - start_time
+                _update_execution_state(
+                    self.redis_client,
+                    workflow_id,
+                    item_run_id,
+                    "cancelled",
+                    elapsed,
+                    None,
+                    "Cancelled because parent run is already terminal",
+                )
+                result = _cancelled_batch_item_result(
+                    run_id=item_run_id,
+                    parent_run_id=parent_run_id,
+                    execution_time=elapsed,
+                    batch_info=item["batch_info"],
+                )
+                result["batch_info"] = item["batch_info"]
+                return result
+            return RUN_ITEM
+
+        def execute_item(item: dict[str, Any]) -> dict[str, Any]:
+            item_run_id = item["run_id"]
+            item_parameters = item["parameters"]
+            item_payload = item["payload"]
+            if self._batch_coordinator.max_parallel_items == 1:
+                normalized = self._execute_plugin_workflow(
+                    workflow_name, item_run_id, item_parameters, item_payload
+                )
+            else:
+                normalized = _execute_plugin_item_subprocess(
+                    workflow_name, item_run_id, item_parameters, item_payload
+                )
+            normalized.setdefault("run_id", item_run_id)
+            normalized.setdefault("batch_info", item["batch_info"])
+            return normalized
+
+        def handle_exception(item: dict[str, Any], exc: Exception) -> dict[str, Any]:
+            elapsed = time.time() - start_time
+            item_run_id = item["run_id"]
+            _update_execution_state(
+                self.redis_client,
+                workflow_id,
+                item_run_id,
+                "failed",
+                elapsed,
+                None,
+                str(exc),
+            )
+            return {
+                "run_id": item_run_id,
+                "status": "failed",
+                "output_path": None,
+                "execution_time_seconds": elapsed,
+                "error": str(exc),
+                "error_traceback": traceback.format_exc(),
+                "batch_info": item["batch_info"],
+            }
+
+        item_results = self._batch_coordinator.execute(
+            items,
+            execute_item,
+            preflight=preflight,
+            handle_exception=handle_exception,
+        )
+
+        batch_results = [
+            {
+                "run_id": item["run_id"],
+                "batch_info": batch_info,
+                "payload": raw_payload,
+                "result": result,
+            }
+            for item, raw_payload, result in zip(items, raw_payloads, item_results)
+        ]
+        return {
+            "run_id": batch_id,
+            "status": _batch_result_status(batch_results),
+            "execution_time_seconds": time.time() - start_time,
+            "batch_results": batch_results,
+        }
+
+    def _execute_legacy_plugin_batch_workflow(
         self,
         workflow_name: str,
         batch_id: str,
@@ -1486,6 +1775,8 @@ class WorkflowExecutor:
         return None
 
     def close(self) -> None:
+        self._batch_coordinator.close()
+
         with self._workflow_cache_lock:
             had_entries = bool(self._workflow_cache_entries)
             workflows = list(self._workflow_cache.values())
@@ -1882,7 +2173,9 @@ def _build_batch_primary_outputs(
             batch_payload, item_payload
         )
         item_result_for_handoff = dict(item_result)
-        item_result_for_handoff.pop("batch_info", None)
+        batch_info = entry.get("batch_info")
+        if isinstance(batch_info, dict):
+            item_result_for_handoff["batch_info"] = copy.deepcopy(batch_info)
         item_result_for_handoff["run_id"] = run_id
         stream_name_out, payload_out, stage_out = _build_primary_completion(
             stream_name,

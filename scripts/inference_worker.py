@@ -2173,7 +2173,9 @@ def _build_batch_primary_outputs(
             batch_payload, item_payload
         )
         item_result_for_handoff = dict(item_result)
-        item_result_for_handoff.pop("batch_info", None)
+        batch_info = entry.get("batch_info")
+        if isinstance(batch_info, dict):
+            item_result_for_handoff["batch_info"] = copy.deepcopy(batch_info)
         item_result_for_handoff["run_id"] = run_id
         stream_name_out, payload_out, stage_out = _build_primary_completion(
             stream_name,

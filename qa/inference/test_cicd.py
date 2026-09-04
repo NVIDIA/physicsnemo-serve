@@ -41,6 +41,8 @@ PARALLEL_BATCH_REQUEST_COUNT = 4
 PARALLEL_BATCH_DELAY_SECONDS = 15
 PARALLEL_BATCH_POLL_INTERVAL = 1
 PARALLEL_BATCH_MAX_WALL_TO_ITEM_RATIO = 0.45
+BATCH_METADATA_TIMEOUT = 30
+BATCH_METADATA_POLL_INTERVAL = 1
 GPU_METRIC_RE = re.compile(
     r"^physicsnemo_serve_gpu_(?:compute_utilization_percent|"
     r"memory_(?:bus_utilization_percent|used_bytes|total_bytes))"
@@ -367,19 +369,66 @@ def _result_execution(client, adapter, workflow_name, exec_id):
     return execution
 
 
-def _assert_same_scheduler_batch(
-    client, adapter, workflow_name, exec_ids, expected_size
+def _wait_for_scheduler_batch_infos(
+    client,
+    adapter,
+    workflow_name,
+    exec_ids,
+    *,
+    timeout=BATCH_METADATA_TIMEOUT,
+    poll_interval=BATCH_METADATA_POLL_INTERVAL,
 ):
-    batch_infos = []
-    for exec_id in exec_ids:
-        status_details = _get_execution_status_details(
-            client, adapter, workflow_name, exec_id
-        )
-        batch_info = status_details.get("batch_info")
-        assert isinstance(batch_info, dict), (
-            f"Execution[{exec_id}] did not include batch_info: {status_details}"
-        )
-        batch_infos.append(batch_info)
+    """Wait for downstream results persistence to expose scheduler metadata."""
+    deadline = time.monotonic() + timeout
+    last_statuses = {}
+
+    while True:
+        batch_infos = []
+        missing_exec_ids = []
+        for exec_id in exec_ids:
+            status_details = _get_execution_status_details(
+                client, adapter, workflow_name, exec_id
+            )
+            last_statuses[exec_id] = status_details
+            batch_info = status_details.get("batch_info")
+            if isinstance(batch_info, dict):
+                batch_infos.append(batch_info)
+            else:
+                missing_exec_ids.append(exec_id)
+
+        if not missing_exec_ids:
+            return batch_infos
+
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            missing_statuses = {
+                exec_id: last_statuses[exec_id] for exec_id in missing_exec_ids
+            }
+            raise AssertionError(
+                "Scheduler batch metadata did not become available within "
+                f"{timeout} seconds: {missing_statuses}"
+            )
+        time.sleep(min(poll_interval, remaining))
+
+
+def _assert_same_scheduler_batch(
+    client,
+    adapter,
+    workflow_name,
+    exec_ids,
+    expected_size,
+    *,
+    metadata_timeout=BATCH_METADATA_TIMEOUT,
+    metadata_poll_interval=BATCH_METADATA_POLL_INTERVAL,
+):
+    batch_infos = _wait_for_scheduler_batch_infos(
+        client,
+        adapter,
+        workflow_name,
+        exec_ids,
+        timeout=metadata_timeout,
+        poll_interval=metadata_poll_interval,
+    )
 
     batch_ids = {
         str(batch_info.get("batch_id") or "").strip() for batch_info in batch_infos

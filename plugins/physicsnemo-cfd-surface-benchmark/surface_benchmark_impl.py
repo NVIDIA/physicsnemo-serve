@@ -56,7 +56,6 @@ from plugin_sdk import (
     PrepareContext,
     PrepareResult,
     RawRequest,
-    ResourceProfile,
     build_execution_context,
     coerce_model,
     model_to_jsonable,
@@ -753,12 +752,6 @@ class SurfaceBenchmarkWorkflow(PluginWorkflow):
         )
         return PrepareResult(
             inputs=inputs,
-            resource_profile=ResourceProfile(
-                executor_class="physicsnemo-cfd-gpu",
-                gpus_required=1,
-                memory_mb=65000,
-                tags=["physicsnemo-cfd", "gpu"],
-            ),
             prefetch_plan=build_prefetch_plan(inputs),
         )
 

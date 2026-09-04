@@ -117,13 +117,6 @@ runtime:
     prepare: 30
     execute: 21720
 
-resources:
-  defaults:
-    device_kind: gpu
-    gpus_required: 1
-    memory_mb: 65000
-    cpu_cores: 8
-
 outputs:
   result_schema_inline:
     type: object

@@ -135,6 +135,20 @@
       }
     },
     {
+      "workflow": "physicsnemo-cfd-surface-benchmark",
+      "gpus.used": 1,
+      "average": {
+        "utilization.gpu": "8.27 %",
+        "utilization.memory": "4.52 %"
+      },
+      "peak": {
+        "utilization.gpu": "100 %",
+        "utilization.memory": "92 %",
+        "memory.used": "13312 MiB",
+        "memory.total": "81559 MiB"
+      }
+    },
+    {
       "workflow": "e2s-ensemble",
       "model": "fcn",
       "gpus.used": 1,

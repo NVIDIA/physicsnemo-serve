@@ -11,7 +11,9 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "qa" / "scripts"))
+sys.path.insert(0, str(REPO_ROOT / "qa" / "inference"))
 
+import test_cicd as inference_cicd  # noqa: E402
 import run_qa  # noqa: E402
 
 
@@ -94,3 +96,66 @@ def test_parallel_batch_env_is_passed_to_example_user_deployment(
         "PHYSICSNEMO_SERVE_MAX_BATCH_PARALLEL_ITEMS=4",
         "PHYSICSNEMO_SERVE_ENABLED_PLUGIN_ID=e2s-example-user",
     ]
+
+
+def test_scheduler_batch_assertion_waits_for_delayed_metadata(monkeypatch):
+    exec_ids = ["run-1", "run-2"]
+    responses = {
+        exec_id: [
+            None,
+            {
+                "batch_id": "batch-1",
+                "batch_size": 2,
+                "flush_reason": "max_batch_size",
+            },
+        ]
+        for exec_id in exec_ids
+    }
+
+    def fake_status_details(_client, _adapter, _workflow_name, exec_id):
+        return {
+            "execution_id": exec_id,
+            "status": "completed",
+            "batch_info": responses[exec_id].pop(0),
+        }
+
+    monkeypatch.setattr(
+        inference_cicd, "_get_execution_status_details", fake_status_details
+    )
+
+    inference_cicd._assert_same_scheduler_batch(
+        object(),
+        object(),
+        "example_user_workflow",
+        exec_ids,
+        expected_size=2,
+        metadata_timeout=1,
+        metadata_poll_interval=0,
+    )
+
+
+def test_scheduler_batch_assertion_reports_persistently_missing_metadata(monkeypatch):
+    def fake_status_details(_client, _adapter, _workflow_name, exec_id):
+        return {
+            "execution_id": exec_id,
+            "status": "completed",
+            "batch_info": None,
+        }
+
+    monkeypatch.setattr(
+        inference_cicd, "_get_execution_status_details", fake_status_details
+    )
+
+    with pytest.raises(
+        AssertionError,
+        match="Scheduler batch metadata did not become available",
+    ):
+        inference_cicd._assert_same_scheduler_batch(
+            object(),
+            object(),
+            "example_user_workflow",
+            ["run-1"],
+            expected_size=1,
+            metadata_timeout=0,
+            metadata_poll_interval=0,
+        )

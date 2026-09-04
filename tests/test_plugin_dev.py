@@ -3305,6 +3305,11 @@ def test_inference_worker_builds_structured_results_envelope_for_batch_item_comp
             "batch_results": [
                 {
                     "run_id": "batch-item-1",
+                    "batch_info": {
+                        "batch_id": "batch-1",
+                        "batch_size": 1,
+                        "flush_reason": "max_wait_ms",
+                    },
                     "payload": item_payload,
                     "result": {
                         "run_id": "batch-item-1",
@@ -3337,7 +3342,11 @@ def test_inference_worker_builds_structured_results_envelope_for_batch_item_comp
     assert forwarded["request"]["parameters"] == {"value": 5}
     assert forwarded["execution"]["run_id"] == "batch-item-1"
     assert forwarded["execution"]["status"] == "succeeded"
-    assert "batch_info" not in forwarded["execution"]
+    assert forwarded["execution"]["batch_info"] == {
+        "batch_id": "batch-1",
+        "batch_size": 1,
+        "flush_reason": "max_wait_ms",
+    }
     assert "batch_info" not in forwarded["payload"]
     assert forwarded["execution"]["output_path"] == "/tmp/batch-item-1/result.json"
     assert forwarded["payload"] == {"value": 5}

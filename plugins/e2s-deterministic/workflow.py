@@ -41,7 +41,9 @@ class DeterministicWorkflow(Earth2Workflow):
 
     name = "deterministic_workflow"
     description = "Earth2Studio deterministic forecast workflow with visualization"
+    cache_scope = "process"
     model_cache_names = ["DLWP", "FCN", "FCN3"]
+    cache_preserve_attributes = ("_packages", "_models", "_data_sources")
 
     def __init__(self) -> None:
         super().__init__()
@@ -83,6 +85,11 @@ class DeterministicWorkflow(Earth2Workflow):
         data = GFS()
         self._data_sources[normalized] = data
         return data
+
+    def warmup(self, _ctx: dict[str, Any]) -> dict[str, list[str]]:
+        self._model_for_type("fcn")
+        self._data_for_source("gfs")
+        return {"model_names": ["DLWP", "FCN", "FCN3"]}
 
     def __call__(
         self,
@@ -214,19 +221,20 @@ class DeterministicWorkflow(Earth2Workflow):
             raise
 
     def cleanup(self) -> None:
+        # Package HTTP sessions may be shared by Earth2 package caches.
+        # Drop package refs before generic cleanup to avoid closing shared clients.
+        self._clear_attributes("_packages")
         try:
             super().cleanup()
         finally:
             from plugin_sdk import cleanup_earth2_runtime_resources
 
-            try:
-                cleanup_earth2_runtime_resources(
-                    *list((self._models or {}).values()),
-                    *list((self._data_sources or {}).values()),
-                )
-            finally:
-                self._clear_attributes("_packages", "_models", "_data_sources")
-                self._cleanup_torch_runtime()
+            cleanup_earth2_runtime_resources(
+                *list((self._models or {}).values()),
+                *list((self._data_sources or {}).values()),
+            )
+            self._clear_attributes("_models", "_data_sources")
+            self._cleanup_torch_runtime()
 
 
 WORKFLOW = DeterministicWorkflow

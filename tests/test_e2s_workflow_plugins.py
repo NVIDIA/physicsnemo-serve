@@ -298,6 +298,7 @@ def _install_subprocess_earth2_fakes(
 from __future__ import annotations
 
 import os
+import json
 import signal
 import sys
 import threading
@@ -344,10 +345,17 @@ class ZarrBackend:
 
 def deterministic(_times, _nsteps, _model, _data, io):
     sync_dir = Path(os.environ["E2S_TEST_INFERENCE_SYNC_DIR"])
+    data_cache = Path(os.environ["EARTH2STUDIO_DATA_CACHE"])
     sync_dir.mkdir(parents=True, exist_ok=True)
     marker = sync_dir / f"inference-{os.getpid()}"
     marker.write_text(
-        str(threading.current_thread() is threading.main_thread()),
+        json.dumps(
+            {
+                "main_thread": threading.current_thread() is threading.main_thread(),
+                "data_cache": str(data_cache),
+                "data_cache_existed": data_cache.is_dir(),
+            }
+        ),
         encoding="utf-8",
     )
     deadline = time.monotonic() + 10
@@ -1326,32 +1334,6 @@ def test_e2s_deterministic_cleanup_releases_runtime_resources_and_torch_memory(
     assert cuda_empty_cache_calls == ["empty_cache"]
 
 
-def test_e2s_deterministic_gfs_cache_is_request_scoped(tmp_path: Path, monkeypatch):
-    _install_fake_earth2_runtime(monkeypatch)
-    module = _load_module(
-        "e2s_deterministic_request_scoped_gfs",
-        PLUGIN_DETERMINISTIC / "workflow.py",
-    )
-
-    first_workflow = module.WORKFLOW()
-    second_workflow = module.WORKFLOW()
-    first_gfs = first_workflow._data_for_source("gfs")
-    second_gfs = second_workflow._data_for_source("gfs")
-    first_cache = Path(first_gfs.cache)
-    second_cache = Path(second_gfs.cache)
-
-    assert first_gfs is not second_gfs
-    assert first_cache != second_cache
-    assert first_cache.is_dir()
-    assert second_cache.is_dir()
-
-    first_workflow.cleanup()
-    second_workflow.cleanup()
-
-    assert not first_cache.exists()
-    assert not second_cache.exists()
-
-
 def test_earth2_workflow_cleanup_removes_staged_zarr_output_after_failure(
     tmp_path: Path, monkeypatch
 ):
@@ -1477,9 +1459,14 @@ def test_workflow_executor_env_parallelism_reaches_e2s_deterministic_inference(
     assert all(Path(path).exists() for path in output_paths)
     inference_markers = list(sync_dir.glob("inference-*"))
     assert len(inference_markers) == item_count
-    assert all(
-        marker.read_text(encoding="utf-8") == "True" for marker in inference_markers
-    )
+    inference_records = [
+        json.loads(marker.read_text(encoding="utf-8")) for marker in inference_markers
+    ]
+    assert all(record["main_thread"] for record in inference_records)
+    assert all(record["data_cache_existed"] for record in inference_records)
+    data_cache_paths = [Path(record["data_cache"]) for record in inference_records]
+    assert len(set(data_cache_paths)) == item_count
+    assert all(not path.exists() for path in data_cache_paths)
 
 
 # ===========================================================================

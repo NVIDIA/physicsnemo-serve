@@ -45,6 +45,7 @@ import os
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import traceback
@@ -131,15 +132,19 @@ def _execute_plugin_item_subprocess(
     }
     child_env = os.environ.copy()
     child_env["PHYSICSNEMO_SERVE_MAX_BATCH_PARALLEL_ITEMS"] = "1"
-    completed = subprocess.run(
-        [sys.executable, str(ITEM_RUNNER_PATH)],
-        input=json.dumps(request),
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        env=child_env,
-        check=False,
-    )
+    with tempfile.TemporaryDirectory(
+        prefix="physicsnemo-item-data-cache-"
+    ) as data_cache_dir:
+        child_env["EARTH2STUDIO_DATA_CACHE"] = data_cache_dir
+        completed = subprocess.run(
+            [sys.executable, str(ITEM_RUNNER_PATH)],
+            input=json.dumps(request),
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=child_env,
+            check=False,
+        )
     if completed.stderr:
         sys.stderr.write(completed.stderr)
         sys.stderr.flush()

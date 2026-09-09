@@ -1312,6 +1312,9 @@ def execute(ctx):
     signal.signal(signal.SIGUSR1, signal.SIG_IGN)
     parameters = ctx["parameters"]
     sync_dir = Path(parameters["sync_dir"])
+    data_cache = Path(os.environ["EARTH2STUDIO_DATA_CACHE"])
+    if not data_cache.is_dir():
+        raise RuntimeError("parallel item data cache does not exist")
     sync_dir.mkdir(parents=True, exist_ok=True)
     marker = sync_dir / f"ready-{os.getpid()}"
     marker.write_text(ctx["run_id"], encoding="utf-8")
@@ -1332,6 +1335,8 @@ def execute(ctx):
         "main_thread": threading.current_thread() is threading.main_thread(),
         "batch_id_seen": ctx.get("batch_id"),
         "batch_info_seen": ctx.get("batch_info"),
+        "data_cache": str(data_cache),
+        "data_cache_existed": data_cache.is_dir(),
     }
 """.strip(),
     )
@@ -2386,10 +2391,13 @@ def test_inference_worker_parallel_batch_uses_isolated_main_thread_processes(
     plugin_root = create_process_isolation_plugin(tmp_path)
     module = load_inference_worker_module()
     sync_dir = tmp_path / "sync"
+    worker_data_cache = tmp_path / "worker-data-cache"
+    worker_data_cache.mkdir()
 
     monkeypatch.setenv("PLUGIN_DIR", str(plugin_root.parent))
     monkeypatch.setenv("DEFAULT_OUTPUT_DIR", str(tmp_path / "outputs"))
     monkeypatch.setenv("PHYSICSNEMO_SERVE_MAX_BATCH_PARALLEL_ITEMS", "2")
+    monkeypatch.setenv("EARTH2STUDIO_DATA_CACHE", str(worker_data_cache))
     monkeypatch.delenv("REDIS_URL", raising=False)
 
     items = []
@@ -2432,6 +2440,12 @@ def test_inference_worker_parallel_batch_uses_isolated_main_thread_processes(
     assert all(item_result["main_thread"] for item_result in item_results)
     assert all(item_result["batch_id_seen"] is None for item_result in item_results)
     assert all(item_result["batch_info_seen"] is None for item_result in item_results)
+    assert all(item_result["data_cache_existed"] for item_result in item_results)
+    data_cache_paths = [Path(item_result["data_cache"]) for item_result in item_results]
+    assert len(set(data_cache_paths)) == len(items)
+    assert worker_data_cache not in data_cache_paths
+    assert all(not path.exists() for path in data_cache_paths)
+    assert worker_data_cache.is_dir()
 
 
 def test_inference_worker_uses_run_batch_for_single_item_execution(
@@ -2492,9 +2506,13 @@ def test_inference_worker_parallel_batch_persists_child_failure_details(
         + ("x" * module.MAX_CHILD_ERROR_CHARS)
         + "\nValueError: invalid plugin input"
     )
+    child_cache_paths: list[Path] = []
 
     def fail_item_process(command, **kwargs):
         assert kwargs["stderr"] is subprocess.PIPE
+        data_cache_path = Path(kwargs["env"]["EARTH2STUDIO_DATA_CACHE"])
+        assert data_cache_path.is_dir()
+        child_cache_paths.append(data_cache_path)
         return subprocess.CompletedProcess(
             command,
             returncode=1,
@@ -2540,6 +2558,36 @@ def test_inference_worker_parallel_batch_persists_child_failure_details(
     captured_stderr = capsys.readouterr().err
     assert expected_error in captured_stderr
     assert discarded_diagnostic in captured_stderr
+    assert len(child_cache_paths) == 1
+    assert not child_cache_paths[0].exists()
+
+
+def test_inference_worker_cleans_item_data_cache_when_subprocess_launch_raises(
+    tmp_path: Path, monkeypatch
+):
+    module = load_inference_worker_module()
+    worker_data_cache = tmp_path / "worker-data-cache"
+    worker_data_cache.mkdir()
+    child_cache_paths: list[Path] = []
+
+    monkeypatch.setenv("EARTH2STUDIO_DATA_CACHE", str(worker_data_cache))
+
+    def raise_from_item_process(_command, **kwargs):
+        data_cache_path = Path(kwargs["env"]["EARTH2STUDIO_DATA_CACHE"])
+        assert data_cache_path.is_dir()
+        child_cache_paths.append(data_cache_path)
+        raise OSError("item process launch failed")
+
+    monkeypatch.setattr(module.subprocess, "run", raise_from_item_process)
+
+    with pytest.raises(OSError, match="item process launch failed"):
+        module._execute_plugin_item_subprocess("demo", "run-1", {}, {})
+
+    assert len(child_cache_paths) == 1
+    assert child_cache_paths[0] != worker_data_cache
+    assert not child_cache_paths[0].exists()
+    assert os.environ["EARTH2STUDIO_DATA_CACHE"] == str(worker_data_cache)
+    assert worker_data_cache.is_dir()
 
 
 def test_inference_worker_builds_structured_results_envelope_for_direct_execute_completion():

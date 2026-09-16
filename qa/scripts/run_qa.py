@@ -132,6 +132,23 @@ ALL_WORKFLOW_PLUGIN_IDS = [
 
 
 WORKFLOW_ALL = "__all__"
+PARALLEL_BATCH_QA_WORKFLOW_ID = "e2s-example-user"
+PARALLEL_BATCH_QA_MAX_ITEMS = 4
+
+
+def parallel_batch_qa_container_envs(
+    *, service: str, workflow_id: str, suite: str
+) -> list[str]:
+    """Return container configuration for the live parallel-batch QA case."""
+    if (
+        service == "rust"
+        and workflow_id == PARALLEL_BATCH_QA_WORKFLOW_ID
+        and suite in {"cicd", "full"}
+    ):
+        return [
+            f"PHYSICSNEMO_SERVE_MAX_BATCH_PARALLEL_ITEMS={PARALLEL_BATCH_QA_MAX_ITEMS}"
+        ]
+    return []
 
 
 def determine_e2s_workflows(
@@ -1013,6 +1030,13 @@ def run_one_workflow(
 
     is_single_deploy = workflow_id == WORKFLOW_ALL
     deploy_container_envs = list(container_envs or [])
+    deploy_container_envs.extend(
+        parallel_batch_qa_container_envs(
+            service=service,
+            workflow_id=workflow_id,
+            suite=suite,
+        )
+    )
     if not is_single_deploy:
         deploy_container_envs.append(
             f"PHYSICSNEMO_SERVE_ENABLED_PLUGIN_ID={workflow_id}"

@@ -394,6 +394,8 @@ COPY python/e2s_tools /app/python/e2s_tools
 COPY python/e2s_workflow.py /app/python/e2s_workflow.py
 # Copy import-light execution primitives shared by PhysicsNeMo-CFD plugins.
 COPY python/physicsnemo_cfd_runtime /app/python/physicsnemo_cfd_runtime
+# Copy the serve-owned per-item batch execution coordinator.
+COPY python/batch_runtime.py /app/python/batch_runtime.py
 
 # Copy entrypoint scripts (supervisor-based process management)
 COPY scripts /app/scripts

@@ -1,0 +1,16 @@
+{
+  "format_version": 2,
+  "name": "configured-affine",
+  "version": "0.1.0",
+  "adapter": "adapter.py",
+  "source": [],
+  "checkpoint": "checkpoint-a.pt",
+  "config": {"offset": 3.0},
+  "assets": {"normalization": "normalization.json"},
+  "input_names": ["input"],
+  "output_names": ["output"],
+  "backends": ["aoti"],
+  "executor": "local",
+  "device": "cpu",
+  "output_root": "builds"
+}

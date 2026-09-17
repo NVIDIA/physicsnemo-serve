@@ -1,0 +1,9 @@
+# Inference development
+
+Read README.md before changing behavior. Keep generated artifacts and test evidence outside versioned source.
+
+Use red–green TDD for behavioral changes: write the smallest meaningful test, execute it and record the intended assertion failure, implement the behavior, then rerun the unchanged test and affected regressions. Missing imports, dependencies or GPU do not establish behavioral red. Mechanical source migration uses before/after characterization. Never weaken existing tests.
+
+Run core and launcher checks locally; validate CUDA behavior on the authorized H100 via `ssh root@r0whe339-zhiweis-dev-dbg2.ext-nv-stg-lepton.teleport.sh`. All remote copies belong in a unique task directory below `/mnt/my_lfs_data/Projects`. Preserve other checkouts. Record commands, source identity, hardware and actual results.
+
+Customer names: PhysicsNeMo Model Builder and PhysicsNeMo C++ Inference SDK. The builder component lives in native-inference/model-builder/; its checkout launcher is native-inference/physicsnemo-model-builder and its installed command is physicsnemo-model-builder. Public C++ headers use physicsnemo/inference/, the namespace is physicsnemo::inference, the CMake package is PhysicsNeMoInference with target PhysicsNeMoInference::runtime, and the executable is physicsnemo-infer. New builder outputs use model/backends/<backend>/ directly, with model.pt2 (AOTI) or model.plan (TensorRT) beside model.json. ONNX import places model.onnx at the package root and keeps external weights at graph-declared relative paths. Loading uses model.json and its relative artifact paths rather than a directory suffix; preserve compatibility with older nested payload paths. Preserve pnmir_build/pnmir_export Python imports, existing PNMIR_* build options, serialized manifest/report schemas, and legacy .pnmir and .pnm-model package compatibility.

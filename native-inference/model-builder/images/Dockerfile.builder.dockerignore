@@ -1,0 +1,17 @@
+**
+!native-inference/
+!native-inference/**
+native-inference/**/__pycache__/
+native-inference/**/*.pyc
+native-inference/**/*.egg-info/
+native-inference/**/build/
+native-inference/**/dist/
+native-inference/**/.env
+native-inference/**/.venv/
+native-inference/**/*.pt
+native-inference/**/*.pt2
+native-inference/**/*.pth
+native-inference/**/*.mdlus
+native-inference/**/*.onnx
+native-inference/**/*.engine
+native-inference/**/*.safetensors

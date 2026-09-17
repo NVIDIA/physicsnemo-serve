@@ -1,0 +1,29 @@
+{
+  "format_version": 1,
+  "model": {
+    "name": "identity",
+    "version": "0.1.0"
+  },
+  "inputs": [
+    {
+      "name": "input",
+      "dtype": "float32",
+      "shape": [-1]
+    }
+  ],
+  "outputs": [
+    {
+      "name": "output",
+      "dtype": "float32",
+      "shape": [-1]
+    }
+  ],
+  "artifacts": [
+    {
+      "backend": "mock",
+      "target": "cpu",
+      "precision": "fp32",
+      "path": "identity.mock"
+    }
+  ]
+}

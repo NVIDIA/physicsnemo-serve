@@ -1,0 +1,17 @@
+{
+  "format_version": 2,
+  "name": "geotransolver-surface-core",
+  "version": "0.501",
+  "adapter": "adapter.py",
+  "source": [],
+  "config": "prepared/config.json",
+  "checkpoint": "prepared/checkpoint.pt",
+  "assets": {"fixtures": "prepared/fixtures.pt"},
+  "input_names": ["local_embedding", "local_features", "static_context", "global_embedding"],
+  "output_names": ["surface_fields_standardized"],
+  "backends": ["aoti", "tensorrt"],
+  "aoti_profile": "aten-boundary-exact-v2",
+  "executor": "local",
+  "device": "cuda",
+  "output_root": "builds"
+}

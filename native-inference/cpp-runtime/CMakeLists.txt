@@ -309,7 +309,7 @@ if(PNMIR_ENABLE_TENSORRT)
     REQUIRED
   )
 
-  add_library(pnmir_tensorrt src/tensorrt_backend.cpp)
+  add_library(pnmir_tensorrt src/tensorrt/tensorrt_backend.cpp)
   add_library(PhysicsNeMoInference::tensorrt ALIAS pnmir_tensorrt)
   set_target_properties(pnmir_tensorrt PROPERTIES OUTPUT_NAME physicsnemo_inference_tensorrt EXPORT_NAME tensorrt)
   target_include_directories(pnmir_tensorrt

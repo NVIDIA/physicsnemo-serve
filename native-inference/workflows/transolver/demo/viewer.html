@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>PhysicsNeMo · Native workflow results</title>
+<style>
+:root{color-scheme:dark;--bg:#0c1114;--panel:#141c21;--line:#2a363d;--text:#f1f5f6;--muted:#a8bbc5;--green:#a3e635;--blue:#72c7ef}
+*{box-sizing:border-box}body{margin:0;background:radial-gradient(ellipse at 82% 0,#17302a 0,transparent 40%),var(--bg);font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:var(--text)}button,select,input{font:inherit}button,select{color:var(--text);background:#1d2931;border:1px solid #3a4a53;border-radius:7px;padding:8px 13px;cursor:pointer}button:hover,select:hover{border-color:var(--green)}button:focus-visible,select:focus-visible,input:focus-visible,a:focus-visible{outline:2px solid var(--green);outline-offset:3px}button.primary{color:#112008;background:var(--green);border-color:var(--green);font-weight:650}a{color:var(--blue)}.shell{max-width:1580px;margin:auto;padding:30px 38px 24px}.eyebrow{color:var(--green);font-size:11px;letter-spacing:2.3px;font-weight:750;text-transform:uppercase}header{display:flex;align-items:flex-start;justify-content:space-between;gap:25px;margin-bottom:21px}h1{font-size:35px;line-height:1.15;letter-spacing:-1.1px;font-weight:600;margin:9px 0}h2{font-size:17px;font-weight:600;margin:0}p{margin:4px 0;color:var(--muted)}.head-actions{display:flex;gap:9px;margin-top:23px}.flow{display:flex;align-items:center;gap:18px;border-block:1px solid var(--line);padding:13px 0;margin:19px 0 20px;color:var(--muted);font-size:13px}.flow b{color:#e4eee8;font-weight:500}.flow span::before{content:'✓';display:inline-grid;place-items:center;width:21px;height:21px;border:1px solid #4c633c;border-radius:50%;color:var(--green);margin-right:8px;font-size:11px}.flow i{font-style:normal;color:#647681}.flow .end{color:var(--green)}.metrics{display:grid;grid-template-columns:1fr 1.1fr 1.6fr;gap:20px;margin-bottom:22px}.metric{padding-left:15px;border-left:2px solid #3a4f58}.metric.match{border-color:var(--green)}.metric-label{font-size:11px;letter-spacing:1.1px;text-transform:uppercase;color:var(--muted)}.metric-value{font-size:22px;letter-spacing:-.45px;line-height:1.4}.metric-detail{font-size:12px;color:var(--muted)}.layout{display:grid;grid-template-columns:minmax(0,1fr) 340px;gap:18px}.panel{background:var(--panel);border:1px solid var(--line);border-radius:12px;overflow:hidden}.panel-top{padding:17px 20px 0;display:flex;align-items:center;justify-content:space-between;gap:15px}.sub{font-size:12px;color:var(--muted)}.toolbar{display:flex;align-items:center;gap:8px}.plot{width:100%}.patch-plot{height:330px}.context-plot{height:205px}.series-plot{height:145px}.panel-foot{padding:0 20px 16px;font-size:12px;color:var(--muted)}.legend-dot{display:inline-block;height:8px;width:8px;border-radius:50%;background:var(--green);margin-right:6px}.context-note{padding:0 20px 17px;font-size:12px;color:var(--muted)}.context-note strong{color:var(--text);font-weight:500}.result-inspector{padding:17px 20px}.section-label{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px}.cell-id{font:12px ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--green)}.value-row{display:flex;justify-content:space-between;border-bottom:1px solid #253139;padding:7px 0;font-size:13px}.value-row span{color:var(--muted)}.value-row b{font-weight:500;font-variant-numeric:tabular-nums}.unit{font-size:11px;color:var(--muted);margin-left:5px}input[type=range]{width:100%;accent-color:var(--green);margin:17px 0 3px;cursor:pointer}.range-labels{display:flex;justify-content:space-between;color:var(--muted);font-size:11px}.right-column{display:flex;flex-direction:column;gap:18px}.chart-panel{margin-top:18px}.details{margin-top:18px;border-top:1px solid var(--line);padding-top:12px;font-size:12px;color:var(--muted)}details summary{cursor:pointer;color:#c8d5dc;list-style:none}details summary::before{content:'＋';margin-right:9px;color:var(--green)}details[open] summary::before{content:'−'}.run-details{display:grid;grid-template-columns:1fr 1fr;gap:20px;padding:13px 0 4px}.run-details dl{margin:0}.run-details dt{float:left;clear:left;color:#8da4b0;width:130px;padding:3px 0}.run-details dd{margin-left:140px;padding:3px 0;overflow-wrap:anywhere}.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px}footer{display:flex;justify-content:space-between;gap:20px;margin-top:15px;font-size:11px;color:#8da4b0}.status{color:var(--green)}.failed{color:#f5bd7d}.no-script{padding:20px;background:#403023}.select-label{font-size:12px;color:var(--muted)}.timing{padding:16px 20px;border-top:1px solid var(--line);font-size:12px}.timing-line{display:flex;justify-content:space-between;margin-bottom:3px}.timing-line span{color:var(--muted)}.mini{font-size:11px;color:#93a9b5;margin-top:7px}.error{padding:20px;color:#ffc8b8}#fatal{display:none}#context-view .modebar{display:none}.plotly .modebar{background:transparent!important}
+.shell{padding:24px 32px 18px}header{margin-bottom:15px}h1{font-size:32px;margin:8px 0 5px}.eyebrow{line-height:1}header p{font-size:13px}.flow{padding:10px 0;margin:14px 0 16px}.metrics{margin-bottom:16px}.panel-top{padding:14px 18px 0}.context-plot{height:170px}.context-note{padding:0 18px 14px;font-size:11px;line-height:1.45}.result-inspector{padding:14px 18px}.section-label{margin-bottom:8px}.value-row{padding:5px 0;font-size:12px}input[type=range]{margin:12px 0 3px}.timing{padding:12px 18px;font-size:11px}.mini{font-size:10px}.right-column{gap:14px}.details{margin-top:14px}footer{margin-top:12px}
+@media(min-width:1000px) and (max-height:950px){.shell{padding-top:18px}h1{font-size:29px}.flow{margin:10px 0 12px;padding:7px 0}.metrics{margin-bottom:12px}.metric-value{font-size:19px}.context-plot{height:145px}.patch-plot{height:290px!important}.series-plot{height:130px!important}.context-note{padding-bottom:11px}.result-inspector{padding-top:11px;padding-bottom:11px}.value-row{padding:3px 0}.timing{padding:9px 18px}.panel-top{padding-top:11px}}
+@media(min-width:1500px){.patch-plot{height:355px}.series-plot{height:155px}}
+@media(max-width:1050px){.shell{padding:22px}.layout{grid-template-columns:minmax(0,1fr) 285px}.toolbar{gap:5px}.panel-top{padding:15px 14px 0}.head-actions{flex-direction:column;margin-top:10px}.metric-value{font-size:19px}.patch-plot{height:330px}}
+@media(max-width:780px){header{display:block}.head-actions{flex-direction:row;margin:15px 0}.layout{grid-template-columns:1fr}.metrics{gap:12px;grid-template-columns:1fr}.flow{gap:8px;flex-wrap:wrap}.run-details{grid-template-columns:1fr}.shell{padding:18px 12px}.panel-top{flex-wrap:wrap}.patch-plot{height:360px}footer{flex-direction:column;gap:4px}.right-column{display:grid;grid-template-columns:1fr}.context-plot{height:255px}}
+</style>
+<script>__PLOTLY_JS__</script>
+</head>
+<body>
+<noscript><div class="no-script">Enable JavaScript to explore the embedded results. This file runs offline.</div></noscript>
+<div class="shell">
+<header><div><div class="eyebrow">PhysicsNeMo / Final demo</div><h1>From mesh to prediction.</h1><p>Native C++ workflow · Transolver surface inference</p></div><div class="head-actions"><button id="download">Download fields CSV</button><button id="fullscreen" class="primary">Present fullscreen</button></div></header>
+<div class="flow" aria-label="Completed workflow"><span>Raw geometry</span><i>→</i><span>C++ preprocessing</span><i>→</i><span>Native inference</span><i>→</i><span class="end">Physical fields</span></div>
+<div id="fatal" class="error" role="alert"></div>
+<section class="metrics" aria-label="Run summary">
+ <div class="metric"><div class="metric-label">Predicted region</div><div class="metric-value" id="cell-count"></div><div class="metric-detail" id="coverage"></div></div>
+ <div class="metric"><div class="metric-label">Execution</div><div class="metric-value" id="backend"></div><div class="metric-detail">One native process · raw mesh to physical units</div></div>
+ <div class="metric" id="match-card"><div class="metric-label">Reference comparison</div><div class="metric-value" id="validation"></div><div class="metric-detail" id="validation-note"></div></div>
+</section>
+<div class="layout">
+ <main>
+  <section class="panel" id="surface-panel" aria-label="Predicted surface">
+   <div class="panel-top"><div><h2 id="surface-title">Predicted surface patch</h2><div class="sub">Actual source cells · drag to rotate · scroll to zoom</div></div><div class="toolbar"><label class="select-label" for="field">Field</label><select id="field"><option value="pressure">Pressure</option><option value="wss">Wall shear stress · magnitude</option><option value="wss_x">WSS · x</option><option value="wss_y">WSS · y</option><option value="wss_z">WSS · z</option></select><button id="reset" title="Reset patch camera">Reset view</button></div></div>
+   <div id="patch-view" class="plot patch-plot"></div>
+   <div class="panel-foot" id="surface-note">Flat colors show each cell’s prediction. Hover a point or select a cell below.</div>
+  </section>
+  <section class="panel chart-panel" aria-label="Field values across predicted cells"><div class="panel-top"><h2 id="series-title">Pressure across sampled cells</h2><span class="sub">Source-cell order</span></div><div id="series-view" class="plot series-plot"></div></section>
+ </main>
+ <aside class="right-column">
+  <section class="panel" aria-label="Whole car context"><div class="panel-top"><div><h2 id="context-heading">Where the sample sits</h2><div class="sub" id="mesh-name"></div></div></div><div id="context-view" class="plot context-plot"></div><div class="context-note" id="context-note"><span class="legend-dot"></span><strong>Predicted patch location</strong><br>Gray geometry is context; it has no displayed predictions.</div></section>
+  <section class="panel" aria-label="Selected cell values"><div class="result-inspector"><div class="section-label"><h2>Inspect a cell</h2><span id="selected-id" class="cell-id"></span></div><div id="cell-values"></div><input type="range" id="cell-slider" min="0" value="0" step="1" aria-label="Selected source cell"><div class="range-labels"><span>First source cell</span><span id="last-cell"></span></div></div><div class="timing"><div class="timing-line"><span>Geometry preparation</span><b id="prep-time"></b></div><div class="timing-line"><span>Native inference stage</span><b id="infer-time"></b></div><div class="mini">This run’s inference stage includes batching, decoding and output copies.</div></div></section>
+ </aside>
+</div>
+<details class="details"><summary>Run details &amp; validation evidence</summary><div class="run-details"><dl id="run-info"></dl><dl id="evidence-info"></dl></div></details>
+<footer><span id="scope"></span><span>Interactive result · self-contained, offline HTML</span></footer>
+</div>
+<script id="result-data" type="application/json">__RESULT_DATA__</script>
+<script>
+'use strict';
+(async function(){
+ const data=JSON.parse(document.getElementById('result-data').textContent);
+ const meta=data.metadata, count=data.summary.point_count, ids=data.prediction_mesh.source_cell_ids;
+ const complete=count===data.summary.source_cell_count, provenance=data.mesh_provenance;
+ const seriesSuffix=complete?' across surface cells':' across sampled cells';
+ const el=id=>document.getElementById(id), fmt=(n,d=3)=>Number(n).toLocaleString('en-US',{maximumFractionDigits:d,minimumFractionDigits:d});
+ const columns={pressure:{label:'Pressure',get:r=>r[0],colors:'RdBu'},wss:{label:'Wall shear stress magnitude',get:r=>Math.hypot(r[1],r[2],r[3]),colors:'Viridis'},wss_x:{label:'Wall shear stress · x',get:r=>r[1],colors:'RdBu'},wss_y:{label:'Wall shear stress · y',get:r=>r[2],colors:'RdBu'},wss_z:{label:'Wall shear stress · z',get:r=>r[3],colors:'RdBu'}};
+ let selected=0,active='pressure';
+ el('cell-count').textContent=count.toLocaleString()+' surface cells';
+ el('coverage').textContent=complete?'All '+count.toLocaleString()+' cells'+(provenance?' · '+provenance.label.toLowerCase():' of the source mesh'):'First '+count.toLocaleString()+' of '+data.summary.source_cell_count.toLocaleString()+' source cells';
+ el('surface-title').textContent=complete?'Full-car surface':'Predicted surface patch';
+ el('series-title').textContent=columns.pressure.label+seriesSuffix;
+ if(complete){el('surface-panel').ariaLabel='Full-car predicted surface';el('reset').title='Reset car camera';el('context-heading').textContent='Complete car geometry';el('context-note').textContent='Original geometry in gray. Every cell of the'+(provenance?' coarsened':'')+' surface has a prediction in the main view.';el('surface-note').textContent='Every triangle shows its cell’s native prediction'+(provenance?' on the coarsened mesh':'')+'. Hover a point or select a cell below.';}
+ el('backend').textContent=String(data.summary.backend).toUpperCase()+' · CUDA';
+ el('mesh-name').textContent=data.summary.mesh_name;
+ el('cell-slider').max=count-1;el('last-cell').textContent='Cell '+ids[count-1];
+ const matched=data.validation.status==='matched';
+ el('validation').textContent=matched?'Byte-identical to Python':'Not compared';
+ el('validation-note').textContent=matched?'Matches saved reference: inputs + standardized + physical fields':'This result has no attached reference comparison.';
+ el('match-card').classList.toggle('match',matched);el('validation').classList.add(matched?'status':'failed');
+ const time=ms=>ms>=1000?fmt(ms/1000,2)+' s':fmt(ms,1)+' ms';
+ el('prep-time').textContent=time(data.summary.preparation_ms);el('infer-time').textContent=time(data.summary.inference_ms);
+ el('scope').textContent=complete?'Complete'+(provenance?' coarsened':'')+' car surface · numerical agreement, not full-resolution CFD accuracy':'Bounded '+count+'-cell demo · numerical agreement, not full-car CFD accuracy';
+ function addEntry(target,key,value,mono=false){const dt=document.createElement('dt'),dd=document.createElement('dd');dt.textContent=key;dd.textContent=value;if(mono)dd.className='mono';target.append(dt,dd)}
+ for(const [key,value] of [['Backend',meta.backend],['Device',meta.device],['Block size',meta.block_size],['Permutation seed',meta.permutation_seed],['Air density',meta.air_density+' kg/m³'],['Stream velocity',meta.stream_velocity+' m/s'],['Mesh',meta.mesh],['Package',meta.package]])addEntry(el('run-info'),key,value,key==='Package'||key==='Mesh');
+ if(provenance){addEntry(el('run-info'),'Surface mesh',provenance.label);addEntry(el('run-info'),'Original cells',provenance.source_cell_count.toLocaleString());addEntry(el('run-info'),'Mesh processing',provenance.method);addEntry(el('evidence-info'),'Mesh SHA-256',provenance.mesh_sha256,true);}
+ addEntry(el('evidence-info'),'Comparison',data.validation.label);
+ addEntry(el('evidence-info'),'Physical SHA-256',data.hashes.physical_output,true);
+ addEntry(el('evidence-info'),'Model SHA-256',data.hashes.standardized_output,true);
+ if(data.validation.reference_report)addEntry(el('evidence-info'),'Reference report',data.validation.reference_report,true);
+ function xyz(vertices){return{x:vertices.map(p=>p[0]),y:vertices.map(p=>p[1]),z:vertices.map(p=>p[2])}}
+ function ijk(triangles){return{i:triangles.map(t=>t[0]),j:triangles.map(t=>t[1]),k:triangles.map(t=>t[2])}}
+ const patch=data.prediction_mesh,context=data.context_mesh,centers=data.centers;
+ const base={paper_bgcolor:'rgba(0,0,0,0)',plot_bgcolor:'rgba(0,0,0,0)',font:{family:'Arial, sans-serif',color:'#a8bbc5',size:12},margin:{l:10,r:12,t:5,b:5},showlegend:false};
+ const hiddenAxis={visible:false,showgrid:false,zeroline:false,showbackground:false};
+ let normal=[0,0,0];for(const t of patch.triangles){const a=patch.vertices[t[0]],b=patch.vertices[t[1]],c=patch.vertices[t[2]],u=b.map((v,i)=>v-a[i]),v=c.map((q,i)=>q-a[i]);normal[0]+=u[1]*v[2]-u[2]*v[1];normal[1]+=u[2]*v[0]-u[0]*v[2];normal[2]+=u[0]*v[1]-u[1]*v[0]}
+ const norm=Math.hypot(...normal)||1;const carCamera={eye:{x:.7,y:1.45,z:.65},up:{x:0,y:0,z:1}};
+ const camera=complete?carCamera:{eye:{x:2.5*normal[0]/norm,y:2.5*normal[1]/norm,z:2.5*normal[2]/norm},up:{x:0,y:1,z:0}};
+ if(!complete&&Math.abs(normal[1]/norm)>.95)camera.up={x:0,y:0,z:1};
+ const scene={xaxis:hiddenAxis,yaxis:hiddenAxis,zaxis:hiddenAxis,aspectmode:'data',bgcolor:'rgba(0,0,0,0)',camera};
+ const config={responsive:true,displaylogo:false,modeBarButtonsToRemove:['toImage','resetCameraLastSave3d','hoverClosest3d','orbitRotation','tableRotation'],scrollZoom:true};
+ function fieldValues(){return data.fields.map(columns[active].get)}
+ function traces(){const values=fieldValues(),column=columns[active];let min=Infinity,max=-Infinity;for(const value of values){if(value<min)min=value;if(value>max)max=value}const span=max-min||Math.max(Math.abs(min)*.01,1);return[
+  {type:'mesh3d',...xyz(patch.vertices),...ijk(patch.triangles),intensity:patch.triangle_cell_ids.map(i=>values[i]),intensitymode:'cell',colorscale:column.colors,cmin:min,cmax:max===min?min+span:max,flatshading:true,lighting:{ambient:.85,diffuse:.4,specular:.1,roughness:1},colorbar:{title:{text:'Pa'},thickness:10,len:.7,x:.98,tickfont:{size:11},outlinewidth:0},hoverinfo:'skip'},
+  {type:'scatter3d',mode:'markers',...xyz(centers),marker:{size:count>2000?1:3,color:'#fff',opacity:complete?.015:count>2000?.08:.35},customdata:values.map((v,i)=>[ids[i],v]),hovertemplate:'Cell %{customdata[0]}<br>'+column.label+': %{customdata[1]:.4f} Pa<extra></extra>'},
+  {type:'scatter3d',mode:'markers',...xyz([centers[selected]]),marker:{size:7,color:'#a3e635',line:{width:2,color:'#fff'}},hoverinfo:'skip'}]}
+ await Plotly.newPlot(el('patch-view'),traces(),{...base,scene,uirevision:'patch'},config);
+ const location=centers.reduce((a,p)=>a.map((v,i)=>v+p[i]/count),[0,0,0]);
+ await Plotly.newPlot(el('context-view'),[
+  {type:'mesh3d',...xyz(context.vertices),...ijk(context.triangles),color:'#87949c',opacity:.65,flatshading:false,lighting:{ambient:.65,diffuse:.65,specular:.15},hoverinfo:'skip'},
+  ...complete?[]:[{type:'scatter3d',mode:'markers',...xyz([location]),marker:{size:7,color:'#a3e635',line:{color:'#eaffce',width:2}},hovertemplate:'Location of the '+count+' predicted cells<extra></extra>'}]
+ ],{...base,margin:{l:0,r:0,t:0,b:0},scene:{...scene,camera:{eye:{x:1.6,y:1.6,z:.85},up:{x:0,y:0,z:1}}}}, {...config,displayModeBar:false});
+ function seriesLayout(){return{...base,margin:{l:65,r:23,t:12,b:42},xaxis:{title:{text:'Source cell ID',font:{size:11}},gridcolor:'#26343d',zeroline:false,tickfont:{size:11}},yaxis:{title:{text:'Pa'},gridcolor:'#26343d',zeroline:false,tickfont:{size:11}},hovermode:'closest',shapes:[{type:'line',x0:ids[selected],x1:ids[selected],y0:0,y1:1,yref:'paper',line:{color:'#a3e635',width:1,dash:'dot'}}]}}
+ await Plotly.newPlot(el('series-view'),[{x:ids,y:fieldValues(),type:count>2000?'scattergl':'scatter',mode:count>2000?'lines':'lines+markers',line:{color:'#72c7ef',width:count>2000?1:2},marker:{size:4},hovertemplate:'Cell %{x}<br>%{y:.4f} Pa<extra></extra>'}],seriesLayout(),{responsive:true,displayModeBar:false});
+ function inspect(index){selected=Math.max(0,Math.min(count-1,Number(index)));el('cell-slider').value=selected;el('selected-id').textContent='CELL '+String(ids[selected]).padStart(3,'0');el('cell-values').replaceChildren();for(const key of ['pressure','wss','wss_x','wss_y','wss_z']){const div=document.createElement('div'),label=document.createElement('span'),value=document.createElement('b'),unit=document.createElement('small');div.className='value-row';label.textContent={pressure:'Pressure',wss:'WSS magnitude',wss_x:'WSS x',wss_y:'WSS y',wss_z:'WSS z'}[key];value.textContent=fmt(columns[key].get(data.fields[selected]));unit.className='unit';unit.textContent='Pa';value.append(unit);div.append(label,value);el('cell-values').append(div)}Plotly.restyle(el('patch-view'),{x:[[centers[selected][0]]],y:[[centers[selected][1]]],z:[[centers[selected][2]]]},[2]);Plotly.relayout(el('series-view'),{'shapes[0].x0':ids[selected],'shapes[0].x1':ids[selected]})}
+ el('cell-slider').addEventListener('input',e=>inspect(e.target.value));
+ el('patch-view').on('plotly_click',e=>{const p=e.points[0];if(p.curveNumber===1)inspect(p.pointNumber)});
+ el('series-view').on('plotly_click',e=>inspect(e.points[0].pointIndex));
+ el('field').addEventListener('change',async e=>{active=e.target.value;el('series-title').textContent=columns[active].label+seriesSuffix;await Plotly.react(el('patch-view'),traces(),{...base,scene,uirevision:'patch'},config);await Plotly.restyle(el('series-view'),{y:[fieldValues()]});inspect(selected)});
+ el('reset').addEventListener('click',()=>Plotly.relayout(el('patch-view'),{'scene.camera':camera}));
+ el('fullscreen').addEventListener('click',async()=>{try{if(!document.fullscreenElement){await document.documentElement.requestFullscreen();el('fullscreen').textContent='Exit fullscreen'}else{await document.exitFullscreen();el('fullscreen').textContent='Present fullscreen'}}catch{el('fullscreen').textContent='Use browser fullscreen'}});
+ el('download').addEventListener('click',()=>{const rows=['source_cell_id,x_m,y_m,z_m,pressure_Pa,wss_x_Pa,wss_y_Pa,wss_z_Pa,wss_magnitude_Pa',...data.fields.map((r,i)=>[ids[i],...centers[i],...r,Math.hypot(r[1],r[2],r[3])].join(','))];const url=URL.createObjectURL(new Blob([rows.join('\n')+'\n'],{type:'text/csv'})),a=document.createElement('a');a.href=url;a.download='transolver-surface-fields.csv';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000)});
+ inspect(0);window.viewerReady=true;
+})().catch(error=>{document.getElementById('fatal').style.display='block';document.getElementById('fatal').textContent='Could not display result: '+error.message;console.error(error)});
+</script>
+</body>
+</html>

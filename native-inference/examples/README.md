@@ -123,6 +123,20 @@ declared, hashed build inputs. The repository template remains two files;
 weights, libraries and outputs live in your copied project. See
 [input meanings, exact profiles and outputs](../docs/domino-workflow.md).
 
+## Transolver surface and native E2E CLI
+
+[`transolver-surface`](transolver-surface) exports the complete learned surface
+model from imported pretrained weights, using three deterministic 75-point
+cases and the `aten-boundary-exact-v2` AOTI profile. Its inputs are `fx [1,75,2]`
+and `embedding [1,75,6]`; its output is standardized pressure and WSS
+`[1,75,4]`.
+
+The [C++ Transolver workflow](../workflows/transolver/README.md) provides the
+complete commands to build the SDK, import the checkpoint, export this package,
+and run raw VTP/STL geometry through native preprocessing, inference, and
+physical-unit decoding with `physicsnemo-transolver`. It also accepts existing
+compatible volume packages and fixed-shape tail packages.
+
 ## Check and build
 
 After preparing or importing inputs above, set the compatible SDK path.

@@ -7,7 +7,7 @@ foreach(operator IN ITEMS linear gemm token_sum slice_bmm layer_norm softmax att
   else()
     set(extension cu)
   endif()
-  add_library(${plugin} SHARED src/tensorrt_exact_${operator}_plugin.${extension})
+  add_library(${plugin} SHARED src/tensorrt/tensorrt_exact_${operator}_plugin.${extension})
   set_target_properties(${plugin} PROPERTIES
     EXPORT_NAME tensorrt_exact_${operator}_plugin
     CUDA_STANDARD 17 CUDA_STANDARD_REQUIRED ON)

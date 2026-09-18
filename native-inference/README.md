@@ -83,6 +83,7 @@ for prerequisites and both-backend commands.
 | Export a DoMINO surface core | [External DoMINO example](docs/domino-workflow.md) |
 | Supply a custom model and weights | [Initialize, check and build your model](docs/add-model.md) |
 | Start from a model example | [Two-file templates and preparation](examples/README.md) |
+| Run raw mesh → native model → physical fields from the CLI | [C++ Transolver E2E workflow](workflows/transolver/README.md) |
 | Maintain an explicit model recipe | [Recipe/input contract](docs/model-inputs.md) |
 | Exercise export and native verification | [Bundled affine recipe](model-builder/models/affine/README.md) |
 | Find or move a graph/package | [Package and evidence contract](docs/packages.md) |
@@ -107,6 +108,8 @@ work for a release. See [package compatibility](docs/packages.md#deployment-and-
 The builder supports generic static FP32 AOTI/TensorRT recipes. The external
 GeoTransolver and DoMINO examples build surface cores using imported weights and
 synthetic feature inputs.
-Complete raw-mesh CFD flows,
-scientific model acceptance, remote build jobs and artifact publication
-remain planned.
+The [Transolver CLI example](workflows/transolver/README.md) runs raw surface
+and volume geometry through C++ preprocessing, SDK inference and physical-unit
+decoding. It includes a Model Builder project for a bounded surface case.
+Complete raw-mesh GeoTransolver/DoMINO flows, scientific model acceptance,
+remote build jobs and artifact publication remain planned.

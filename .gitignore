@@ -65,5 +65,15 @@ deploy/config.yaml
 # Model Builder candidates and native SDK builds
 /out/
 
-# Local customer demo scripts, recordings, and assets
-/reports/customer-demo-*/
+# Local reports, customer demo scripts, recordings, and assets
+/reports/
+
+# Local native inference agent instructions
+/native-inference/AGENTS.md
+
+# Local design documents and architecture assets
+/docs/assets/
+/docs/cpp-pnmir-worker-rust-ffi-design.md
+/docs/earthmover-hf-integration-design.md
+/docs/native-inference-architecture-diagram.md
+/docs/native-inference-overview-audit.md

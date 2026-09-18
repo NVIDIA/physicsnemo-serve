@@ -54,6 +54,10 @@ AOTI development consumers supply a compatible native Torch CMake prefix;
 ONNX Runtime and TensorRT consumers supply `PNMIR_ONNXRUNTIME_ROOT` or
 `PNMIR_TENSORRT_ROOT` with their native dependencies.
 
+For a complete external application, see the
+[Transolver E2E CLI example](../workflows/transolver/README.md). It links the
+installed SDK to C++ mesh preprocessing and physical-unit postprocessing.
+
 Static and shared core installs are tested for relocation. Optional GPU
 backend libraries are not bundled into a complete runtime distribution.
 AOTI source builds discover matching Torch through Python. Installed GPU

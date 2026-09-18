@@ -10,6 +10,7 @@ From the repository root, with Torch installed:
 python -m unittest discover -s native-inference/tests/examples/configured-affine -p 'test_*.py' -v
 python -m unittest discover -s native-inference/tests/examples/aoti-profiles -p 'test_*.py' -v
 python -m unittest discover -s native-inference/tests/examples/geotransolver-surface-core -p 'test_*.py' -v
+python -m unittest discover -s native-inference/tests/examples/transolver-surface -p 'test_*.py' -v
 ```
 
 `geotransolver-surface-core/test_minimal.py` exercises the current two-file
@@ -22,6 +23,11 @@ workflow. Its adapter, project template, and preparation code live under the
 test-only `geotransolver-surface-core/legacy/` directory. `qualification.py`
 retains its reference-validation support. These historical fixtures are neither
 installed with Model Builder nor needed by the current customer example.
+
+The Transolver surface tests verify its imported constructor, checkpoint,
+static tensor contract and deterministic cases using a tiny upstream model
+double. Native raw-mesh workflow tests are separate under
+[`workflows/transolver`](../../workflows/transolver/README.md).
 
 The GeoTransolver tests use a tiny upstream model double; they do not establish
 real-checkpoint GPU or scientific CFD accuracy.

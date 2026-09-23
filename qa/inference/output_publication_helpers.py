@@ -103,9 +103,9 @@ DEFAULT_PUBLICATION_REQUESTS: dict[str, dict] = {
         "perturbation": "gaussian",
         "noise_amplitude": 0.05,
     },
-    "earth2-ensemble-fanout": {
-        "model": "fcn",
-        "start_time": "2024-01-01T00:00:00",
+    "e2s-ensemble": {
+        "model_type": "fcn",
+        "forecast_times": ["2024-01-01T00:00:00"],
         "nsteps": 4,
         "nensemble": 64,
         "batch_size": 16,
@@ -113,7 +113,6 @@ DEFAULT_PUBLICATION_REQUESTS: dict[str, dict] = {
         "perturbation": "gaussian",
         "noise_amplitude": 0.15,
         "seed_base": 1000,
-        "perturbation_materialization_mode": "scheduled_gpu",
     },
 }
 

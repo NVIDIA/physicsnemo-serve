@@ -39,7 +39,7 @@ from plugin_runtime import (  # noqa: E402
     serialize_postprocess_result,
     serialize_prepare_result,
 )
-from plugin_sdk import OutputRegistry  # noqa: E402
+from plugin_sdk import OutputRegistry, is_scatter_result, serialize_scatter_result  # noqa: E402
 
 
 SUPPORTED_STAGE_HANDLERS = {
@@ -491,12 +491,18 @@ def _invoke_phase(
             result = serialize_prepare_result(result)
         elif phase == "postprocess":
             result = serialize_postprocess_result(result)
+        elif is_scatter_result(result):
+            result = serialize_scatter_result(result, payload)
         elif not isinstance(result, dict):
             raise TypeError(
                 f"Plugin workflow '{workflow_id}' hook '{phase}' returned "
                 f"{type(result).__name__}, expected dict"
             )
 
+    if is_scatter_result(result):
+        raise ValueError(
+            "Scatter requires the scheduler; direct inference cannot execute child rounds"
+        )
     if not isinstance(result, dict):
         raise TypeError(
             f"Plugin workflow '{workflow_id}' hook '{phase}' must return an object"

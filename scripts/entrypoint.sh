@@ -11,7 +11,7 @@
 #
 # Environment Variables:
 #   WORKERS          - Which workers to run (default: all)
-#                      Values: all, server, prepare, fanout, scheduler,
+#                      Values: all, server, prepare, scheduler,
 #                      prefetch, collect, postprocess, publish, results, execute, gpu,
 #                      or comma-separated list
 #   REDIS_URL        - Redis connection URL (default: redis://127.0.0.1:6379)
@@ -40,7 +40,7 @@
 #   docker run -p 8080:8080 -e WORKERS=server e2s-rust
 #
 #   # Run all orchestration workers without execute pools
-#   docker run -p 8080:8080 -e WORKERS=server,prepare,fanout,scheduler,prefetch,collect,postprocess,publish,results e2s-rust
+#   docker run -p 8080:8080 -e WORKERS=server,prepare,scheduler,prefetch,collect,postprocess,publish,results e2s-rust
 #
 #   # Run just prefetch worker
 #   docker run -e WORKERS=prefetch e2s-rust
@@ -356,52 +356,6 @@ EOF
             log "  + $prepare_display_name (priority=40)"
         else
             log "WARNING: no prepare worker binary available (worker-runtime)"
-        fi
-    fi
-
-    # Add fanout worker if requested (priority 45 = starts before scheduler)
-    if is_worker_requested "fanout"; then
-        local fanout_cmd=""
-        local fanout_display_name=""
-        if check_binary "$WORKER_RUNTIME_BIN" "worker-runtime"; then
-            if [[ -f "$WORKER_RUNTIME_CONFIG" ]]; then
-                cat > /tmp/fanout-runtime-wrapper.sh << EOF
-#!/bin/bash
-set -euo pipefail
-export WORKER_ROLE="fanout"
-export WORKER_PIPELINE_CONFIG="$WORKER_RUNTIME_CONFIG"
-exec "$WORKER_RUNTIME_BIN" --role fanout --config-path "$WORKER_RUNTIME_CONFIG"
-EOF
-                chmod +x /tmp/fanout-runtime-wrapper.sh
-                fanout_cmd="/tmp/fanout-runtime-wrapper.sh"
-                fanout_display_name="worker-runtime (role=fanout)"
-            else
-                log "WARNING: worker-runtime config not found at $WORKER_RUNTIME_CONFIG"
-            fi
-        fi
-
-        if [[ -n "$fanout_cmd" ]]; then
-            cat >> "$SUPERVISORD_CONF" << EOF
-
-[program:worker-runtime-fanout]
-command=$fanout_cmd
-directory=/app
-autostart=true
-autorestart=true
-startsecs=5
-startretries=3
-stopwaitsecs=30
-stopsignal=TERM
-priority=45
-redirect_stderr=true
-stdout_logfile=/dev/stdout
-stdout_logfile_maxbytes=0
-environment=RUST_LOG="$LOG_LEVEL",REDIS_URL="$REDIS_URL",QUEUE_CONFIG="$QUEUE_CONFIG",REDIS_STREAM_PREFIX="$REDIS_STREAM_PREFIX",WORKER_RUNTIME_CONFIG="$WORKER_RUNTIME_CONFIG"
-EOF
-            programs_added=$((programs_added + 1))
-            log "  + $fanout_display_name (priority=45)"
-        else
-            log "WARNING: no fanout worker binary available (worker-runtime)"
         fi
     fi
 

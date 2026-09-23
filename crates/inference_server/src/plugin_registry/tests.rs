@@ -1305,15 +1305,13 @@ fn build_pipeline_stages_supports_ensemble_parent_prefetch_with_postprocess() {
         vec![
             "prepare",
             "prefetch",
-            "fanout",
             "schedule",
             "execute",
-            "collect",
             "postprocess",
             "results",
         ]
     );
-    assert_eq!(stages[4]["queue"], "execute.python.test");
+    assert_eq!(stages[3]["queue"], "execute.python.test");
 }
 
 #[test]

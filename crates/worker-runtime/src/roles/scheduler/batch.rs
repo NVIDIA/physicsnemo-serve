@@ -14,7 +14,7 @@ use uuid::Uuid;
 
 use super::{
     PendingSchedule, QueuedRequest, SchedulePayload, ScheduleResourceProfile, SchedulerQueueState,
-    SchedulerRole, decode_schedule_payload, fanout_gate, schedule_resource_profile_json,
+    SchedulerRole, decode_schedule_payload, schedule_resource_profile_json,
 };
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -129,11 +129,10 @@ fn pipeline_contains_phase(payload: &SchedulePayload, phase: &str) -> bool {
 }
 
 fn scheduler_batch_excluded(payload: &SchedulePayload) -> bool {
-    fanout_gate(payload).is_some()
-        || payload
-            .parent_run_id
-            .as_deref()
-            .is_some_and(|value| !value.trim().is_empty())
+    payload
+        .parent_run_id
+        .as_deref()
+        .is_some_and(|value| !value.trim().is_empty())
         || payload.fanout_profile.is_some()
         || pipeline_contains_phase(payload, "fanout")
         || pipeline_contains_phase(payload, "collect")

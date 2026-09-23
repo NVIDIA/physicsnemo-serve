@@ -1162,7 +1162,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	rustWorkflowID := "earth2-ensemble-fanout"
+	rustWorkflowID := "e2s-ensemble"
 	if *inputJSONRust == "" {
 		*inputJSONRust = "data/rust_service_earth2.json"
 	}

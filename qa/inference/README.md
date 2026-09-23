@@ -438,8 +438,8 @@ python -u qa/scripts/run_qa.py \
 The dual-endpoint comparison runner deploys an Earth2Studio Python baseline and
 a PhysicsNeMo Serve Rust candidate, submits matched seeded requests to both workflows,
 extracts their Lustre-backed forecast Zarr paths, and launches Lepton batch jobs
-that run `compare_crps.py`. By default, the Python baseline is compared with two
-PhysicsNeMo Serve candidate materialization modes: `scheduled_gpu` and `prepare_cpu`.
+that run `compare_crps.py`. By default, the Python baseline is compared with the
+scheduler-managed `e2s-ensemble` candidate.
 The default baseline and candidate requests are separate payloads. Both are
 seeded (`seed_base: 1000`) and use Gaussian perturbation so the two ensemble
 outputs are statistically comparable.
@@ -458,10 +458,9 @@ python -u qa/scripts/run_lepton_crps_compare.py \
   --baseline-image-tag <DOCKER_REGISTRY>/<PYTHON_SERVICE_IMAGE>:<TAG> \
   --candidate-image-tag <DOCKER_REGISTRY>/<IMAGE_NAME>:<TAG> \
   --baseline-workflow ensemble_workflow \
-  --candidate-workflow earth2-ensemble-fanout \
+  --candidate-workflow e2s-ensemble \
   --baseline-request-json qa/inference/requests/crps_baseline_request.json \
   --candidate-request-json qa/inference/requests/crps_candidate_fanout_request.json \
-  --candidate-materialization-modes scheduled_gpu,prepare_cpu \
   --threshold 0.01 \
   --run-timeout 10800 \
   --run-poll-interval 120 \
@@ -494,9 +493,6 @@ Useful flags:
   `crps_tests_<YYYYMMDD>`.
 - `--candidate-resource-shape`: Lepton shape for the PhysicsNeMo Serve candidate;
   defaults to `gpu.4xh100-sxm`.
-- `--candidate-materialization-modes`: comma-separated PhysicsNeMo Serve fanout modes to
-  compare against the Python baseline. Defaults to `scheduled_gpu,prepare_cpu`.
-  Pass one mode, such as `scheduled_gpu`, for a single candidate run.
 - `--comparison-image-tag`: image used for the CRPS batch job; defaults to the
   Earth2Studio baseline image because that image contains `compare_crps.py`.
   The default script path is

@@ -1,6 +1,8 @@
 # e2s-ensemble
 
-Scaffolded PhysicsNeMo Serve plugin.
+FCN ensemble forecasting through scheduler-owned scatter/gather. `batch_size`
+controls the scientific perturbation grouping and therefore prediction results;
+`max_in_flight` only limits how many prepared child groups may run concurrently.
 
 Request schema is generated from the input model in `workflow.py`. Non-simple pipeline scaffolds use explicit `prepare()` / `run()` hooks so you can control resources and artifacts.
 

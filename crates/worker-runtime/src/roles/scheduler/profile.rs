@@ -82,8 +82,6 @@ pub(crate) struct Profile {
     pub(crate) prognostic_model: Option<String>,
     #[serde(default, rename = "diagnostic_model")]
     pub(crate) diagnostic_model: Option<String>,
-    #[serde(default, rename = "type")]
-    pub(crate) profile_type: Option<String>,
     #[serde(rename = "gpus.used")]
     pub(crate) gpus_used: usize,
     /// Carried for observability and future scheduling logic; reservation uses peak memory + GPU count only.
@@ -357,33 +355,11 @@ fn match_profile_for_payload(profiles: &Profiles, payload: &SchedulePayload) -> 
     let req_model =
         payload_string_field(v, "model").or_else(|| payload_string_field(v, "model_type"));
 
-    let mut candidates: Vec<&Profile> = profiles
+    let candidates: Vec<&Profile> = profiles
         .profiles
         .iter()
         .filter(|p| trim_nonempty_field(p.workflow.as_str()) == Some(wf))
         .collect();
-
-    // Fanout fallback: if workflow is "<name>-fanout" and no direct match exists,
-    // look for an ensemble profile under "<name>" (must have type: "ensemble").
-    if candidates.is_empty()
-        && let Some(base_wf) = wf.strip_suffix("-fanout")
-    {
-        candidates = profiles
-            .profiles
-            .iter()
-            .filter(|p| {
-                trim_nonempty_field(p.workflow.as_str()) == Some(base_wf)
-                    && p.profile_type.as_deref() == Some("ensemble")
-            })
-            .collect();
-        if !candidates.is_empty() {
-            debug!(
-                workflow = %wf,
-                base_workflow = %base_wf,
-                "match_profile: using ensemble profile via -fanout fallback"
-            );
-        }
-    }
 
     if candidates.is_empty() {
         debug!(workflow = %wf, "match_profile: no profiles for workflow");
@@ -687,7 +663,6 @@ mod tests {
             resource_profile: None,
             gpus_required: 0,
             memory_mb: 0,
-            dispatch_stage: "execute".to_string(),
         }
     }
 
@@ -955,61 +930,6 @@ mod tests {
         let dlwp = payload_with_raw("wf-fb", json!({ "workflow": "wf-fb", "model": "dlwp" }));
         let prof_d = ResourceManager::lookup_known_profile_resources(&dlwp).unwrap();
         assert_eq!(prof_d.peak_memory_mib(), Some(2_000));
-
-        test_env::set_env_var("SCHEDULER_PROFILES_JSON", prev_json.as_deref());
-    }
-
-    #[tokio::test]
-    async fn lookup_fanout_falls_back_to_ensemble_profile() {
-        let _guard = test_env::env_lock().lock().await;
-        let prev_json = std::env::var(ENV_PROFILES_JSON).ok();
-        let profiles_json = json!({
-            "profiles": [
-                {
-                    "workflow": "fake-ensemble",
-                    "model": "fcn",
-                    "type": "ensemble",
-                    "gpus.used": 1,
-                    "peak": { "memory.used": "2799 MiB", "memory.total": "81559 MiB" }
-                },
-                {
-                    "workflow": "fake-ensemble",
-                    "model": "dlwp",
-                    "gpus.used": 1,
-                    "peak": { "memory.used": "1500 MiB", "memory.total": "81559 MiB" }
-                }
-            ]
-        });
-        test_env::set_env_var("SCHEDULER_PROFILES_JSON", Some(&profiles_json.to_string()));
-
-        // Direct match still works
-        let direct = payload_with_raw("fake-ensemble", json!({"model_type": "fcn"}));
-        let prof = ResourceManager::lookup_known_profile_resources(&direct).unwrap();
-        assert_eq!(prof.peak_memory_mib(), Some(2_799));
-
-        // Fanout fallback: "<name>-fanout" resolves against the ensemble profile for "<name>"
-        let fanout = payload_with_raw("fake-ensemble-fanout", json!({"model_type": "fcn"}));
-        let prof_f = ResourceManager::lookup_known_profile_resources(&fanout).unwrap();
-        assert_eq!(prof_f.peak_memory_mib(), Some(2_799));
-
-        // Non-ensemble profile without "type" does NOT match via fanout
-        let profiles_no_type = json!({
-            "profiles": [
-                {
-                    "workflow": "fake-deterministic",
-                    "model": "fcn",
-                    "gpus.used": 1,
-                    "peak": { "memory.used": "4777 MiB", "memory.total": "81559 MiB" }
-                }
-            ]
-        });
-        test_env::set_env_var(
-            "SCHEDULER_PROFILES_JSON",
-            Some(&profiles_no_type.to_string()),
-        );
-        let fanout_no_match =
-            payload_with_raw("fake-deterministic-fanout", json!({"model_type": "fcn"}));
-        assert!(ResourceManager::lookup_known_profile_resources(&fanout_no_match).is_none());
 
         test_env::set_env_var("SCHEDULER_PROFILES_JSON", prev_json.as_deref());
     }

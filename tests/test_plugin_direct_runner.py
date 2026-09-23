@@ -1161,15 +1161,15 @@ def test_direct_runner_rejects_ensemble_pipeline_explicitly(tmp_path: Path) -> N
         options={},
         request_schema={"type": "object"},
         workflow="""
-from plugin_sdk import PluginWorkflow, PrepareResult
+from plugin_sdk import PluginWorkflow, ScatterChild, ScatterResult
 
 
 class EnsembleWorkflow(PluginWorkflow):
     def prepare(self, request, ctx):
-        return PrepareResult(
-            inputs={},
-            fanout_profile={"item_count": 1},
-            fanout_items=[{"item_index": 0, "parameters": {}}],
+        return ScatterResult(
+            children=[ScatterChild(operation="run", parameters={})],
+            child_stage_id="execute",
+            continuation_stage_id="results",
         )
 
     def execute(self, ctx):
@@ -1183,4 +1183,4 @@ WORKFLOW = EnsembleWorkflow
     proc = _run_direct(plugin_root, {}, tmp_path / "outputs")
 
     assert proc.returncode == 1
-    assert "does not support pipeline phase 'fanout'" in proc.stderr
+    assert "Scatter requires the scheduler" in proc.stderr

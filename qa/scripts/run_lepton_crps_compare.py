@@ -74,7 +74,7 @@ DEFAULT_COMPARISON_SCRIPT = (
 DEFAULT_RUN_TIMEOUT_SECONDS = 3600
 DEFAULT_RUN_POLL_INTERVAL_SECONDS = 30
 DEFAULT_CANDIDATE_RESOURCE_SHAPE = "gpu.4xh100-sxm"
-DEFAULT_CANDIDATE_MATERIALIZATION_MODES = ("scheduled_gpu", "prepare_cpu")
+DEFAULT_CANDIDATE_MATERIALIZATION_MODES = ("automatic",)
 
 
 def default_lustre_dir() -> str:
@@ -165,7 +165,7 @@ def candidate_mode_requests(
         CandidateModeRequest(
             mode=mode,
             label=candidate_mode_label(mode),
-            payload={**base_payload, "perturbation_materialization_mode": mode},
+            payload=dict(base_payload),
         )
         for mode in modes
     ]
@@ -554,7 +554,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--candidate-workflow",
-        default="earth2-ensemble-fanout",
+        default="e2s-ensemble",
         help="Workflow name to run on the candidate endpoint.",
     )
     parser.add_argument(
@@ -588,8 +588,7 @@ def build_parser() -> argparse.ArgumentParser:
             ",".join(DEFAULT_CANDIDATE_MATERIALIZATION_MODES),
         ),
         help=(
-            "Comma-separated candidate fanout perturbation materialization modes "
-            "to compare against the Python baseline "
+            "Candidate scheduler modes to compare against the Python baseline "
             f"(default: {','.join(DEFAULT_CANDIDATE_MATERIALIZATION_MODES)})."
         ),
     )

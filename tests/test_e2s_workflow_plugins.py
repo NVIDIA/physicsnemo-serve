@@ -29,6 +29,8 @@ from plugin_sdk import (  # noqa: E402
     OutputRegistry,
     PrepareContext,
     RawRequest,
+    ScatterChild,
+    ScatterResult,
 )
 
 
@@ -1815,6 +1817,163 @@ def test_e2s_ensemble_prepare_coerces_input(tmp_path: Path):
     assert prepared.inputs["data_source"] == "gfs"
     assert prepared.inputs["output_format"] == "zarr"
     assert prepared.inputs["seed_base"] == 1000
+
+
+def test_e2s_ensemble_execute_emits_scheduler_scatter(tmp_path: Path, monkeypatch):
+    module = _load_module(
+        "e2s_ensemble_scheduler_scatter",
+        PLUGIN_ENSEMBLE / "workflow.py",
+    )
+    captured = {}
+
+    def fake_materialize(values, ctx, *, model, data):
+        captured.update(values)
+        return values, ScatterResult(
+            children=[ScatterChild(operation="run_ensemble_batch", parameters=values)],
+            child_stage_id="execute",
+            continuation_stage_id="execute",
+        )
+
+    monkeypatch.setattr(module, "materialize_inputs", fake_materialize)
+    workflow = module.WORKFLOW()
+    monkeypatch.setattr(
+        workflow, "_ensure_runtime_loaded", lambda: (None, "model", "data")
+    )
+    result = workflow.execute(
+        {
+            "run_id": "parent",
+            "run_dir": str(tmp_path / "parent"),
+            "operation": "run",
+            "parameters": {
+                "forecast_times": ["2024-01-01T00:00:00"],
+                "nsteps": 4,
+                "nensemble": 4,
+                "batch_size": 2,
+                "max_in_flight": 2,
+                "create_plots": False,
+            },
+        }
+    )
+
+    assert result.kind == "scatter"
+    assert result.child_stage_id == "execute"
+    assert result.continuation_stage_id == "execute"
+    assert captured["batch_size"] == 2
+    assert captured["max_in_flight"] == 2
+
+
+def test_e2s_ensemble_execute_routes_child_and_continuation(
+    tmp_path: Path, monkeypatch
+):
+    module = _load_module(
+        "e2s_ensemble_scheduler_routes",
+        PLUGIN_ENSEMBLE / "workflow.py",
+    )
+    calls = []
+    monkeypatch.setattr(
+        module,
+        "run_batch",
+        lambda values, _ctx, *, model, attempt_token: (
+            calls.append(("child", values, model, attempt_token))
+            or {"dataset_path": "child.zarr"}
+        ),
+    )
+    monkeypatch.setattr(
+        module,
+        "aggregate",
+        lambda values, children, _ctx: (
+            calls.append(("gather", values, children))
+            or {"dataset_path": "forecast.zarr"}
+        ),
+    )
+    workflow = module.WORKFLOW()
+    monkeypatch.setattr(
+        workflow, "_ensure_runtime_loaded", lambda: (None, "model", None)
+    )
+    common = {
+        "forecast_times": ["2024-01-01T00:00:00"],
+        "nsteps": 4,
+        "nensemble": 2,
+        "batch_size": 2,
+        "create_plots": False,
+    }
+
+    child = workflow.execute(
+        {
+            "run_id": "child",
+            "run_dir": str(tmp_path / "child"),
+            "operation": "run_ensemble_batch",
+            "parameters": {**common, "batch_member_ids": [0, 1]},
+            "payload": {"round_context": {"attempt_token": "attempt-1"}},
+        }
+    )
+    gathered = workflow.execute(
+        {
+            "run_id": "parent",
+            "run_dir": str(tmp_path / "parent"),
+            "operation": "run",
+            "parameters": common,
+            "child_results": [{"item_index": 0, "result": child}],
+        }
+    )
+
+    assert child == {"dataset_path": "child.zarr"}
+    assert gathered == {"dataset_path": "forecast.zarr"}
+    assert [call[0] for call in calls] == ["child", "gather"]
+    assert calls[0][3] == "attempt-1"
+
+
+def test_e2s_ensemble_aggregate_accepts_concurrent_commit(tmp_path: Path, monkeypatch):
+    import shutil
+
+    import numpy as np
+    import xarray as xr
+    from e2s_ensemble import aggregate
+
+    child_results = []
+    for member in range(2):
+        path = tmp_path / f"child-{member}.zarr"
+        xr.Dataset(
+            {"t2m": (("ensemble", "x"), np.asarray([[member]], dtype=np.float32))},
+            coords={"ensemble": [member], "x": [0]},
+        ).to_zarr(path, mode="w", zarr_format=3)
+        child_results.append(
+            {
+                "item_index": member,
+                "result": {
+                    "status": "succeeded",
+                    "batch_member_ids": [member],
+                    "dataset_path": str(path),
+                },
+            }
+        )
+
+    ctx = _execution_context(tmp_path, run_id="aggregate-race")
+    output_path = ctx.run_dir / "forecast.zarr"
+    original_replace = Path.replace
+
+    def lose_commit_race(source: Path, target: Path):
+        if Path(target) == output_path:
+            shutil.copytree(source, target)
+            raise FileExistsError(target)
+        return original_replace(source, target)
+
+    monkeypatch.setattr(Path, "replace", lose_commit_race)
+    result = aggregate(
+        {
+            "forecast_times": ["2024-01-01T00:00:00"],
+            "nsteps": 1,
+            "nensemble": 2,
+            "batch_size": 1,
+        },
+        child_results,
+        ctx,
+    )
+
+    assert result["dataset_path"] == str(output_path)
+    with xr.open_zarr(output_path, consolidated=False) as committed:
+        assert committed["ensemble"].values.tolist() == [0, 1]
+    assert not list(ctx.run_dir.glob(".forecast.zarr.tmp-*"))
 
 
 def test_e2s_ensemble_run_creates_zarr_and_metadata(tmp_path: Path, monkeypatch):

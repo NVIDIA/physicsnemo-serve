@@ -5092,7 +5092,7 @@ def test_plugin_dev_init_creates_batch_scaffold_with_run_batch_hook(tmp_path: Pa
     assert "item.context.outputs.create(" in workflow_content
 
 
-def test_plugin_dev_init_creates_ensemble_scaffold_with_fanout_placeholders(
+def test_plugin_dev_init_creates_ensemble_scaffold_with_scheduler_scatter(
     tmp_path: Path,
 ):
     script = repo_root() / "scripts" / "plugin_dev.py"
@@ -5129,9 +5129,10 @@ def test_plugin_dev_init_creates_ensemble_scaffold_with_fanout_placeholders(
     assert "outputs" not in manifest
 
     workflow_content = (plugin_root / "workflow.py").read_text(encoding="utf-8")
-    assert "fanout_profile={" in workflow_content
-    assert "fanout_items=[" in workflow_content
-    assert '"item_index": 0' in workflow_content
+    assert "ScatterResult(" in workflow_content
+    assert "ScatterChild(" in workflow_content
+    assert 'child_stage_id="execute"' in workflow_content
+    assert 'continuation_stage_id="results"' in workflow_content
     assert '"item_index": inputs.item_index' in workflow_content
 
 
@@ -6857,7 +6858,7 @@ def test_plugin_dev_run_local_dry_run_rewrites_cpu_compact_pipeline_without_sche
     ] == expected_phases
 
 
-def test_plugin_dev_run_local_dry_run_includes_fanout_and_collect_for_ensemble_pipeline(
+def test_plugin_dev_run_local_uses_internal_collect_for_ensemble_pipeline(
     tmp_path: Path,
 ):
     plugin_root = create_class_based_json_plugin(tmp_path, plugin_id="demo-ensemble")
@@ -6865,50 +6866,7 @@ def test_plugin_dev_run_local_dry_run_includes_fanout_and_collect_for_ensemble_p
     workspace = tmp_path / "run-local-ensemble"
 
     def add_ensemble_pipeline(manifest: dict) -> None:
-        manifest["pipeline"]["stages"] = [
-            {
-                "id": "prepare",
-                "phase": "prepare",
-                "handler": "plugin_phase",
-                "queue": "prepare",
-                "next": "fanout",
-            },
-            {
-                "id": "fanout",
-                "phase": "fanout",
-                "handler": "fanout",
-                "queue": "fanout",
-                "next": "schedule",
-            },
-            {
-                "id": "schedule",
-                "phase": "schedule",
-                "handler": "schedule",
-                "queue": "schedule",
-                "next": "execute",
-            },
-            {
-                "id": "execute",
-                "phase": "execute",
-                "handler": "plugin_phase",
-                "queue": "execute.python.test",
-                "next": "collect",
-            },
-            {
-                "id": "collect",
-                "phase": "collect",
-                "handler": "collect",
-                "queue": "collect",
-                "next": "results",
-            },
-            {
-                "id": "results",
-                "phase": "results",
-                "handler": "persist_results",
-                "queue": "results",
-                "next": None,
-            },
-        ]
+        manifest["pipeline"] = {"profile": "ensemble"}
 
     update_manifest(plugin_root, add_ensemble_pipeline)
 
@@ -6933,15 +6891,13 @@ def test_plugin_dev_run_local_dry_run_includes_fanout_and_collect_for_ensemble_p
     runtime_config = json.loads(
         Path(data["runtime_config_path"]).read_text(encoding="utf-8")
     )
-    assert "fanout" in runtime_config["roles"]
     assert "collect" in runtime_config["roles"]
-    assert runtime_config["roles"]["fanout"]["inputs"][0]["stream"] == "fanout"
     assert runtime_config["roles"]["collect"]["inputs"][0]["stream"] == "collect"
-    assert "fanout" in runtime_config["streams"]
     assert "collect" in runtime_config["streams"]
+    assert "fanout" not in runtime_config["roles"]
+    assert "fanout" not in runtime_config["streams"]
 
     process_names = [process["name"] for process in data["processes"]]
-    assert "fanout" in process_names
     assert "collect" in process_names
     assert "scheduler" in process_names
 

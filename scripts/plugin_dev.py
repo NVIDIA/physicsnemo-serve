@@ -1170,12 +1170,7 @@ def _run_local_needs_cpu_direct_pipeline(
     if not _manifest_uses_compact_pipeline_profile(manifest):
         return False
     pipeline = manifest.get("pipeline", {})
-    if str(pipeline.get("profile") or "").strip() == "batch":
-        return False
-    if any(
-        str(stage.get("phase") or "").strip() == "fanout"
-        for stage in _pipeline_stages(manifest)
-    ):
+    if str(pipeline.get("profile") or "").strip() in {"batch", "ensemble"}:
         return False
     return any(
         str(stage.get("phase") or "").strip() == "schedule"
@@ -1731,18 +1726,6 @@ def _build_runtime_config(
                 "inputs": [_input_stream_spec(queue)],
                 "outputs": [],
             }
-        elif phase == "collect" and handler == "collect":
-            add_stream(queue)
-            roles["collect"] = {
-                "inputs": [_input_stream_spec(queue)],
-                "outputs": [],
-            }
-        elif phase == "fanout" and handler == "fanout":
-            add_stream(queue)
-            roles["fanout"] = {
-                "inputs": [_input_stream_spec(queue)],
-                "outputs": [],
-            }
         elif phase == "prefetch" and handler == "prefetch":
             add_stream(queue)
             roles["prefetch"] = {
@@ -1782,6 +1765,15 @@ def _build_runtime_config(
                 "inputs": [_input_stream_spec(queue, max_dequeue_items=8)],
                 "outputs": [],
             }
+
+    # Scatter children always complete through the internal collect/gather role;
+    # it is runtime infrastructure, not a public pipeline stage.
+    if "scheduler" in roles:
+        add_stream("collect")
+        roles["collect"] = {
+            "inputs": [_input_stream_spec("collect")],
+            "outputs": [],
+        }
 
     manifest_declares_publish = any(
         str(stage.get("phase") or "").strip() == "publish" for stage in stages
@@ -1838,10 +1830,8 @@ def _runtime_roles_for_pipeline(
     )
     for candidate in (
         "prepare",
-        "fanout",
         "prefetch",
         "scheduler",
-        "collect",
         "postprocess",
         "publish",
         "results",
@@ -1876,15 +1866,13 @@ def _runtime_roles_for_pipeline(
             and (
                 str(stage.get("handler")) == "plugin_phase"
                 if candidate in {"prepare", "postprocess"}
-                else str(stage.get("handler")) == "fanout"
-                if candidate == "fanout"
-                else str(stage.get("handler")) == "collect"
-                if candidate == "collect"
                 else str(stage.get("handler")) == candidate
             )
             for stage in stages
         ):
             roles.append(candidate)
+    if "scheduler" in roles:
+        roles.insert(roles.index("scheduler") + 1, "collect")
     return roles
 
 
@@ -2098,15 +2086,6 @@ def _match_scheduler_profile_for_payload(
         if isinstance(profile, dict)
         and str(profile.get("workflow") or "").strip() == workflow_id
     ]
-    if not candidates and workflow_id.endswith("-fanout"):
-        base_workflow = workflow_id.removesuffix("-fanout")
-        candidates = [
-            profile
-            for profile in profiles
-            if isinstance(profile, dict)
-            and str(profile.get("workflow") or "").strip() == base_workflow
-            and profile.get("type") == "ensemble"
-        ]
     if not candidates:
         return None
 
@@ -3123,6 +3102,7 @@ def _json_explicit_workflow_template(pipeline_profile: str) -> str:
     extra_result_fields = ""
     extra_postprocess = ""
     extra_batch_hook = ""
+    prepare_hook = None
     sdk_imports = "PluginWorkflow, PostprocessOutcome, PrepareResult, RawRequest"
     main_hook = """
     # Main execution hook.
@@ -3198,30 +3178,45 @@ class ScaffoldOutput:
 """
         main_hook = ""
     elif pipeline_profile == "ensemble":
-        prepare_extras = """
-            fanout_profile={
-                "item_count": 2,
-                "max_in_flight": 1,
-            },
-            fanout_items=[
-                {
-                    "item_index": 0,
-                    "parameters": {
+        sdk_imports = "PluginWorkflow, RawRequest, ScatterChild, ScatterResult"
+        prepare_hook = """
+    # Scatter is scheduler-owned; no fanout pipeline stage is required.
+    def prepare(self, request, ctx) -> ScatterResult:
+        value = int(request.raw_fields["value"])
+        return ScatterResult(
+            children=[
+                ScatterChild(
+                    operation="run",
+                    parameters={
                         "value": value,
                         "doubled": value * 2,
-                        "item_index": 0,
+                        "item_index": item_index,
                     },
-                },
-                {
-                    "item_index": 1,
-                    "parameters": {
-                        "value": value,
-                        "doubled": value * 2,
-                        "item_index": 1,
-                    },
-                },
-            ],"""
+                )
+                for item_index in range(2)
+            ],
+            child_stage_id="execute",
+            continuation_stage_id="results",
+            max_in_flight=1,
+        )
+"""
         extra_result_fields = '\n            "item_index": inputs.item_index,'
+
+    if prepare_hook is None:
+        prepare_hook = (
+            """
+    # Prepare hook. Normalize inputs and declare framework-managed work.
+    def prepare(self, request, ctx) -> PrepareResult:
+        value = int(request.raw_fields["value"])
+        return PrepareResult(
+            inputs={
+                "value": value,
+                "doubled": value * 2,
+            },%s
+        )
+"""
+            % prepare_extras
+        )
 
     return """from __future__ import annotations
 
@@ -3239,16 +3234,7 @@ class ScaffoldInput:
 
 class ScaffoldWorkflow(PluginWorkflow):
     input_model = ScaffoldInput%s
-
-    # Prepare hook. Normalize inputs and declare framework-managed work.
-    def prepare(self, request, ctx) -> PrepareResult:
-        value = int(request.raw_fields["value"])
-        return PrepareResult(
-            inputs={
-                "value": value,
-                "doubled": value * 2,
-            },%s
-        )
+%s
 %s%s%s
 
 
@@ -3257,7 +3243,7 @@ WORKFLOW = ScaffoldWorkflow
         sdk_imports,
         output_model,
         output_model_assignment,
-        prepare_extras,
+        prepare_hook,
         main_hook % extra_result_fields if main_hook else "",
         extra_batch_hook,
         extra_postprocess,

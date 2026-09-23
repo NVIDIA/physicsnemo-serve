@@ -7,6 +7,7 @@ import asyncio
 import functools
 import gc
 import inspect
+import json
 import logging
 import os
 import traceback
@@ -33,6 +34,10 @@ FinalStatus = Literal["succeeded", "failed", "cancelled"]
 logger = logging.getLogger(__name__)
 _HTTP_SESSION_TRACE_ENV = "PHYSICSNEMO_SERVE_TRACE_HTTP_SESSIONS"
 _HTTP_SESSION_TRACING_INSTALLED = False
+
+
+class PluginRetryableError(RuntimeError):
+    """An explicitly transient failure; retry the same scientific work unchanged."""
 
 
 class PluginCancelledError(RuntimeError):
@@ -847,6 +852,127 @@ class PrepareContext:
     default_resource_profile: ResourceProfile | dict[str, Any] | None = None
     services: Mapping[str, Any] = field(default_factory=dict)
     stage_context: Mapping[str, Any] = field(default_factory=dict)
+    stage_invocation_id: str | None = None
+
+
+@dataclass(frozen=True)
+class ScatterChild:
+    """One independent invocation; scientific grouping belongs to the plugin."""
+
+    operation: str
+    parameters: dict[str, Any]
+    resource_profile: dict[str, Any] | ResourceProfile | None = None
+    batch_profile: dict[str, Any] | None = None
+
+
+@dataclass(frozen=True)
+class ScatterResult:
+    """Finish prepare/execute and resume the parent after all children succeed.
+
+    Stage IDs refer to the existing pipeline. Children cannot scatter recursively.
+    This contract requires scheduler round support; older runtimes reject it.
+    """
+
+    children: list[ScatterChild]
+    child_stage_id: str
+    continuation_stage_id: str
+    max_in_flight: int = 1
+    kind: Literal["scatter"] = field(default="scatter", init=False)
+
+
+def is_scatter_result(result: Any) -> bool:
+    return isinstance(result, ScatterResult) or (
+        isinstance(result, dict) and result.get("kind") == "scatter"
+    )
+
+
+def serialize_scatter_result(
+    result: ScatterResult | dict[str, Any],
+    context: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Validate the control outcome; validate routing when context is available."""
+    value = model_to_jsonable(result)
+    expected = {
+        "kind",
+        "children",
+        "child_stage_id",
+        "continuation_stage_id",
+        "max_in_flight",
+    }
+    if (
+        not isinstance(value, dict)
+        or set(value) != expected
+        or value["kind"] != "scatter"
+    ):
+        raise ValueError(
+            "scatter requires kind, children, child_stage_id, continuation_stage_id and max_in_flight"
+        )
+    for key in ("child_stage_id", "continuation_stage_id"):
+        if not isinstance(value[key], str) or not value[key].strip():
+            raise ValueError(f"scatter {key} must be a non-empty string")
+    limit = value["max_in_flight"]
+    if type(limit) is not int or not 1 <= limit <= 2**64 - 1:
+        raise ValueError("scatter max_in_flight must be a positive integer")
+    children = value["children"]
+    if not isinstance(children, list) or not children:
+        raise ValueError("scatter children must be a non-empty list")
+    for child in children:
+        if (
+            not isinstance(child, dict)
+            or not {"operation", "parameters"} <= child.keys()
+        ):
+            raise ValueError("scatter child requires operation and parameters")
+        if child.keys() - {
+            "operation",
+            "parameters",
+            "resource_profile",
+            "batch_profile",
+        }:
+            raise ValueError("scatter child contains unknown fields")
+        if not isinstance(child["operation"], str) or not child["operation"].strip():
+            raise ValueError("scatter child operation must be a non-empty string")
+        if not isinstance(child["parameters"], dict):
+            raise ValueError("scatter child parameters must be an object")
+        for key in ("resource_profile", "batch_profile"):
+            if child.get(key) is not None and not isinstance(child[key], dict):
+                raise ValueError(f"scatter child {key} must be an object")
+        profile = child.get("resource_profile") or {}
+        if child.get("resource_profile") is not None and (
+            type(profile.get("gpus_required")) is not int
+            or profile["gpus_required"] != 1
+        ):
+            raise ValueError("scatter child gpus_required must be exactly 1")
+        if "memory_mb" in profile and (
+            type(profile["memory_mb"]) is not int
+            or not 1 <= profile["memory_mb"] <= 2**64 - 1
+        ):
+            raise ValueError("scatter child memory_mb must be an integer >= 1")
+    json.dumps(value, allow_nan=False)
+    if context is not None:
+        if context.get("parent_run_id"):
+            raise ValueError("nested scatter is not supported")
+        stage_context = context.get("stage_context") or {}
+        if not isinstance(stage_context, Mapping):
+            raise ValueError("scatter requires an object stage_context")
+        pipeline = stage_context.get("pipeline", [])
+        if not isinstance(pipeline, list) or any(
+            not isinstance(stage, dict) for stage in pipeline
+        ):
+            raise ValueError("scatter requires a pipeline of stage objects")
+        if stage_context.get("current_phase") not in {"prepare", "execute"}:
+            raise ValueError("scatter is supported only from prepare or execute")
+        for field_name, phases in (
+            ("child_stage_id", {"execute"}),
+            ("continuation_stage_id", {"prepare", "execute", "postprocess", "results"}),
+        ):
+            matches = [
+                stage for stage in pipeline if stage.get("id") == value[field_name]
+            ]
+            if len(matches) != 1 or matches[0].get("phase") not in phases:
+                raise ValueError(
+                    f"scatter {field_name} must name a valid pipeline stage"
+                )
+    return value
 
 
 @dataclass(frozen=True)
@@ -1026,7 +1152,9 @@ class PluginWorkflow:
     output_filename = "result.json"
     cache_scope: str | None = None
 
-    def prepare(self, request: RawRequest, ctx: PrepareContext) -> PrepareResult:
+    def prepare(
+        self, request: RawRequest, ctx: PrepareContext
+    ) -> PrepareResult | ScatterResult:
         if self.input_model is None:
             return PrepareResult(inputs=model_to_jsonable(request.raw_fields))
 
@@ -1142,6 +1270,8 @@ class PluginWorkflow:
         return None
 
     def _normalize_run_result(self, result: Any, ctx: dict[str, Any]) -> dict[str, Any]:
+        if is_scatter_result(result):
+            return serialize_scatter_result(result, ctx)
         if self.output_model is not None:
             result = coerce_model(self.output_model, result, label="output")
 

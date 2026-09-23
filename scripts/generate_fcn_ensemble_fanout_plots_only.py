@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+"""Regenerate plots for the historical standalone-fanout benchmark report."""
+
 from __future__ import annotations
 
 import argparse

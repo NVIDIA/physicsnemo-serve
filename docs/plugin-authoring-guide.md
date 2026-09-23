@@ -65,7 +65,8 @@ runtime:
   - `prepare -> schedule -> execute -> results`
   - compatible requests are grouped by the scheduler
 - `ensemble`
-  - `prepare -> fanout -> schedule -> execute -> collect -> results`
+  - `prepare -> schedule -> execute -> results`
+  - scatter and gather are scheduler-managed control flow
 
 `pipeline.options` only enables a small set of extra stages:
 
@@ -73,7 +74,7 @@ runtime:
   - append `postprocess` before `results`
 - `prefetch: parent`
   - only for `ensemble`
-  - insert `prefetch` before `fanout`
+  - insert `prefetch` before `schedule`
 
 Example:
 
@@ -87,7 +88,7 @@ pipeline:
 
 That expands to:
 
-`prepare -> prefetch -> fanout -> schedule -> execute -> collect -> postprocess -> results`
+`prepare -> prefetch -> schedule -> execute -> postprocess -> results`
 
 ## Runtime Profiles
 
@@ -152,7 +153,8 @@ Plugins provide Python hooks. The framework decides where they run.
   - preferred prepare hook for new plugins
   - read raw ingress from `request.raw_fields` and `request.input_artifacts`
   - normalize execution inputs into `PrepareResult.inputs`
-  - optionally return `resource_profile`, `prefetch_plan`, `batch_profile`, `fanout_profile`, and `fanout_items`
+  - optionally return `resource_profile`, `prefetch_plan`, and `batch_profile`
+  - return `ScatterResult` instead when the scheduler should start a child round
   - use `ctx.run_id`, `ctx.run_dir`, and `ctx.default_resource_profile` for prepare-time context
 - `execute(ctx)`
   - low-level compatibility hook used by older plugins
@@ -266,9 +268,7 @@ Do not keep request-scoped state on the shared workflow instance:
 Framework-owned stages:
 
 - `prefetch`
-- `fanout`
 - `schedule`
-- `collect`
 - `results`
 
 ## Prepare Output Contract
@@ -288,15 +288,11 @@ Common fields:
   - consumed by `prefetch`
 - `batch_profile`
   - consumed by `schedule` as an optional scheduler hint for grouping compatible requests
-- `fanout_profile`
-  - consumed by `fanout`, `schedule`, and `collect`
-- `fanout_items`
-  - child inputs consumed by `fanout`
 
 If `prepare()` creates temporary files, write them under `ctx.run_dir` and pass
-their paths through `inputs` or `fanout_items`.
+their paths through `inputs` or scatter child parameters.
 
-The scheduler considers every non-fanout request for batching. `batch_profile`
+The scheduler considers ordinary requests for batching. `batch_profile`
 overrides the scheduler defaults for compatible grouping, maximum size, maximum
 wait, and memory scaling. It does not force authors to implement a special hook:
 plugins may keep using `run(inputs, ctx)` and let the default adapter execute
@@ -329,9 +325,12 @@ Notes:
 - `register()` is useful when the plugin writes a file first and then attaches it as an output
 - simple JSON-only plugins can just return payload data; explicit output registration is mainly for additional files and datasets
 
-## Fanout And Collect
+## Scheduler Scatter And Gather
 
-Use `fanout/collect` when one logical request expands into many independent child runs and later recombines.
+Return `ScatterResult` from `prepare()` or `execute()` when one logical request
+expands into independent child runs. The scheduler starts the children and
+automatically resumes the parent at the continuation stage after all children
+succeed.
 
 Good fits:
 
@@ -341,23 +340,20 @@ Good fits:
 - per-tile inference
 - per-region processing
 
-This contract is generic:
-
-```json
-{
-  "fanout_profile": {
-    "item_count": 20,
-    "max_in_flight": 4,
-    "failure_policy": "collect_all"
-  },
-  "fanout_items": [
-    {
-      "item_index": 0,
-      "parameters": {"seed": 1000}
-    }
-  ]
-}
+```python
+return ScatterResult(
+    children=[
+        ScatterChild(operation="run", parameters={"seed": seed})
+        for seed in seeds
+    ],
+    child_stage_id="execute",
+    continuation_stage_id="results",
+    max_in_flight=4,
+)
 ```
+
+Children cannot scatter recursively. A failed child is retried individually;
+if retries are exhausted, the round fails without publishing a partial result.
 
 ## Scheduling
 

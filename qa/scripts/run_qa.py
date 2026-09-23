@@ -125,7 +125,6 @@ ALL_WORKFLOW_PLUGIN_IDS = [
     "earth2-deterministic",
     "earth2-deterministic-batch",
     "earth2-ensemble",
-    "earth2-ensemble-fanout",
     "e2s-foundry-fcn3",
     "e2s-foundry-fcn3-stormscope-goes",
 ]

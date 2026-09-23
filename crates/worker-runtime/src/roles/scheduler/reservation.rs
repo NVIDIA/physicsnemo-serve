@@ -27,6 +27,13 @@ pub struct ReservedResource {
     pub resource_id: u32,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct RoundAttemptCandidate {
+    pub(super) target: ReservedResource,
+    pub(super) observed_used_mb: u64,
+    pub(super) usable_memory_mb: u64,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ReservationBlockedError;
 
@@ -221,6 +228,47 @@ impl ResourceReservationTable {
                 ResourceEligibility::Available
             )
         }))
+    }
+
+    /// Select candidate workers without changing accounting. Round-attempt
+    /// accounting performs the capacity check and increment atomically in Redis.
+    pub(super) async fn round_attempt_candidates(
+        &self,
+        payload: &mut SchedulePayload,
+    ) -> Result<Vec<RoundAttemptCandidate>> {
+        let (needed_gpus, _memory_mb, _config_source, resources) =
+            self.prepare_resource_requirements(payload).await?;
+        if needed_gpus != 1 {
+            return Err(anyhow!(
+                "scheduler: scatter children currently require exactly one GPU, got {needed_gpus}"
+            ));
+        }
+        let mut candidates =
+            select_candidate_resources(&resources, payload, self.memory_utilization_percent, 1)?;
+        candidates.sort_by_key(|candidate| candidate.resource_id);
+        {
+            let mut cursor = self
+                .rr_cursor
+                .lock()
+                .map_err(|_| anyhow!("rr_cursor poisoned"))?;
+            let offset = *cursor % candidates.len();
+            candidates.rotate_left(offset);
+            *cursor = cursor.wrapping_add(1);
+        }
+        Ok(candidates
+            .into_iter()
+            .map(|candidate| {
+                let usable_memory_mb = candidate.usable_memory_mb(self.memory_utilization_percent);
+                RoundAttemptCandidate {
+                    target: ReservedResource {
+                        stream_name: candidate.stream_name,
+                        resource_id: candidate.resource_id,
+                    },
+                    observed_used_mb: candidate.used_memory_mb,
+                    usable_memory_mb,
+                }
+            })
+            .collect())
     }
 
     /// Reserve GPUs for a schedule payload using round-robin placement.
@@ -690,7 +738,6 @@ mod tests {
             }),
             gpus_required: 0,
             memory_mb: 0,
-            dispatch_stage: "execute".to_string(),
         }
     }
 

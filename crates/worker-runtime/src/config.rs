@@ -78,6 +78,9 @@ fn default_reclaim_idle_ms() -> u64 {
 /// Scheduler-specific configuration parsed from the `config` block.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct SchedulerRoleConfig {
+    /// Total attempts for an individual scatter child, including its initial execution.
+    #[serde(default = "default_scatter_max_attempts")]
+    pub scatter_max_attempts: u32,
     /// Redis key for the GPU registry hash (default: `gpu:registry`).
     #[serde(default = "default_gpu_registry_key")]
     pub gpu_registry_key: String,
@@ -100,6 +103,10 @@ pub struct SchedulerRoleConfig {
 
 fn default_gpu_registry_key() -> String {
     "gpu:registry".to_string()
+}
+
+fn default_scatter_max_attempts() -> u32 {
+    3
 }
 
 fn default_memory_utilization_percent() -> u64 {
@@ -125,6 +132,7 @@ fn default_scheduler_max_batch_wait_ms() -> u64 {
 impl Default for SchedulerRoleConfig {
     fn default() -> Self {
         Self {
+            scatter_max_attempts: default_scatter_max_attempts(),
             gpu_registry_key: default_gpu_registry_key(),
             memory_utilization_percent: default_memory_utilization_percent(),
             gpu_discovery_interval_secs: default_resource_discovery_interval_secs(),

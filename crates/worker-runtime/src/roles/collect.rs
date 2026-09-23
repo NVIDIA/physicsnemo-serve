@@ -154,6 +154,7 @@ pub(crate) struct CollectFinalizationClaim {
 }
 
 pub(crate) trait CollectStore: Send + Sync {
+    #[cfg(test)]
     fn init_group<'a>(
         &'a self,
         parent_run_id: &'a str,
@@ -334,6 +335,7 @@ impl InMemoryCollectStore {
 }
 
 impl CollectStore for InMemoryCollectStore {
+    #[cfg(test)]
     fn init_group<'a>(
         &'a self,
         parent_run_id: &'a str,
@@ -592,6 +594,7 @@ impl RedisCollectStore {
 }
 
 impl CollectStore for RedisCollectStore {
+    #[cfg(test)]
     fn init_group<'a>(
         &'a self,
         parent_run_id: &'a str,
@@ -840,6 +843,7 @@ struct FanoutItemRef {
 use crate::roles::stage::StageContext;
 
 pub struct CollectRole {
+    rounds: Option<crate::roles::round_state::RedisRoundStore>,
     input_streams: Vec<String>,
     store: Arc<dyn CollectStore>,
     progress_persistence: Arc<dyn CollectProgressPersistence>,
@@ -860,7 +864,7 @@ impl CollectRole {
         env: &RoleEnv,
         qm: QueueManager,
     ) -> Result<(Self, Vec<Box<dyn crate::traits::BackgroundTask>>)> {
-        Self::from_env_with_store(
+        let (mut role, tasks) = Self::from_env_with_store(
             env,
             Arc::new(RedisCollectStore::new(
                 qm.clone(),
@@ -870,8 +874,13 @@ impl CollectRole {
                 qm.clone(),
                 DEFAULT_COLLECT_STORE_PREFIX,
             )),
-            Arc::new(RedisParentRunStateStore::new(qm)),
-        )
+            Arc::new(RedisParentRunStateStore::new(qm.clone())),
+        )?;
+        role.rounds = Some(crate::roles::round_state::RedisRoundStore::new(
+            qm,
+            env.stream_prefix.clone(),
+        ));
+        Ok((role, tasks))
     }
 
     pub(crate) fn from_env_with_store(
@@ -882,6 +891,7 @@ impl CollectRole {
     ) -> Result<(Self, Vec<Box<dyn crate::traits::BackgroundTask>>)> {
         Ok((
             Self {
+                rounds: None,
                 input_streams: env.inputs.iter().map(|spec| spec.stream.clone()).collect(),
                 store,
                 progress_persistence,
@@ -911,6 +921,15 @@ impl CollectRole {
         msg: &scicomp_rq::Message,
         sink: &dyn MessageSink,
     ) -> Result<()> {
+        let value: JsonValue = serde_json::from_str(msg.payload())?;
+        if value.get("round_context").is_some() {
+            return self
+                .rounds
+                .as_ref()
+                .context("round gather requires Redis")?
+                .gather(msg.run_id(), &value)
+                .await;
+        }
         let (typed, payload) = decode_collect_payload(msg.payload())?;
         if self
             .terminal_state
@@ -1298,7 +1317,7 @@ fn artifact_entry_has_storage_path(entry: &JsonValue) -> bool {
     })
 }
 
-fn build_request_envelope(parent_payload: &JsonValue) -> JsonValue {
+pub(crate) fn build_request_envelope(parent_payload: &JsonValue) -> JsonValue {
     let mut request = parent_payload
         .get("request")
         .and_then(JsonValue::as_object)
@@ -1350,7 +1369,7 @@ fn derive_primary_output_path(outputs: Option<&JsonValue>) -> Option<String> {
         .map(str::to_string)
 }
 
-fn build_execution_and_payload(
+pub(crate) fn build_execution_and_payload(
     run_id: &str,
     workflow_id: &str,
     status: &str,
@@ -1511,6 +1530,7 @@ mod tests {
     }
 
     impl CollectStore for BlockingGetGroupStore {
+        #[cfg(test)]
         fn init_group<'a>(
             &'a self,
             parent_run_id: &'a str,

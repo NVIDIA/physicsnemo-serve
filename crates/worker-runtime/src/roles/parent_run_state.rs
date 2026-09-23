@@ -14,7 +14,7 @@ use tokio::sync::Mutex;
 use crate::traits::BoxFuture;
 
 const DEFAULT_TERMINAL_PREFIX: &str = "parent_terminal";
-const DEFAULT_TERMINAL_TTL_SECS: u64 = 24 * 60 * 60;
+pub(crate) const STATE_TOMBSTONE_TTL_SECS: u64 = 24 * 60 * 60;
 
 pub(crate) trait ParentRunStateStore: Send + Sync {
     fn is_terminal<'a>(&'a self, parent_run_id: &'a str) -> BoxFuture<'a, Result<bool>>;
@@ -61,7 +61,7 @@ impl RedisParentRunStateStore {
         Self {
             qm,
             key_prefix: DEFAULT_TERMINAL_PREFIX.to_string(),
-            ttl_secs: DEFAULT_TERMINAL_TTL_SECS,
+            ttl_secs: STATE_TOMBSTONE_TTL_SECS,
         }
     }
 

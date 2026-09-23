@@ -29,7 +29,9 @@ from plugin_sdk import (
     PriorResult,
     RawRequest,
     default_run_dir,
+    is_scatter_result,
     model_to_jsonable,
+    serialize_scatter_result,
 )
 
 DEFAULT_PLUGIN_MANIFEST_NAME = "plugin.yaml"
@@ -101,10 +103,8 @@ PIPELINE_RECOMMENDED_CHECK_PHASE = {
 SUPPORTED_PIPELINE_STAGE_HANDLERS = {
     ("prepare", "plugin_phase"),
     ("prefetch", "prefetch"),
-    ("fanout", "fanout"),
     ("schedule", "schedule"),
     ("execute", "plugin_phase"),
-    ("collect", "collect"),
     ("postprocess", "plugin_phase"),
     ("publish", "plugin_phase"),
     ("publish", "publish_outputs"),
@@ -167,7 +167,7 @@ def _build_pipeline_phases(profile_name: str, options: dict[str, Any]) -> list[s
             raise ValueError(
                 "Plugin manifest pipeline.options.prefetch must be true, false, or 'parent'"
             )
-        phases.extend(["fanout", "schedule", "execute", "collect"])
+        phases.extend(["schedule", "execute"])
         if postprocess_enabled:
             phases.append("postprocess")
     else:
@@ -199,13 +199,6 @@ def _stage_definition(phase: str, execute_queue: str) -> dict[str, Any]:
             "handler": "prefetch",
             "queue": "prefetch",
         }
-    if phase == "fanout":
-        return {
-            "id": "fanout",
-            "phase": "fanout",
-            "handler": "fanout",
-            "queue": "fanout",
-        }
     if phase == "schedule":
         return {
             "id": "schedule",
@@ -219,13 +212,6 @@ def _stage_definition(phase: str, execute_queue: str) -> dict[str, Any]:
             "phase": "execute",
             "handler": "plugin_phase",
             "queue": execute_queue,
-        }
-    if phase == "collect":
-        return {
-            "id": "collect",
-            "phase": "collect",
-            "handler": "collect",
-            "queue": "collect",
         }
     if phase == "postprocess":
         return {
@@ -585,6 +571,7 @@ def build_context(payload: dict[str, Any]) -> dict[str, Any]:
         "prefetch_plan": payload.get("prefetch_plan", []),
         "prefetch_artifacts": payload.get("prefetch_artifacts", []),
         "stage_context": payload.get("stage_context", {}),
+        "stage_invocation_id": payload.get("stage_invocation_id"),
         "result": payload.get("result"),
         "runtime": payload.get("runtime", {}),
         "run_dir": run_dir,
@@ -636,6 +623,7 @@ def build_prepare_context(payload: dict[str, Any]) -> PrepareContext:
         default_resource_profile=ctx.get("resource_profile"),
         services=ctx.get("services", {}),
         stage_context=ctx.get("stage_context", {}),
+        stage_invocation_id=ctx.get("stage_invocation_id"),
     )
 
 
@@ -707,6 +695,8 @@ def build_prior_result(payload: dict[str, Any]) -> PriorResult[Any]:
 
 
 def serialize_prepare_result(result: Any) -> dict[str, Any]:
+    if is_scatter_result(result):
+        return serialize_scatter_result(result)
     if result is None:
         return {}
     if isinstance(result, PrepareResult):
@@ -727,7 +717,7 @@ def serialize_prepare_result(result: Any) -> dict[str, Any]:
     if isinstance(result, dict):
         return result
     raise TypeError(
-        f"Plugin prepare hook returned {type(result).__name__}, expected PrepareResult or dict"
+        f"Plugin prepare hook returned {type(result).__name__}, expected PrepareResult, ScatterResult or dict"
     )
 
 

@@ -61,3 +61,4 @@ deploy/config.yaml
 # Claude Code skills (may contain tokens/secrets)
 .claude/skills/
 .codex
+docs/superpowers/

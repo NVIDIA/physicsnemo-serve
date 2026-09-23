@@ -206,9 +206,9 @@ def test_example_user_workflow_negative(client, adapter, invalid_params):
 @pytest.mark.parametrize(
     "invalid_params",
     [
-        {"model": "no_such_model"},
-        {"start_time": "not-a-datetime"},
-        {"start_time": ""},
+        {"model_type": "no_such_model"},
+        {"forecast_times": ["not-a-datetime"]},
+        {"forecast_times": []},
         {"nsteps": 0},
         {"nsteps": -1},
     ],
@@ -297,10 +297,10 @@ def test_earth2_ensemble_negative(client, adapter, invalid_params):
         {"perturbation": "invalid_method"},
     ],
 )
-def test_earth2_ensemble_fanout_negative(client, adapter, invalid_params):
+def test_e2s_ensemble_negative(client, adapter, invalid_params):
     test_params = {
-        "model": "fcn",
-        "start_time": "2024-01-01T00:00:00",
+        "model_type": "fcn",
+        "forecast_times": ["2024-01-01T00:00:00"],
         "nsteps": 3,
         "nensemble": 4,
         "batch_size": 2,
@@ -309,9 +309,7 @@ def test_earth2_ensemble_fanout_negative(client, adapter, invalid_params):
     }
     test_params.update(invalid_params)
     with pytest.raises(requests.exceptions.HTTPError) as err:
-        run_workflow_test(
-            client, "earth2-ensemble-fanout", test_params, adapter=adapter
-        )
+        run_workflow_test(client, "e2s-ensemble", test_params, adapter=adapter)
 
     assert err.value.response.status_code == 422
     assert "Unprocessable Entity" in str(err.value)

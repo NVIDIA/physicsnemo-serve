@@ -30,6 +30,7 @@ from plugin_runtime import (  # noqa: E402
     serialize_postprocess_result,
     serialize_prepare_result,
 )
+from plugin_sdk import is_scatter_result, serialize_scatter_result  # noqa: E402
 
 
 def main() -> int:
@@ -72,8 +73,11 @@ def main() -> int:
             build_postprocess_context(payload) if args.phase == "postprocess" else None
         )
         if args.phase == "prepare" and _supports_explicit_contract(hook):
-            result = serialize_prepare_result(
-                hook(build_raw_request(payload), build_prepare_context(payload))
+            result = hook(build_raw_request(payload), build_prepare_context(payload))
+            result = (
+                serialize_scatter_result(result, payload)
+                if is_scatter_result(result)
+                else serialize_prepare_result(result)
             )
         elif args.phase == "postprocess" and _supports_explicit_contract(hook):
             result = serialize_postprocess_result(
@@ -84,15 +88,23 @@ def main() -> int:
             if result is None:
                 result = {}
             if args.phase == "prepare":
-                result = serialize_prepare_result(result)
+                result = (
+                    serialize_scatter_result(result, payload)
+                    if is_scatter_result(result)
+                    else serialize_prepare_result(result)
+                )
             elif args.phase == "postprocess":
                 result = serialize_postprocess_result(result)
+            elif is_scatter_result(result):
+                result = serialize_scatter_result(result, payload)
             elif not isinstance(result, dict):
                 raise TypeError(
                     f"Plugin workflow '{workflow_id}' hook '{args.phase}' returned "
                     f"{type(result).__name__}, expected dict"
                 )
 
+        if args.phase == "execute" and is_scatter_result(result):
+            result = serialize_scatter_result(result, payload)
         if args.phase == "postprocess" and postprocess_ctx is not None:
             result = merge_registered_outputs_into_result(
                 result, postprocess_ctx.outputs

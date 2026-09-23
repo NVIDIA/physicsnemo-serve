@@ -34,7 +34,7 @@ Then choose your path:
 - `crates/inference_server`
   - REST API for workflow discovery, schema/readiness inspection, run submission, status, and results
 - `crates/worker-runtime`
-  - Rust role workers for `prepare`, `prefetch`, `fanout`, `scheduler`, `collect`, `postprocess`, `publish`, and `results`
+  - Rust role workers for `prepare`, `prefetch`, `scheduler`, internal `collect`, `postprocess`, `publish`, and `results`
 - `crates/e2s_zarr_io`
   - Rust-backed Zarr IO backend for Earth2Studio
 - `crates/scicomp-rq`
@@ -173,8 +173,8 @@ See [docs/README.md](docs/README.md) for the full documentation index. Start wit
 We are continuously improving `physicsnemo-serve`. Here is what we're currently working on and what's coming next:
 
 ### In Progress
-- [x] **Batch & Fanout Hints Migration:** Batch & Ensemble Fanout Hints Migration: Moving batch and fanout hints into the scheduler to distribute requests across multiple ensemble members for aggregated predictions, establishing the scheduler as the single source of truth for request orchestration and resource optimization.
-- [x] **Fanout Request Batching:** Native batching support (Ensemble use cases) for fanout requests to improve compute efficiency.
+- [x] **Scheduler Scatter/Gather:** Ensemble child orchestration and automatic gather are owned by the scheduler; no standalone fanout plugin or worker is required.
+- [ ] **Scatter Child Batching:** Profile the scheduler-scatter path before enabling batching within a parent round.
 
 ### Planned Features
 - [ ] **Priority Queue:** Replacing the current FIFO scheduler queue with a Priority Queue to better support latency-sensitive requests.

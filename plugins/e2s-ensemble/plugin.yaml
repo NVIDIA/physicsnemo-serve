@@ -34,6 +34,9 @@ ingress:
       batch_size:
         type: integer
         minimum: 1
+      max_in_flight:
+        type: integer
+        minimum: 1
       perturbation:
         type: string
         enum:

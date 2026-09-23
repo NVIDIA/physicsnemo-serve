@@ -430,11 +430,11 @@ def test_load_request_payloads_expands_all_defaults(monkeypatch):
     assert len(requests) > 1
     workflows = [workflow for workflow, _payload in requests]
     assert "deterministic_workflow" in workflows
-    assert "earth2-ensemble-fanout" in workflows
+    assert "e2s-ensemble" in workflows
     assert "example_user_workflow" not in workflows
     payloads = dict(requests)
-    assert payloads["earth2-ensemble-fanout"]["batch_size"] == 16
-    assert payloads["earth2-ensemble-fanout"]["nensemble"] == 64
+    assert payloads["e2s-ensemble"]["batch_size"] == 16
+    assert payloads["e2s-ensemble"]["nensemble"] == 64
 
 
 def test_load_request_payloads_uses_direct_payload_for_one_plural_selected_workflow(

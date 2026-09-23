@@ -8,7 +8,9 @@ import logging
 from collections import OrderedDict
 from typing import TYPE_CHECKING, Any, Literal
 
+from e2s_ensemble import aggregate, materialize_inputs, run_batch
 from e2s_workflow import Earth2Workflow, _selected_zarr_backend
+from plugin_sdk import build_execution_context, coerce_model
 
 if TYPE_CHECKING:
     from earth2studio.io import IOBackend
@@ -105,6 +107,7 @@ class EnsembleWorkflow(Earth2Workflow):
         nsteps: int = 10,
         nensemble: int = 8,
         batch_size: int = 2,
+        max_in_flight: int = 1,
         perturbation: Literal[
             "gaussian", "brown", "spherical_gaussian"
         ] = "spherical_gaussian",
@@ -128,6 +131,10 @@ class EnsembleWorkflow(Earth2Workflow):
             raise ValueError(f"Unsupported data source: {data_source}")
         if output_format.lower() != "zarr":
             raise ValueError(f"Unsupported output format: {output_format}")
+
+        # Scheduler concurrency is intentionally separate from the scientific
+        # batch size and has no effect on direct Earth2Studio execution.
+        del max_in_flight
 
         _package, model, data = self._ensure_runtime_loaded()
         torch.manual_seed(int(seed_base))
@@ -182,6 +189,51 @@ class EnsembleWorkflow(Earth2Workflow):
                 plot_variable,
                 plot_step,
             )
+
+    def execute(self, ctx: dict[str, Any]) -> Any:
+        """Route parent, child, and gathered continuation through one entry point."""
+        exec_ctx = build_execution_context(ctx)
+        parameters = dict(ctx.get("parameters") or {})
+        if ctx.get("operation") == "run_ensemble_batch":
+            _package, model, _data = self._ensure_runtime_loaded()
+            payload = ctx.get("payload")
+            round_context = (
+                payload.get("round_context") if isinstance(payload, dict) else {}
+            )
+            attempt_token = (
+                str(round_context.get("attempt_token") or "")
+                if isinstance(round_context, dict)
+                else ""
+            )
+            return run_batch(
+                parameters, exec_ctx, model=model, attempt_token=attempt_token
+            )
+
+        inputs = coerce_model(self.input_model, parameters, label="input")
+        values = {
+            field: getattr(inputs, field) for field in inputs.__dataclass_fields__
+        }
+        child_results = ctx.get("child_results")
+        if isinstance(child_results, list) and child_results:
+            result = aggregate(values, child_results, exec_ctx)
+            if values.get("create_plots"):
+                import zarr
+
+                self.output_dir = exec_ctx.run_dir
+                io = zarr.open_group(result["dataset_path"], mode="r")
+                self.create_ensemble_plot(
+                    io,
+                    values["forecast_times"],
+                    values["nsteps"],
+                    values["nensemble"],
+                    values["plot_variable"],
+                    values["plot_step"],
+                )
+            return result
+
+        _package, model, data = self._ensure_runtime_loaded()
+        _values, scatter = materialize_inputs(values, exec_ctx, model=model, data=data)
+        return scatter
 
     def create_ensemble_plot(
         self,

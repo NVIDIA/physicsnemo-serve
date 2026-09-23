@@ -14,6 +14,7 @@ use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
 use crate::config::{PrepareRoleConfig, PythonRuntimeEnvConfig, parse_role_config};
+use crate::roles::scatter::ScatterResult;
 use crate::traits::{BoxFuture, MessageSink, RoleEnv, WorkerRole};
 
 #[derive(Debug, Clone, Deserialize)]
@@ -90,7 +91,7 @@ impl PrepareRole {
         ))
     }
 
-    async fn run_prepare_hook(&self, payload: &JsonValue) -> Result<PrepareHookOutput> {
+    async fn run_prepare_hook(&self, payload: &JsonValue) -> Result<JsonValue> {
         let input = serde_json::to_vec(payload).context("prepare: failed to serialize payload")?;
         let runtime_env = self.runtime_env_for_phase(payload, "prepare", "prepare_executor_class");
         let python_executable = runtime_env
@@ -146,7 +147,7 @@ impl PrepareRole {
         let stdout = String::from_utf8(output.stdout)
             .context("prepare: hook runner stdout is not valid UTF-8")?;
         if stdout.trim().is_empty() {
-            return Ok(PrepareHookOutput::default());
+            return Ok(serde_json::json!({}));
         }
 
         serde_json::from_str(&stdout).context("prepare: hook output must be valid JSON")
@@ -186,12 +187,52 @@ impl PrepareRole {
         sink: &dyn MessageSink,
     ) -> Result<()> {
         let (typed, mut payload) = decode_prepare_payload(msg.payload())?;
-        let default_next_stage = typed.stage_context.next_stage("prepare")?;
+        // The durable source message defines this invocation: reclaim reuses it,
+        // while a later visit to the same stage gets a different message ID.
+        payload["stage_invocation_id"] = serde_json::json!(crate::roles::round_state::identity(&[
+            msg.run_id(),
+            msg.stream(),
+            msg.id(),
+            &typed.stage_context.current_stage_id,
+        ]));
         let hook_output = self.run_prepare_hook(&payload).await?;
 
+        if hook_output.get("kind").and_then(JsonValue::as_str) == Some("scatter") {
+            let scatter: ScatterResult = serde_json::from_value(hook_output.clone())
+                .context("prepare: invalid scatter output")?;
+            scatter.validate(
+                &typed.stage_context,
+                payload.get("parent_run_id").and_then(JsonValue::as_str),
+            )?;
+            payload["scatter"] = hook_output;
+            let updated_payload = serde_json::to_string(&payload)
+                .context("prepare: failed to encode scatter payload")?;
+            let schedule_stages: Vec<_> = typed
+                .stage_context
+                .pipeline
+                .iter()
+                .filter(|stage| stage.phase == "schedule")
+                .collect();
+            let [schedule_stage] = schedule_stages.as_slice() else {
+                return Err(anyhow!(
+                    "prepare: pipeline must contain exactly one schedule stage"
+                ));
+            };
+            sink.handoff(
+                msg,
+                &schedule_stage.queue,
+                &updated_payload,
+                &schedule_stage.phase,
+            )
+            .await
+            .context("prepare: failed to hand scatter to scheduler")?;
+            return Ok(());
+        }
+
+        let default_next_stage = typed.stage_context.next_stage("prepare")?;
         let next_stage = apply_prepare_output(
             &mut payload,
-            hook_output,
+            serde_json::from_value(hook_output).context("prepare: invalid hook output")?,
             &typed.stage_context,
             &default_next_stage,
         )?;
@@ -793,6 +834,61 @@ def prepare(ctx):
         assert_eq!(payload["fanout_profile"]["item_count"], 1);
         assert_eq!(payload["stage_context"]["current_stage_id"], "fanout");
         assert_eq!(payload["stage_context"]["current_phase"], "fanout");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn prepare_scatter_routes_to_scheduler() {
+        let tmp = tempfile::tempdir().unwrap();
+        let scatter = json!({
+            "kind": "scatter",
+            "children": [{"operation": "run", "parameters": {"seed": 1}}],
+            "child_stage_id": "child",
+            "continuation_stage_id": "finish",
+            "max_in_flight": 1
+        });
+        let runtime = write_fake_python_runtime(
+            &tmp,
+            "scatter-runtime.sh",
+            &serde_json::to_string(&scatter).unwrap(),
+        );
+        let mut env = prepare_env("ignored");
+        env.role_config.as_mut().unwrap()["python_executable"] = json!(runtime);
+        let role = PrepareRole::from_env(&env).unwrap();
+        let sink = RecordingSink::new();
+        let msg = scicomp_rq::Message::new(
+            "1-0",
+            "test:prepare",
+            "prepare:grp",
+            "parent",
+            json!({
+                "run_id": "parent",
+                "workflow_id": "demo",
+                "stage_context": {
+                    "current_stage_id": "prepare",
+                    "current_phase": "prepare",
+                    "pipeline": [
+                        {"id": "prepare", "phase": "prepare", "queue": "prepare", "next": "child"},
+                        {"id": "scheduler", "phase": "schedule", "queue": "custom-schedule", "next": "child"},
+                        {"id": "child", "phase": "execute", "queue": "execute", "next": "finish"},
+                        {"id": "finish", "phase": "execute", "queue": "execute", "next": null}
+                    ]
+                }
+            })
+            .to_string(),
+            "prepare",
+        );
+
+        role.handle(&msg, "prepare", &sink).await.unwrap();
+
+        let writes = sink.writes();
+        assert_eq!(writes.len(), 1);
+        assert_eq!(writes[0].dest_stream, "custom-schedule");
+        assert_eq!(writes[0].stage, "schedule");
+        let forwarded: Value = serde_json::from_str(&writes[0].payload).unwrap();
+        assert_eq!(forwarded["scatter"], scatter);
+        assert!(forwarded["stage_invocation_id"].is_string());
+        assert_eq!(forwarded["stage_context"]["current_phase"], "prepare");
     }
 
     #[cfg(unix)]

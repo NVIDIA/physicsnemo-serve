@@ -668,6 +668,24 @@ impl PyQueueManager {
         })
     }
 
+    /// Renew a pending message lease only when it is still owned by `consumer`.
+    #[pyo3(signature = (message, consumer))]
+    fn renew_message_lease<'py>(
+        &self,
+        py: Python<'py>,
+        message: PyMessage,
+        consumer: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.inner.clone();
+        let message: Message = message.into();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            inner
+                .renew_message_lease(&message, &consumer)
+                .await
+                .map_err(queue_error_to_pyerr)
+        })
+    }
+
     /// Set a field in a Redis hash.
     ///
     /// Args:

@@ -38,6 +38,7 @@ import asyncio
 import contextlib
 import copy
 import faulthandler
+import hashlib
 import inspect
 import json
 import logging
@@ -72,7 +73,13 @@ from plugin_runtime import (  # noqa: E402
     resolve_workflow_hook,
     workflow_is_cacheable,
 )
-from plugin_sdk import PluginCancelledError, cleanup_python_and_torch_runtime  # noqa: E402
+from plugin_sdk import (  # noqa: E402
+    PluginCancelledError,
+    PluginRetryableError,
+    cleanup_python_and_torch_runtime,
+    is_scatter_result,
+    serialize_scatter_result,
+)
 from batch_runtime import BatchExecutionCoordinator, RUN_ITEM  # noqa: E402
 
 if TYPE_CHECKING:
@@ -105,6 +112,85 @@ RECLAIM_INTERVAL_SECS = int(os.environ.get("RECLAIM_INTERVAL_SECS", "30"))
 # message on this worker while the original handler is still running.
 _IN_FLIGHT_MESSAGE_IDS: set[str] = set()
 _IN_FLIGHT_MESSAGE_IDS_LOCK = threading.Lock()
+
+# Keep the pending Redis message owned by the executing worker.  A reclaimed
+# message is allowed to run again, but the old owner must not publish a late
+# result (or release the new owner's allocation).
+_RENEW_MESSAGE_LEASE_LUA = """
+local pending = redis.call('XPENDING', KEYS[1], ARGV[1], ARGV[3], ARGV[3], 1)
+if #pending == 0 or pending[1][1] ~= ARGV[3] or pending[1][2] ~= ARGV[2] then
+  return 0
+end
+redis.call('XCLAIM', KEYS[1], ARGV[1], ARGV[2], 0, ARGV[3])
+return 1
+"""
+
+
+class _MessageLeaseGuard:
+    """Renew a stream message while its GPU work is executing."""
+
+    def __init__(
+        self,
+        redis_client: "redis_lib.Redis",
+        stream_name: str,
+        group_name: str,
+        consumer_name: str,
+        message_id: str,
+    ) -> None:
+        self.redis_client = redis_client
+        self.stream_name = stream_name
+        self.group_name = group_name
+        self.consumer_name = consumer_name
+        self.message_id = message_id
+        self.lost = threading.Event()
+        self._stop = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+
+    def start(self) -> None:
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread:
+            self._thread.join(timeout=2)
+
+    def _run(self) -> None:
+        interval = max(1.0, min(RECLAIM_IDLE_MS / 3000.0, 10.0))
+        while not self._stop.wait(interval):
+            try:
+                if not self._renew_once():
+                    self.lost.set()
+                    logger.warning(
+                        "Lost Redis message ownership: stream=%s msg_id=%s consumer=%s %s",
+                        self.stream_name,
+                        self.message_id,
+                        self.consumer_name,
+                        worker_identity_tag(),
+                    )
+                    return
+            except Exception as exc:
+                # A transient Redis failure must not make two workers publish
+                # the same attempt. Treat an unknown lease as lost.
+                self.lost.set()
+                logger.warning(
+                    "Could not renew Redis message lease; suppressing completion: %s %s",
+                    exc,
+                    worker_identity_tag(),
+                )
+                return
+
+    def _renew_once(self) -> bool:
+        renewed = self.redis_client.eval(
+            _RENEW_MESSAGE_LEASE_LUA,
+            1,
+            self.stream_name,
+            self.group_name,
+            self.consumer_name,
+            self.message_id,
+        )
+        return int(renewed) == 1
+
 
 # Output directory
 DEFAULT_OUTPUT_DIR = os.environ.get("DEFAULT_OUTPUT_DIR", "/outputs")
@@ -431,6 +517,8 @@ def _normalize_legacy_execute_result(
     ctx: dict[str, Any],
     execution_time: float,
 ) -> dict[str, Any]:
+    if is_scatter_result(result):
+        return serialize_scatter_result(result, ctx)
     normalized_result = dict(result)
 
     if not isinstance(normalized_result.get("artifacts"), list):
@@ -446,6 +534,12 @@ def _normalize_legacy_execute_result(
     normalized_result.setdefault("artifacts", [])
     normalized_result.setdefault("output_path", None)
     return normalized_result
+
+
+def _plugin_error_retryable(error: Exception) -> bool:
+    # Unknown errors, invalid inputs, missing/corrupt files and OOM are permanent
+    # by default. Never infer retry safety from exception-message substrings.
+    return isinstance(error, (PluginRetryableError, TimeoutError, ConnectionError))
 
 
 def build_worker_metadata(
@@ -816,6 +910,8 @@ class WorkflowExecutor:
                 }
 
             result = execute_hook(ctx)
+            if is_scatter_result(result):
+                return serialize_scatter_result(result, ctx)
             if not isinstance(result, dict):
                 raise TypeError(
                     f"Plugin workflow '{workflow_id}' returned {type(result).__name__}, expected dict"
@@ -889,6 +985,7 @@ class WorkflowExecutor:
                 "execution_time_seconds": execution_time,
                 "error": str(e),
                 "error_traceback": traceback.format_exc(),
+                "retryable": _plugin_error_retryable(e),
                 "artifacts": artifacts,
             }
         except BaseException as exc:
@@ -1937,6 +2034,11 @@ def _should_persist_run_status_after_execute(
     result: dict[str, Any],
 ) -> bool:
     """Skip status persistence for successful execute handoffs that are still internal."""
+    if is_scatter_result(result):
+        return False
+    if isinstance(payload.get("round_context"), dict):
+        # Gather owns logical child/round outcomes, including failures that retry.
+        return False
     if not _is_success_status(result.get("status", "succeeded")):
         return True
 
@@ -2122,6 +2224,43 @@ def _build_primary_completion(
 ) -> tuple[str, dict[str, Any], str]:
     """Build the primary downstream message for a completed execute step."""
     payload = _decode_payload_object(payload_raw)
+    if is_scatter_result(result):
+        stage_context = payload.get("stage_context")
+        pipeline = (
+            stage_context.get("pipeline") if isinstance(stage_context, dict) else None
+        )
+        schedule_stages = (
+            [
+                stage
+                for stage in pipeline
+                if isinstance(stage, dict) and stage.get("phase") == "schedule"
+            ]
+            if isinstance(pipeline, list)
+            else []
+        )
+        if len(schedule_stages) != 1:
+            raise ValueError("scatter pipeline must contain exactly one schedule stage")
+        schedule_stage = schedule_stages[0]
+        schedule_queue = schedule_stage.get("queue")
+        if not isinstance(schedule_queue, str) or not schedule_queue:
+            raise ValueError("scatter schedule stage must define a queue")
+        handoff = copy.deepcopy(payload)
+        handoff["scatter"] = {
+            key: copy.deepcopy(result[key])
+            for key in (
+                "kind",
+                "children",
+                "child_stage_id",
+                "continuation_stage_id",
+                "max_in_flight",
+            )
+        }
+        return schedule_queue, handoff, "schedule"
+    if isinstance(payload.get("round_context"), dict):
+        handoff = copy.deepcopy(payload)
+        handoff["result"] = _result_without_private_pipeline_updates(result)
+        # Internal gather is independent of the plugin's public pipeline edges.
+        return "collect", handoff, "collect"
     next_stage = _next_plugin_stage(payload)
     result_for_handoff = _result_without_private_pipeline_updates(result)
     result_succeeded = _is_success_status(result.get("status", "succeeded"))
@@ -2336,7 +2475,7 @@ def _build_release_envelope(
     resource_id: int,
     memory_mb: int,
     status: str,
-    parent_run_id: str | None = None,
+    allocation_id: str | None = None,
 ) -> dict[str, Any]:
     """Build a release payload for the scheduler release stream."""
     payload = {
@@ -2346,8 +2485,8 @@ def _build_release_envelope(
         "status": status,
         "released_at": datetime.now(timezone.utc).isoformat(),
     }
-    if parent_run_id:
-        payload["parent_run_id"] = parent_run_id
+    if allocation_id:
+        payload["allocation_id"] = allocation_id
     return payload
 
 
@@ -2810,6 +2949,26 @@ def _finish_in_flight_message(msg_id: str) -> None:
         _IN_FLIGHT_MESSAGE_IDS.discard(msg_id)
 
 
+def _assign_stage_invocation_ids(
+    payload: dict[str, Any], run_id: str, stream: str, message_id: str
+) -> None:
+    """Derive replay-stable identities from the already-persisted source message."""
+    context = payload.get("stage_context")
+    stage_id = context.get("current_stage_id") if isinstance(context, dict) else None
+    if stage_id:
+        source = json.dumps(
+            [run_id, stream, message_id, stage_id],
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        payload["stage_invocation_id"] = hashlib.sha256(source.encode()).hexdigest()
+    for item in payload.get("items") or []:
+        if isinstance(item, dict) and isinstance(item.get("payload"), dict):
+            _assign_stage_invocation_ids(
+                item["payload"], str(item.get("run_id") or ""), stream, message_id
+            )
+
+
 def process_job(
     executor: WorkflowExecutor,
     job: dict,
@@ -2825,6 +2984,14 @@ def process_job(
         Result dictionary with status, output_path, and optional error
     """
     workflow_name, run_id, parameters, payload = parse_job_payload(job)
+    if job.get("msg_id"):
+        _assign_stage_invocation_ids(
+            payload,
+            run_id,
+            str(job.get("stream_name") or ""),
+            str(job["msg_id"]),
+        )
+        job["payload"] = json.dumps(payload)
 
     logger.info(
         "Processing job: run_id=%s workflow=%s %s",
@@ -2959,7 +3126,7 @@ def complete_job(
     status = result["status"]
     resource_id, memory_mb = extract_resource_info(job.get("payload", "{}"))
     payload_obj = _decode_payload_object(job.get("payload", "{}"))
-    parent_run_id = result.get("parent_run_id") or payload_obj.get("parent_run_id")
+    allocation_id = payload_obj.get("allocation_id")
     release_stream = resolve_output_stream("release")
     if isinstance(result.get("batch_results"), list):
         primary_outputs = _build_batch_primary_outputs(stream_name, payload_obj, result)
@@ -3010,7 +3177,7 @@ def complete_job(
                 resource_id,
                 memory_mb,
                 status,
-                parent_run_id=parent_run_id,
+                allocation_id=allocation_id,
             ),
             "release",
         ),
@@ -3034,6 +3201,7 @@ async def complete_job_async(
     qm: "QueueManager",
     msg: "Message",
     result: dict[str, Any],
+    payload_raw: Any = None,
 ) -> None:
     """Complete a job using atomic QueueManager fan-out operations."""
     if Output is None:
@@ -3044,9 +3212,10 @@ async def complete_job_async(
 
     run_id = result["run_id"]
     status = result["status"]
-    resource_id, memory_mb = extract_resource_info(msg.payload)
-    payload_obj = _decode_payload_object(msg.payload)
-    parent_run_id = result.get("parent_run_id") or payload_obj.get("parent_run_id")
+    source_payload = msg.payload if payload_raw is None else payload_raw
+    resource_id, memory_mb = extract_resource_info(source_payload)
+    payload_obj = _decode_payload_object(source_payload)
+    allocation_id = payload_obj.get("allocation_id")
     release_stream = resolve_output_stream("release")
     output_targets = []
     if isinstance(result.get("batch_results"), list):
@@ -3067,7 +3236,7 @@ async def complete_job_async(
     else:
         primary_stream_name, primary_payload, primary_stage = _build_primary_completion(
             msg.stream,
-            msg.payload,
+            source_payload,
             result,
         )
         output_targets.append(
@@ -3086,7 +3255,7 @@ async def complete_job_async(
                     resource_id,
                     memory_mb,
                     status,
-                    parent_run_id=parent_run_id,
+                    allocation_id=allocation_id,
                 )
             ),
             stage="release",
@@ -3108,10 +3277,12 @@ def process_message(
     redis_client: "redis_lib.Redis",
     stream_name: str,
     job: dict,
+    consumer_name: str | None = None,
 ) -> None:
     """
     Process a single message (job). Used by both main loop and reclaimer.
     """
+    job.setdefault("stream_name", stream_name)
     run_id = job.get("run_id", "unknown")
     is_reclaimed = job.get("_reclaimed", False)
     workflow_name = _job_workflow_name(job)
@@ -3131,6 +3302,13 @@ def process_message(
             worker_identity_tag(),
         )
         return
+
+    lease_guard = None
+    if consumer_name and msg_id:
+        lease_guard = _MessageLeaseGuard(
+            redis_client, stream_name, "workers", consumer_name, msg_id
+        )
+        lease_guard.start()
 
     try:
         try:
@@ -3176,6 +3354,8 @@ def process_message(
             return
 
         try:
+            if lease_guard and lease_guard.lost.is_set():
+                return
             complete_job(redis_client, stream_name, job, result)
         except Exception as completion_error:
             logger.error(
@@ -3203,6 +3383,8 @@ def process_message(
                 worker_identity_tag(),
             )
     finally:
+        if lease_guard:
+            lease_guard.stop()
         _finish_in_flight_message(msg_id)
 
 
@@ -3210,12 +3392,15 @@ async def process_message_async(
     executor: WorkflowExecutor,
     qm: "QueueManager",
     msg: "Message",
+    redis_client: "redis_lib.Redis | None" = None,
+    consumer_name: str | None = None,
 ) -> None:
     """Process a message using QueueManager for stream operations."""
     job = {
         "run_id": msg.run_id,
         "payload": msg.payload,
         "msg_id": msg.id,
+        "stream_name": msg.stream,
     }
     workflow_name = _job_workflow_name(job)
     run_id = msg.run_id
@@ -3232,6 +3417,13 @@ async def process_message_async(
             worker_identity_tag(),
         )
         return
+
+    lease_guard = None
+    if redis_client and consumer_name and msg_id:
+        lease_guard = _MessageLeaseGuard(
+            redis_client, msg.stream, msg.group, consumer_name, msg_id
+        )
+        lease_guard.start()
 
     try:
         try:
@@ -3279,7 +3471,9 @@ async def process_message_async(
             return
 
         try:
-            await complete_job_async(qm, msg, result)
+            if lease_guard and lease_guard.lost.is_set():
+                return
+            await complete_job_async(qm, msg, result, job["payload"])
         except Exception as completion_error:
             if _is_source_not_pending_error(completion_error):
                 logger.info(
@@ -3310,6 +3504,8 @@ async def process_message_async(
                 worker_identity_tag(),
             )
     finally:
+        if lease_guard:
+            lease_guard.stop()
         _finish_in_flight_message(msg_id)
 
 
@@ -3401,7 +3597,7 @@ def main() -> None:
 
     # Handler for reclaimed messages
     def handle_reclaimed(job: dict) -> None:
-        process_message(executor, r, stream_name, job)
+        process_message(executor, r, stream_name, job, consumer_name)
 
     reclaimer.start(handle_reclaimed)
 
@@ -3454,7 +3650,7 @@ def main() -> None:
                     )
 
                     # Process the message
-                    process_message(executor, r, stream_name, job)
+                    process_message(executor, r, stream_name, job, consumer_name)
 
     finally:
         # Cleanup
@@ -3650,7 +3846,9 @@ async def main_async() -> None:
                     10,
                 )
                 for msg in claimed:
-                    await process_message_async(executor, qm, msg)
+                    await process_message_async(
+                        executor, qm, msg, redis_client, consumer_name
+                    )
             except Exception as e:
                 logger.error(f"Reclaim cycle error: {e}")
             await asyncio.sleep(RECLAIM_INTERVAL_SECS)
@@ -3692,7 +3890,9 @@ async def main_async() -> None:
             if not messages:
                 continue
             for msg in messages:
-                await process_message_async(executor, qm, msg)
+                await process_message_async(
+                    executor, qm, msg, redis_client, consumer_name
+                )
     except asyncio.CancelledError:
         logger.info("Shutdown requested...")
     finally:

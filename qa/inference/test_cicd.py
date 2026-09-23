@@ -747,11 +747,11 @@ def test_earth2_ensemble(client, adapter):
 
 
 @pytest.mark.rust_only
-def test_earth2_ensemble_fanout(client, adapter):
-    """Run native Rust ensemble fanout pipeline (FCN, 4 members, batch_size=2, 3 steps)."""
+def test_e2s_ensemble(client, adapter):
+    """Run scheduler-owned FCN ensemble scatter/gather."""
     test_params = {
-        "model": "fcn",
-        "start_time": "2024-01-01T00:00:00",
+        "model_type": "fcn",
+        "forecast_times": ["2024-01-01T00:00:00"],
         "nsteps": 3,
         "nensemble": 4,
         "batch_size": 2,
@@ -760,7 +760,7 @@ def test_earth2_ensemble_fanout(client, adapter):
     }
     run_workflow_test(
         client,
-        "earth2-ensemble-fanout",
+        "e2s-ensemble",
         test_params,
         validate_output_files=False,
         adapter=adapter,

@@ -431,7 +431,7 @@ def test_earth2_ensemble(
         ("spherical_gaussian", 0.05),
     ],
 )
-def test_earth2_ensemble_fanout(
+def test_e2s_ensemble(
     client,
     adapter,
     nsteps,
@@ -441,8 +441,8 @@ def test_earth2_ensemble_fanout(
     noise_amplitude,
 ):
     test_params = {
-        "model": "fcn",
-        "start_time": "2024-01-01T00:00:00",
+        "model_type": "fcn",
+        "forecast_times": ["2024-01-01T00:00:00"],
         "nsteps": nsteps,
         "nensemble": nensemble,
         "batch_size": batch_size,
@@ -451,7 +451,7 @@ def test_earth2_ensemble_fanout(
     }
     run_workflow_test(
         client,
-        "earth2-ensemble-fanout",
+        "e2s-ensemble",
         test_params,
         validate_output_files=False,
         adapter=adapter,

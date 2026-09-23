@@ -3,18 +3,19 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+mod attempt_accounting;
 mod batch;
 mod discovery;
-mod parent_slots;
 mod profile;
 mod reservation;
 mod reserved_memory;
+mod scatter;
 
 use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, ensure};
 use scicomp_rq::{Message, Output, QueueManager};
 use serde::Deserialize;
 use serde_json::Value as JsonValue;
@@ -36,9 +37,11 @@ use self::discovery::discover_resources;
 pub(crate) use self::discovery::{
     DEFAULT_GPU_DISCOVERY_INTERVAL_SECS, DEFAULT_MEMORY_UTILIZATION_PERCENT,
 };
-use self::parent_slots::{ParentSlotAcquire, ParentSlotStore, RedisParentSlotStore};
 use self::profile::ResourceManager;
 use self::reservation::{ReservedResource, ResourceReservationTable, is_reservation_blocked_error};
+use attempt_accounting::{
+    AttemptAcquire, AttemptAllocation, AttemptRelease, AttemptReservation, RedisAttemptAccounting,
+};
 
 #[derive(Debug, Clone)]
 struct QueuedRequest {
@@ -96,7 +99,14 @@ enum ScheduleDecision {
 enum ScheduleAttemptOutcome {
     Blocked,
     Dispatched(Box<ReservedSchedule>),
+    DispatchUncertain(Vec<Message>),
     Dropped,
+}
+
+#[derive(Debug)]
+enum DispatchFailure {
+    Certain(anyhow::Error),
+    Uncertain(anyhow::Error),
 }
 
 impl ScheduleAttemptOutcome {
@@ -104,6 +114,7 @@ impl ScheduleAttemptOutcome {
         match self {
             Self::Blocked => "blocked",
             Self::Dispatched(_) => "dispatched",
+            Self::DispatchUncertain(_) => "dispatch_uncertain",
             Self::Dropped => "dropped",
         }
     }
@@ -142,9 +153,6 @@ pub struct SchedulePayload {
     /// Memory required per selected worker (MB), derived from `resource_profile`.
     #[serde(default)]
     pub memory_mb: u64,
-    /// Stage name to emit on the GPU stream.
-    #[serde(skip, default = "default_dispatch_stage")]
-    pub dispatch_stage: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -180,15 +188,19 @@ struct ReservedSchedule {
     payload: SchedulePayload,
     gpu_targets: Vec<ReservedResource>,
     ack_after_dispatch: Vec<Message>,
-    held_parent_slot: Option<String>,
+    attempt_allocation_id: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct RoundAttemptIdentity {
+    allocation_id: String,
+    parent_run_id: String,
+    attempt_token: String,
+    max_in_flight: usize,
 }
 
 fn default_raw_payload() -> JsonValue {
     serde_json::json!({})
-}
-
-fn default_dispatch_stage() -> String {
-    "execute".to_string()
 }
 
 /// Payload for release messages.
@@ -196,20 +208,20 @@ fn default_dispatch_stage() -> String {
 struct ReleasePayload {
     #[serde(default)]
     run_id: String,
-    #[serde(default)]
-    parent_run_id: Option<String>,
-    #[serde(default)]
     memory_mb: u64,
     resource_id: u32,
+    #[serde(default)]
+    allocation_id: Option<String>,
 }
 
 /// Scheduler role with remote-style discovery and resource-aware routing.
 #[derive(Clone)]
 pub struct SchedulerRole {
+    rounds: crate::roles::round_state::RedisRoundStore,
     /// Tracks discovered worker capacity and active GPU reservations.
     reservations: ResourceReservationTable,
-    /// Enforces per-parent in-flight limits for fanout workloads.
-    parent_slots: Arc<dyn ParentSlotStore>,
+    /// Owns one durable GPU allocation and parent slot per scatter child attempt.
+    attempt_accounting: RedisAttemptAccounting,
     /// Checks whether a parent run has already reached a terminal state.
     parent_state: Arc<dyn ParentRunStateStore>,
     /// In-memory FIFO queue plus dedupe index for pending schedule requests.
@@ -278,27 +290,22 @@ impl SchedulerRole {
         retry_dlq_policy: RetryDlqPolicy,
         metrics: Option<WorkerMetrics>,
     ) -> Result<(Self, Vec<Box<dyn BackgroundTask>>)> {
-        let parent_slots = Arc::new(RedisParentSlotStore::new(qm.clone(), "parent_slots"));
         let parent_state = Arc::new(RedisParentRunStateStore::new(qm.clone()));
-        Self::build_with_dependencies(
-            env,
-            qm,
-            parent_slots,
-            parent_state,
-            retry_dlq_policy,
-            metrics,
-        )
+        Self::build_with_dependencies(env, qm, parent_state, retry_dlq_policy, metrics)
     }
 
     fn build_with_dependencies(
         env: &RoleEnv,
         qm: QueueManager,
-        parent_slots: Arc<dyn ParentSlotStore>,
         parent_state: Arc<dyn ParentRunStateStore>,
         retry_dlq_policy: RetryDlqPolicy,
         metrics: Option<WorkerMetrics>,
     ) -> Result<(Self, Vec<Box<dyn BackgroundTask>>)> {
         let mut config: SchedulerRoleConfig = parse_role_config(env.role_config.as_ref())?;
+        anyhow::ensure!(
+            config.scatter_max_attempts > 0,
+            "scatter_max_attempts must be positive"
+        );
 
         config.memory_utilization_percent =
             Self::normalized_memory_utilization_percent(config.memory_utilization_percent);
@@ -317,14 +324,18 @@ impl SchedulerRole {
         let discovery_task: Box<dyn BackgroundTask> = Box::new(ResourceDiscoveryTask {
             reservations: reservations.clone(),
             interval,
-            qm: Box::new(qm),
+            qm: Box::new(qm.clone()),
             registry_key: config.gpu_registry_key.clone(),
             metrics: metrics.clone(),
         });
 
         let role = Self {
+            rounds: crate::roles::round_state::RedisRoundStore::new(
+                qm.clone(),
+                env.stream_prefix.clone(),
+            ),
             reservations,
-            parent_slots,
+            attempt_accounting: RedisAttemptAccounting::new(qm, env.stream_prefix.clone()),
             parent_state,
             scheduler_queue_state: Arc::new(Mutex::new(SchedulerQueueState::default())),
             request_failures: LocalFailureTracker::default(),
@@ -355,6 +366,27 @@ impl SchedulerRole {
     }
 
     async fn apply_release(&self, payload: &ReleasePayload) -> Result<()> {
+        if let Some(allocation_id) = payload.allocation_id.as_deref() {
+            ensure!(
+                is_allocation_id(allocation_id),
+                "scheduler: invalid attempt allocation id"
+            );
+            return match self
+                .attempt_accounting
+                .release(
+                    allocation_id,
+                    &payload.run_id,
+                    payload.resource_id,
+                    payload.memory_mb,
+                )
+                .await?
+            {
+                AttemptRelease::Released | AttemptRelease::AlreadyReleased => Ok(()),
+                AttemptRelease::Unknown => Err(anyhow!(
+                    "scheduler: unknown attempt allocation '{allocation_id}'"
+                )),
+            };
+        }
         self.reservations
             .release(payload.resource_id, payload.memory_mb)
             .await
@@ -365,12 +397,83 @@ impl SchedulerRole {
                 )
             })?;
 
-        if let Some(parent_run_id) = payload.parent_run_id.as_deref()
-            && !parent_run_id.trim().is_empty()
-        {
-            let _ = self.parent_slots.release(parent_run_id).await?;
-        }
+        Ok(())
+    }
 
+    async fn active_attempt_allocation(
+        &self,
+        payload: &SchedulePayload,
+    ) -> Result<Option<AttemptAllocation>> {
+        let Some(identity) = round_attempt_identity(payload)? else {
+            return Ok(None);
+        };
+        let Some(allocation) = self.attempt_accounting.get(&identity.allocation_id).await? else {
+            return Ok(None);
+        };
+        validate_existing_attempt(payload, &identity, &allocation)?;
+        if allocation.released {
+            return Ok(None);
+        }
+        Ok(Some(allocation))
+    }
+
+    async fn active_attempt_release_output(
+        &self,
+        queued: &QueuedRequest,
+    ) -> Result<Option<Output>> {
+        let Some(allocation) = self.active_attempt_allocation(&queued.payload).await? else {
+            return Ok(None);
+        };
+        let payload = serde_json::json!({
+            "run_id": allocation.run_id,
+            "parent_run_id": allocation.parent_run_id,
+            "resource_id": allocation.resource_id,
+            "memory_mb": allocation.memory_mb,
+            "allocation_id": allocation.allocation_id,
+        });
+        Ok(Some(
+            Output::new(&self.release_stream, serde_json::to_string(&payload)?)
+                .with_run_id(queued.msg.run_id().to_string())
+                .with_stage("release"),
+        ))
+    }
+
+    async fn handoff_to_dlq(
+        &self,
+        queued: &QueuedRequest,
+        sink: &dyn MessageSink,
+        dlq_payload: &str,
+        error: &str,
+    ) -> Result<()> {
+        let release = self.active_attempt_release_output(queued).await?;
+        let is_round_child = queued.payload.raw_payload.get("round_context").is_some();
+        if release.is_none() && !is_round_child {
+            sink.handoff(
+                &queued.msg,
+                self.retry_dlq_policy.dlq_stream(),
+                dlq_payload,
+                "dlq",
+            )
+            .await?;
+            return Ok(());
+        }
+        let mut outputs =
+            vec![Output::new(self.retry_dlq_policy.dlq_stream(), dlq_payload).with_stage("dlq")];
+        if let Some(release) = release {
+            outputs.push(release);
+        }
+        if is_round_child {
+            let mut failed = queued.payload.raw_payload.clone();
+            failed["result"] = serde_json::json!({
+                "status": "failed", "retryable": false, "error": error
+            });
+            outputs.push(
+                Output::new("collect", serde_json::to_string(&failed)?)
+                    .with_run_id(queued.msg.run_id().to_string())
+                    .with_stage("collect"),
+            );
+        }
+        sink.forward_many(&queued.msg, &outputs).await?;
         Ok(())
     }
 
@@ -502,17 +605,14 @@ impl SchedulerRole {
                     );
                 }
             }
-            advance_stage_context_for_dispatch(
-                &mut merged_payload,
-                payload.dispatch_stage.as_str(),
-            );
+            advance_stage_context_for_dispatch(&mut merged_payload, "execute");
 
             let stream = self.logical_stream_for_route(gpu_target.stream_name.as_str());
             let encoded_payload = merged_payload.to_string();
             outputs.push(
                 Output::new(stream, encoded_payload)
                     .with_run_id(run_id.to_string())
-                    .with_stage(payload.dispatch_stage.clone()),
+                    .with_stage("execute"),
             );
         }
         Ok(outputs)
@@ -522,7 +622,7 @@ impl SchedulerRole {
         &self,
         reserved: &ReservedSchedule,
         sink: &dyn MessageSink,
-    ) -> Result<()> {
+    ) -> std::result::Result<(), DispatchFailure> {
         let outputs = match self.build_dispatch_outputs(
             &reserved.gpu_targets,
             reserved.payload.run_id.as_str(),
@@ -531,21 +631,47 @@ impl SchedulerRole {
             Ok(outputs) => outputs,
             Err(error) => {
                 self.rollback_reserved_schedule(reserved).await;
-                return Err(error);
+                return Err(DispatchFailure::Certain(error));
             }
         };
         let mut source_messages = Vec::with_capacity(1 + reserved.ack_after_dispatch.len());
         source_messages.push(reserved.source_msg.clone());
         source_messages.extend(reserved.ack_after_dispatch.iter().cloned());
         if let Err(dispatch_error) = sink.forward_many_from(&source_messages, &outputs).await {
-            self.rollback_reserved_schedule(reserved).await;
-            return Err(dispatch_error).context("scheduler: failed to forward scheduled outputs");
+            if reserved.attempt_allocation_id.is_none() {
+                self.rollback_reserved_schedule(reserved).await;
+                return Err(DispatchFailure::Certain(
+                    dispatch_error.context("scheduler: failed to forward scheduled outputs"),
+                ));
+            } else {
+                warn!(
+                    run_id = %reserved.payload.run_id,
+                    allocation_id = ?reserved.attempt_allocation_id,
+                    error = %dispatch_error,
+                    "scatter attempt dispatch outcome is uncertain; retaining durable allocation for retry"
+                );
+                return Err(DispatchFailure::Uncertain(
+                    dispatch_error.context("scheduler: failed to forward scheduled outputs"),
+                ));
+            }
+        }
+
+        if let Some(allocation_id) = reserved.attempt_allocation_id.as_deref()
+            && let Err(error) = self.attempt_accounting.mark_dispatched(allocation_id).await
+        {
+            // Dispatch has already committed. The allocation remains active and
+            // releasable, so failure to update this diagnostic state is not fatal.
+            warn!(
+                run_id = %reserved.payload.run_id,
+                allocation_id,
+                error = %error,
+                "failed to mark scatter attempt allocation dispatched"
+            );
         }
 
         info!(
             run_id = %reserved.payload.run_id,
             workflow = %reserved.payload.workflow,
-            dispatch_stage = %reserved.payload.dispatch_stage,
             memory_mb = reserved.payload.memory_mb,
             target_count = reserved.gpu_targets.len(),
             gpu_targets = ?reserved.gpu_targets,
@@ -561,6 +687,29 @@ impl SchedulerRole {
     }
 
     async fn rollback_reserved_schedule(&self, reserved: &ReservedSchedule) {
+        if let Some(allocation_id) = reserved.attempt_allocation_id.as_deref() {
+            let Some(target) = reserved.gpu_targets.first() else {
+                return;
+            };
+            if let Err(error) = self
+                .attempt_accounting
+                .release(
+                    allocation_id,
+                    &reserved.payload.run_id,
+                    target.resource_id,
+                    reserved.payload.memory_mb,
+                )
+                .await
+            {
+                warn!(
+                    run_id = %reserved.payload.run_id,
+                    allocation_id,
+                    error = %error,
+                    "failed to roll back scatter attempt allocation"
+                );
+            }
+            return;
+        }
         for gpu_target in &reserved.gpu_targets {
             if let Err(release_error) = self
                 .reservations
@@ -583,17 +732,72 @@ impl SchedulerRole {
                 );
             }
         }
+    }
 
-        if let Some(parent_run_id) = reserved.held_parent_slot.as_deref()
-            && let Err(release_error) = self.parent_slots.release(parent_run_id).await
-        {
-            warn!(
-                run_id = %reserved.payload.run_id,
-                parent_run_id,
-                error = %release_error,
-                "scheduler failed to release parent slot after dispatch error"
-            );
+    async fn schedule_round_attempt(
+        &self,
+        mut pending: PendingSchedule,
+        identity: RoundAttemptIdentity,
+    ) -> Result<ScheduleDecision> {
+        inject_allocation_id(&mut pending.payload.raw_payload, &identity.allocation_id)?;
+        if let Some(existing) = self.attempt_accounting.get(&identity.allocation_id).await? {
+            validate_existing_attempt(&pending.payload, &identity, &existing)?;
+            if existing.released {
+                return Ok(ScheduleDecision::Dropped);
+            }
+            pending.payload.memory_mb = existing.memory_mb;
+            return Ok(ScheduleDecision::Reserved(Box::new(ReservedSchedule {
+                source_msg: pending.source_msg,
+                payload: pending.payload,
+                gpu_targets: vec![ReservedResource {
+                    stream_name: existing.stream,
+                    resource_id: existing.resource_id,
+                }],
+                ack_after_dispatch: pending.ack_after_dispatch,
+                attempt_allocation_id: Some(identity.allocation_id),
+            })));
         }
+
+        let candidates = match self
+            .reservations
+            .round_attempt_candidates(&mut pending.payload)
+            .await
+        {
+            Ok(candidates) => candidates,
+            Err(error) if is_reservation_blocked_error(&error) => {
+                return Ok(ScheduleDecision::Blocked);
+            }
+            Err(error) => return Err(error),
+        };
+        for candidate in candidates {
+            let request = AttemptReservation {
+                allocation_id: &identity.allocation_id,
+                run_id: &pending.payload.run_id,
+                parent_run_id: &identity.parent_run_id,
+                attempt_token: &identity.attempt_token,
+                resource_id: candidate.target.resource_id,
+                memory_mb: pending.payload.memory_mb,
+                stream: &candidate.target.stream_name,
+                max_in_flight: identity.max_in_flight,
+                observed_used_mb: candidate.observed_used_mb,
+                usable_memory_mb: candidate.usable_memory_mb,
+            };
+            match self.attempt_accounting.acquire(&request).await? {
+                AttemptAcquire::Acquired => {
+                    return Ok(ScheduleDecision::Reserved(Box::new(ReservedSchedule {
+                        source_msg: pending.source_msg,
+                        payload: pending.payload,
+                        gpu_targets: vec![candidate.target],
+                        ack_after_dispatch: pending.ack_after_dispatch,
+                        attempt_allocation_id: Some(identity.allocation_id),
+                    })));
+                }
+                AttemptAcquire::ParentSaturated | AttemptAcquire::MemoryBlocked => continue,
+                AttemptAcquire::Released => return Ok(ScheduleDecision::Dropped),
+            }
+        }
+
+        Ok(ScheduleDecision::Blocked)
     }
 
     async fn schedule(&self, mut pending: PendingSchedule) -> Result<ScheduleDecision> {
@@ -609,6 +813,32 @@ impl SchedulerRole {
             && !parent_run_id.trim().is_empty()
             && self.parent_state.is_terminal(parent_run_id).await?
         {
+            if pending.payload.raw_payload.get("round_context").is_some() {
+                if let Some(allocation) = self.active_attempt_allocation(&pending.payload).await? {
+                    match self
+                        .attempt_accounting
+                        .release(
+                            &allocation.allocation_id,
+                            &allocation.run_id,
+                            allocation.resource_id,
+                            allocation.memory_mb,
+                        )
+                        .await?
+                    {
+                        AttemptRelease::Released | AttemptRelease::AlreadyReleased => {}
+                        AttemptRelease::Unknown => {
+                            return Err(anyhow!(
+                                "scheduler: active attempt allocation disappeared during cancellation"
+                            ));
+                        }
+                    }
+                }
+                let mut cancelled = pending.payload.raw_payload.clone();
+                cancelled["result"] = serde_json::json!({"status": "cancelled"});
+                self.rounds
+                    .gather(&pending.payload.run_id, &cancelled)
+                    .await?;
+            }
             debug!(
                 msg_id = pending.source_msg.id(),
                 run_id = pending.source_msg.run_id(),
@@ -619,54 +849,34 @@ impl SchedulerRole {
             return Ok(ScheduleDecision::Dropped);
         }
 
-        let held_parent_slot =
-            if let Some((parent_run_id, max_in_flight)) = fanout_gate(&pending.payload) {
-                match self
-                    .parent_slots
-                    .try_acquire(parent_run_id, max_in_flight)
-                    .await?
-                {
-                    ParentSlotAcquire::Acquired { .. } => {
-                        debug!(
-                            msg_id = pending.source_msg.id(),
-                            run_id = pending.source_msg.run_id(),
-                            workflow = %pending.payload.workflow,
-                            parent_run_id = %parent_run_id,
-                            max_in_flight,
-                            "acquired parent slot for queued scheduler request"
-                        );
-                        Some(parent_run_id.to_string())
-                    }
-                    ParentSlotAcquire::Saturated { .. } => {
-                        debug!(
-                            msg_id = pending.source_msg.id(),
-                            run_id = pending.source_msg.run_id(),
-                            workflow = %pending.payload.workflow,
-                            parent_run_id = %parent_run_id,
-                            max_in_flight,
-                            "scheduler request blocked because parent slot is saturated"
-                        );
-                        return Ok(ScheduleDecision::Blocked);
-                    }
-                }
-            } else {
-                None
-            };
-
+        if pending.payload.raw_payload.get("round_context").is_some()
+            && !self
+                .rounds
+                .is_current_child(&pending.payload.run_id, &pending.payload.raw_payload)
+                .await?
+        {
+            return Ok(ScheduleDecision::Dropped);
+        }
+        if let Some(not_before) = pending
+            .payload
+            .raw_payload
+            .get("retry_not_before_ms")
+            .and_then(JsonValue::as_u64)
+        {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_millis();
+            if u128::from(not_before) > now {
+                return Ok(ScheduleDecision::Blocked);
+            }
+        }
+        if let Some(identity) = round_attempt_identity(&pending.payload)? {
+            return self.schedule_round_attempt(pending, identity).await;
+        }
         let gpu_targets = self.reservations.reserve(&mut pending.payload).await;
         let gpu_targets = match gpu_targets {
             Ok(targets) => targets,
             Err(error) => {
-                if let Some(parent_run_id) = held_parent_slot.as_deref()
-                    && let Err(release_err) = self.parent_slots.release(parent_run_id).await
-                {
-                    warn!(
-                        parent_run_id = %parent_run_id,
-                        error = %release_err,
-                        "scheduler: failed to release parent slot after reservation error"
-                    );
-                }
-
                 if is_reservation_blocked_error(&error) {
                     info!(
                         msg_id = pending.source_msg.id(),
@@ -689,7 +899,7 @@ impl SchedulerRole {
             payload: pending.payload,
             gpu_targets,
             ack_after_dispatch: pending.ack_after_dispatch,
-            held_parent_slot,
+            attempt_allocation_id: None,
         })))
     }
 
@@ -708,8 +918,20 @@ impl SchedulerRole {
                 Ok(ScheduleAttemptOutcome::Dropped)
             }
             ScheduleDecision::Reserved(reserved) => {
-                self.dispatch_reserved_schedule(&reserved, sink).await?;
-                Ok(ScheduleAttemptOutcome::Dispatched(reserved))
+                match self.dispatch_reserved_schedule(&reserved, sink).await {
+                    Ok(()) => Ok(ScheduleAttemptOutcome::Dispatched(reserved)),
+                    Err(DispatchFailure::Uncertain(error)) => {
+                        let mut messages = reserved.ack_after_dispatch.clone();
+                        messages.push(reserved.source_msg.clone());
+                        warn!(
+                            run_id = %reserved.payload.run_id,
+                            error = %error,
+                            "deferring scatter attempt to source-message recovery after uncertain dispatch"
+                        );
+                        Ok(ScheduleAttemptOutcome::DispatchUncertain(messages))
+                    }
+                    Err(DispatchFailure::Certain(error)) => Err(error),
+                }
             }
         }
     }
@@ -815,6 +1037,17 @@ impl SchedulerRole {
                 );
                 return Ok(());
             }
+            Ok(ScheduleAttemptOutcome::DispatchUncertain(messages)) => {
+                // The Redis response may have been lost after the atomic handoff
+                // committed. Remove only the local FIFO entry. If the handoff did
+                // not commit, the still-pending source message will be reclaimed
+                // and will reuse the same durable allocation.
+                for msg in &messages {
+                    self.request_failures.clear(msg);
+                }
+                self.finish_request(&messages).await;
+                return Ok(());
+            }
             Ok(ScheduleAttemptOutcome::Dropped) => {
                 self.record_scheduler_queue_wait(outcome_label, queue_wait_seconds);
                 self.request_failures.clear(&queued.msg);
@@ -865,13 +1098,8 @@ impl SchedulerRole {
                     }
                 };
 
-                match sink
-                    .handoff(
-                        &queued.msg,
-                        self.retry_dlq_policy.dlq_stream(),
-                        &dlq_payload,
-                        "dlq",
-                    )
+                match self
+                    .handoff_to_dlq(&queued, sink, &dlq_payload, &error_text)
                     .await
                 {
                     Ok(_) => {
@@ -938,6 +1166,14 @@ impl WorkerRole for SchedulerRole {
     ) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
             if stream == self.schedule_stream.as_str() {
+                if msg.payload().trim().is_empty() {
+                    return Err(anyhow!("scheduler: empty payload on schedule stream"));
+                }
+                let value: JsonValue = serde_json::from_str(msg.payload())
+                    .context("scheduler: schedule payload is not valid JSON")?;
+                if value.get("scatter").is_some() {
+                    return self.register_scatter(&value, msg.run_id()).await;
+                }
                 let schedule_payload = decode_schedule_payload(msg.payload(), msg.run_id())?;
                 info!(
                     msg_id = msg.id(),
@@ -1053,7 +1289,19 @@ fn decode_schedule_payload(raw_payload: &str, run_id: &str) -> Result<SchedulePa
         .context("scheduler: invalid schedule payload JSON")?;
     payload.run_id = run_id.to_string();
     payload.raw_payload = parsed_payload;
-    payload.dispatch_stage = infer_dispatch_stage(&payload);
+    if let Some(target) = payload.raw_payload.get("dispatch_stage_id") {
+        let context: crate::roles::stage::StageContext =
+            serde_json::from_value(payload.raw_payload["stage_context"].clone())?;
+        anyhow::ensure!(
+            target.as_str().is_some_and(|id| context
+                .pipeline
+                .iter()
+                .filter(|stage| stage.id == id && stage.phase == "execute")
+                .count()
+                == 1),
+            "scheduler: dispatch_stage_id must name one execute stage"
+        );
+    }
 
     if payload.workflow.trim().is_empty()
         && let Some(workflow_id) = payload.workflow_id.as_deref()
@@ -1069,11 +1317,6 @@ fn decode_schedule_payload(raw_payload: &str, run_id: &str) -> Result<SchedulePa
     validate_schedule_resource_profile(&payload)?;
 
     Ok(payload)
-}
-
-fn infer_dispatch_stage(payload: &SchedulePayload) -> String {
-    let _ = payload;
-    "execute".to_string()
 }
 
 fn validate_schedule_resource_profile(payload: &SchedulePayload) -> Result<()> {
@@ -1154,7 +1397,7 @@ fn schedule_resource_profile_json(profile: &ScheduleResourceProfile) -> JsonValu
     JsonValue::Object(encoded)
 }
 
-fn fanout_gate(payload: &SchedulePayload) -> Option<(&str, usize)> {
+fn round_parent_limit(payload: &SchedulePayload) -> Option<(&str, usize)> {
     let parent_run_id = payload.parent_run_id.as_deref()?.trim();
     if parent_run_id.is_empty() {
         return None;
@@ -1166,10 +1409,82 @@ fn fanout_gate(payload: &SchedulePayload) -> Option<(&str, usize)> {
     Some((parent_run_id, max_in_flight))
 }
 
+fn round_attempt_identity(payload: &SchedulePayload) -> Result<Option<RoundAttemptIdentity>> {
+    let Some(context) = payload.raw_payload.get("round_context") else {
+        return Ok(None);
+    };
+    let context = context
+        .as_object()
+        .ok_or_else(|| anyhow!("scheduler: round_context must be an object"))?;
+    let round_id = context
+        .get("round_id")
+        .and_then(JsonValue::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| anyhow!("scheduler: round_context.round_id is required"))?;
+    let attempt_token = context
+        .get("attempt_token")
+        .and_then(JsonValue::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| anyhow!("scheduler: round_context.attempt_token is required"))?;
+    let (parent_run_id, max_in_flight) = round_parent_limit(payload).ok_or_else(|| {
+        anyhow!(
+            "scheduler: round child requires parent_run_id and positive fanout_profile.max_in_flight"
+        )
+    })?;
+    let allocation_id = crate::roles::round_state::identity(&[
+        "attempt-allocation",
+        round_id,
+        payload.run_id.as_str(),
+        attempt_token,
+    ]);
+    Ok(Some(RoundAttemptIdentity {
+        allocation_id,
+        parent_run_id: parent_run_id.to_string(),
+        attempt_token: attempt_token.to_string(),
+        max_in_flight,
+    }))
+}
+
+fn validate_existing_attempt(
+    payload: &SchedulePayload,
+    identity: &RoundAttemptIdentity,
+    allocation: &AttemptAllocation,
+) -> Result<()> {
+    ensure!(
+        allocation.run_id == payload.run_id
+            && allocation.parent_run_id == identity.parent_run_id
+            && allocation.attempt_token == identity.attempt_token,
+        "scheduler: existing attempt allocation conflicts with round child"
+    );
+    Ok(())
+}
+
+fn inject_allocation_id(payload: &mut JsonValue, allocation_id: &str) -> Result<()> {
+    let object = payload
+        .as_object_mut()
+        .ok_or_else(|| anyhow!("scheduler: schedule payload must be an object"))?;
+    object.insert(
+        "allocation_id".to_string(),
+        JsonValue::String(allocation_id.to_string()),
+    );
+    Ok(())
+}
+
+fn is_allocation_id(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
 fn advance_stage_context_for_dispatch(payload: &mut JsonValue, dispatch_stage: &str) {
     let Some(root) = payload.as_object_mut() else {
         return;
     };
+    let explicit_target = root
+        .get("dispatch_stage_id")
+        .and_then(JsonValue::as_str)
+        .map(str::to_owned);
     let Some(stage_context) = root
         .get_mut("stage_context")
         .and_then(serde_json::Value::as_object_mut)
@@ -1192,26 +1507,37 @@ fn advance_stage_context_for_dispatch(payload: &mut JsonValue, dispatch_stage: &
         return;
     };
 
-    let next_stage = stage_context
-        .get("current_stage_id")
-        .and_then(serde_json::Value::as_str)
-        .and_then(|current_stage_id| {
+    let next_stage = explicit_target
+        .as_deref()
+        .and_then(|id| {
             pipeline
                 .iter()
-                .find(|stage| {
-                    stage.get("id").and_then(serde_json::Value::as_str) == Some(current_stage_id)
-                })
-                .and_then(|stage| stage.get("next").and_then(serde_json::Value::as_str))
-                .and_then(|next_id| {
-                    pipeline.iter().find(|stage| {
-                        stage.get("id").and_then(serde_json::Value::as_str) == Some(next_id)
-                    })
-                })
+                .find(|stage| stage["id"].as_str() == Some(id))
         })
         .or_else(|| {
-            pipeline.iter().find(|stage| {
-                stage.get("phase").and_then(serde_json::Value::as_str) == Some(dispatch_stage)
-            })
+            stage_context
+                .get("current_stage_id")
+                .and_then(serde_json::Value::as_str)
+                .and_then(|current_stage_id| {
+                    pipeline
+                        .iter()
+                        .find(|stage| {
+                            stage.get("id").and_then(serde_json::Value::as_str)
+                                == Some(current_stage_id)
+                        })
+                        .and_then(|stage| stage.get("next").and_then(serde_json::Value::as_str))
+                        .and_then(|next_id| {
+                            pipeline.iter().find(|stage| {
+                                stage.get("id").and_then(serde_json::Value::as_str) == Some(next_id)
+                            })
+                        })
+                })
+                .or_else(|| {
+                    pipeline.iter().find(|stage| {
+                        stage.get("phase").and_then(serde_json::Value::as_str)
+                            == Some(dispatch_stage)
+                    })
+                })
         });
 
     let Some(next_stage) = next_stage else {
@@ -1286,9 +1612,10 @@ mod tests {
     }
 
     use crate::config::InputStreamSpec;
+    use crate::roles::collect::CollectRole;
     use crate::roles::parent_run_state::InMemoryParentRunStateStore;
-    use crate::roles::scheduler::parent_slots::InMemoryParentSlotStore;
     use crate::test_env;
+    use redis::AsyncCommands;
     use serde_json::json;
     use std::collections::HashSet;
     use std::panic::Location;
@@ -1342,7 +1669,6 @@ mod tests {
     fn scheduler_with_test_queue_manager_and_dependencies<'a>(
         test_name: &'a str,
         env: &'a RoleEnv,
-        parent_slots: Arc<dyn ParentSlotStore>,
         parent_state: Arc<dyn ParentRunStateStore>,
         retry_dlq_policy: RetryDlqPolicy,
     ) -> impl std::future::Future<
@@ -1354,7 +1680,6 @@ mod tests {
             let (role, tasks) = SchedulerRole::build_with_dependencies(
                 env,
                 qm.clone(),
-                parent_slots,
                 parent_state,
                 retry_dlq_policy,
                 None,
@@ -1384,46 +1709,6 @@ mod tests {
         stream: String,
         payload: String,
         stage: String,
-    }
-
-    #[derive(Default)]
-    struct TrackingParentSlotStore {
-        released_parent_run_ids: Mutex<Vec<String>>,
-    }
-
-    impl TrackingParentSlotStore {
-        fn new() -> Self {
-            Self {
-                released_parent_run_ids: Mutex::new(Vec::new()),
-            }
-        }
-
-        fn released_parent_run_ids(&self) -> Vec<String> {
-            self.released_parent_run_ids
-                .lock()
-                .expect("tracking lock poisoned")
-                .clone()
-        }
-    }
-
-    impl ParentSlotStore for TrackingParentSlotStore {
-        fn try_acquire<'a>(
-            &'a self,
-            _parent_run_id: &'a str,
-            _max_in_flight: usize,
-        ) -> BoxFuture<'a, Result<ParentSlotAcquire>> {
-            Box::pin(async { Ok(ParentSlotAcquire::Acquired { active_count: 1 }) })
-        }
-
-        fn release<'a>(&'a self, parent_run_id: &'a str) -> BoxFuture<'a, Result<usize>> {
-            Box::pin(async move {
-                self.released_parent_run_ids
-                    .lock()
-                    .expect("tracking lock poisoned")
-                    .push(parent_run_id.to_string());
-                Ok(0)
-            })
-        }
     }
 
     #[derive(Default)]
@@ -1705,6 +1990,39 @@ mod tests {
         let physical = format!("test:{logical_stream}");
         let group = format!("{logical_stream}:grp");
         scicomp_rq::Message::new("2-0", &physical, &group, run_id, payload, logical_stream)
+    }
+
+    async fn redis_stream_payloads(qm: &QueueManager, stream: &str) -> Vec<JsonValue> {
+        let entries: redis::streams::StreamRangeReply = qm
+            .connection()
+            .xrange_all(format!("test:{stream}"))
+            .await
+            .unwrap();
+        entries
+            .ids
+            .iter()
+            .map(|entry| {
+                let raw: String = redis::from_redis_value(&entry.map["payload"]).unwrap();
+                serde_json::from_str(&raw).unwrap()
+            })
+            .collect()
+    }
+
+    async fn deliver_round_result(
+        collect: &CollectRole,
+        payload: &JsonValue,
+        sink: &dyn MessageSink,
+    ) {
+        let run_id = payload["run_id"].as_str().unwrap();
+        let msg = scicomp_rq::Message::new(
+            "result-1",
+            "test:collect",
+            "collect:grp",
+            run_id,
+            payload.to_string(),
+            "collect",
+        );
+        collect.handle(&msg, "collect", sink).await.unwrap();
     }
 
     fn set_env_var(key: &str, value: Option<&str>) {
@@ -2739,7 +3057,6 @@ mod tests {
         assert_eq!(decoded.run_id, "run-plugin");
         assert_eq!(decoded.workflow, "demo-plugin");
         assert_eq!(decoded.workflow_id.as_deref(), Some("demo-plugin"));
-        assert_eq!(decoded.dispatch_stage, "execute");
         assert_eq!(
             decoded
                 .resource_profile
@@ -3098,7 +3415,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn scheduler_requeues_fanout_item_when_parent_max_in_flight_is_saturated() {
+    async fn scheduler_ignores_legacy_parent_limit_without_round_context() {
         let _guard = test_env::env_lock().lock().await;
         let prev_discovery = std::env::var("SCHEDULER_DISCOVERY_JSON").ok();
 
@@ -3171,39 +3488,20 @@ mod tests {
             &sink,
         )
         .await;
-        let enqueued_at_before_blocked_attempt = role
-            .scheduler_queue_state
-            .lock()
-            .await
-            .queue
-            .front()
-            .expect("queued fanout item should be pending")
-            .enqueued_at;
         run_scheduler_task(&tasks, &sink).await;
 
         let writes = sink.writes();
-        assert_eq!(writes.len(), 1);
+        assert_eq!(writes.len(), 2);
         assert_eq!(writes[0].run_id, "parent-ensemble:item:0");
+        assert_eq!(writes[1].run_id, "parent-ensemble:item:1");
         assert!(sink.handoffs().is_empty());
-        assert_eq!(role.queued_request_count().await, 1);
-        let enqueued_at_after_blocked_attempt = role
-            .scheduler_queue_state
-            .lock()
-            .await
-            .queue
-            .front()
-            .expect("blocked fanout item should remain pending")
-            .enqueued_at;
-        assert_eq!(
-            enqueued_at_after_blocked_attempt, enqueued_at_before_blocked_attempt,
-            "blocked attempts should preserve the total queue-wait measurement window"
-        );
+        assert_eq!(role.queued_request_count().await, 0);
 
         set_env_var("SCHEDULER_DISCOVERY_JSON", prev_discovery.as_deref());
     }
 
     #[tokio::test]
-    async fn scheduler_release_reopens_parent_slot() {
+    async fn scheduler_releases_gpu_for_legacy_shaped_request() {
         let _guard = test_env::env_lock().lock().await;
         let prev_discovery = std::env::var("SCHEDULER_DISCOVERY_JSON").ok();
 
@@ -3298,35 +3596,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn scheduler_release_does_not_free_parent_slot_when_no_gpu_allocation_is_released() {
-        let parent_slots = Arc::new(TrackingParentSlotStore::new());
-        let (_redis_server, role, _) = scheduler_with_test_queue_manager_and_dependencies(
-            "scheduler-tests",
-            &scheduler_env("test:"),
-            parent_slots.clone(),
-            Arc::new(InMemoryParentRunStateStore::new()),
-            RetryDlqPolicy::new(5, "dlq"),
-        )
-        .await;
-
-        let result = role
-            .apply_release(&ReleasePayload {
-                run_id: "run-missing".to_string(),
-                parent_run_id: Some("parent-ensemble".to_string()),
-                memory_mb: 4096,
-                resource_id: 0,
-            })
-            .await;
-
-        assert!(result.is_err());
-        assert!(
-            parent_slots.released_parent_run_ids().is_empty(),
-            "parent slot must not be released when no GPU allocation was actually released"
-        );
-    }
-
-    #[tokio::test]
-    async fn scheduler_allows_single_parent_to_dispatch_multiple_items_without_requeue() {
+    async fn scheduler_does_not_limit_non_round_requests_by_parent() {
         let _guard = test_env::env_lock().lock().await;
         let prev_discovery = std::env::var("SCHEDULER_DISCOVERY_JSON").ok();
 
@@ -3383,7 +3653,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn scheduler_preserves_fifo_order_without_parent_fairness_yield() {
+    async fn scheduler_preserves_fifo_order_for_non_round_parent_requests() {
         let _guard = test_env::env_lock().lock().await;
         let prev_discovery = std::env::var("SCHEDULER_DISCOVERY_JSON").ok();
 
@@ -3487,7 +3757,6 @@ mod tests {
         let (_redis_server, role, tasks) = scheduler_with_test_queue_manager_and_dependencies(
             "scheduler-tests",
             &scheduler_env("test:"),
-            Arc::new(InMemoryParentSlotStore::new()),
             terminal_state,
             RetryDlqPolicy::new(5, "dlq"),
         )
@@ -3588,7 +3857,6 @@ mod tests {
         let (_redis_server, role, tasks) = scheduler_with_test_queue_manager_and_dependencies(
             "scheduler-tests",
             &scheduler_env("test:"),
-            Arc::new(InMemoryParentSlotStore::new()),
             Arc::new(AlwaysFailingParentRunStateStore),
             retry_dlq_policy(2),
         )
@@ -3850,6 +4118,269 @@ mod tests {
         assert_eq!(role.reservations.used_memory_mb(0).await, Some(20_000));
 
         set_env_var("SCHEDULER_DISCOVERY_JSON", prev_discovery.as_deref());
+    }
+
+    #[tokio::test]
+    async fn scheduler_dlq_atomically_emits_owned_attempt_release() {
+        let (_redis_server, role, _tasks) =
+            scheduler_with_test_queue_manager("scheduler-dlq-release", &scheduler_env("test:"))
+                .await;
+        let attempt_token = crate::roles::round_state::identity(&["round-a", "0", "1"]);
+        let child = json!({
+            "run_id": "child-a",
+            "workflow_id": "demo-plugin",
+            "parent_run_id": "parent-a",
+            "fanout_profile": {"item_count": 1, "max_in_flight": 1},
+            "resource_profile": {
+                "gpus_required": 1,
+                "memory_mb": 4096,
+                "executor_class": "python.gpu.demo"
+            },
+            "round_context": {
+                "round_id": "round-a",
+                "child_index": 0,
+                "attempt": 1,
+                "attempt_token": attempt_token
+            },
+            "stage_context": {"current_phase": "schedule"}
+        });
+        let msg = schedule_msg("child-a", &child.to_string());
+        let payload = decode_schedule_payload(msg.payload(), msg.run_id()).unwrap();
+        let identity = round_attempt_identity(&payload).unwrap().unwrap();
+        role.attempt_accounting
+            .acquire(&AttemptReservation {
+                allocation_id: &identity.allocation_id,
+                run_id: "child-a",
+                parent_run_id: "parent-a",
+                attempt_token: &identity.attempt_token,
+                resource_id: 0,
+                memory_mb: 4_096,
+                stream: "gpu:0",
+                max_in_flight: 1,
+                observed_used_mb: 0,
+                usable_memory_mb: 16_000,
+            })
+            .await
+            .unwrap();
+        let queued = QueuedRequest {
+            msg,
+            payload,
+            enqueued_at: Instant::now(),
+        };
+        let sink = RecordingSink::new();
+
+        role.handoff_to_dlq(&queued, &sink, r#"{"error":"persistent"}"#, "persistent")
+            .await
+            .unwrap();
+
+        assert!(sink.handoffs().is_empty());
+        assert_eq!(sink.acked_ids(), vec!["1-0"]);
+        let writes = sink.writes();
+        assert_eq!(writes.len(), 3);
+        assert_eq!(writes[0].stream_key, "shared-dlq");
+        assert_eq!(writes[0].stage, "dlq");
+        assert_eq!(writes[1].stream_key, "release");
+        assert_eq!(writes[1].stage, "release");
+        assert_eq!(writes[2].stream_key, "collect");
+        assert_eq!(writes[2].stage, "collect");
+        let release = decode_release_payload(&writes[1].payload).unwrap();
+        assert_eq!(
+            release.allocation_id.as_deref(),
+            Some(identity.allocation_id.as_str())
+        );
+        role.apply_release(&release).await.unwrap();
+        assert!(
+            role.attempt_accounting
+                .get(&identity.allocation_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .released
+        );
+    }
+
+    #[tokio::test]
+    async fn scatter_attempt_release_is_owned_and_idempotent() {
+        let _guard = test_env::env_lock().lock().await;
+        let prev_discovery = std::env::var("SCHEDULER_DISCOVERY_JSON").ok();
+        set_env_var(
+            "SCHEDULER_DISCOVERY_JSON",
+            Some(
+                r#"[{"resource_id":0,"stream_name":"gpu:ns:pod:0","total_memory_mb":30000,"used_memory_mb":0,"device_kind":"gpu","executor_class":"python.gpu.demo","tags":["demo"]}]"#,
+            ),
+        );
+        let (_redis_server, role, tasks) =
+            scheduler_with_test_queue_manager("scheduler-tests", &scheduler_env("test:")).await;
+        let sink = RecordingSink::new();
+        run_gpu_discovery(&tasks, &sink).await;
+
+        let attempt_token = crate::roles::round_state::identity(&["round-a", "0", "1"]);
+        let child = json!({
+            "run_id": "child-a",
+            "workflow_id": "demo-plugin",
+            "parent_run_id": "parent-a",
+            "fanout_profile": {"item_count": 1, "max_in_flight": 1},
+            "resource_profile": {
+                "gpus_required": 1,
+                "memory_mb": 4096,
+                "executor_class": "python.gpu.demo",
+                "tags": ["demo"]
+            },
+            "round_context": {
+                "round_id": "round-a",
+                "child_index": 0,
+                "attempt": 1,
+                "attempt_token": attempt_token
+            },
+            "stage_context": {"current_phase": "schedule"}
+        });
+        let plan = crate::roles::round_state::RoundPlan {
+            round_id: "round-a".into(),
+            parent_run_id: "parent-a".into(),
+            stage_invocation_id: "invocation-a".into(),
+            continuation_stage_id: "results".into(),
+            parent_payload: json!({"workflow_id": "demo-plugin"}),
+            children: vec![child.clone()],
+            max_attempts: 3,
+            schedule_stream: "schedule".into(),
+        };
+        role.rounds.register(&plan, "schedule").await.unwrap();
+
+        queue_schedule(
+            &role,
+            &schedule_msg("child-a", &child.to_string()),
+            "schedule",
+            &sink,
+        )
+        .await;
+        run_scheduler_task(&tasks, &sink).await;
+
+        let writes = sink.writes();
+        assert_eq!(writes.len(), 1);
+        let dispatched: JsonValue = serde_json::from_str(&writes[0].payload).unwrap();
+        let allocation_id = dispatched["allocation_id"].as_str().unwrap();
+        assert!(is_allocation_id(allocation_id));
+        assert_eq!(role.reservations.used_memory_mb(0).await, Some(4_096));
+
+        let release = json!({
+            "run_id": "child-a",
+            "parent_run_id": "parent-a",
+            "resource_id": 0,
+            "memory_mb": 4096,
+            "allocation_id": allocation_id,
+            "status": "succeeded"
+        });
+        role.handle(
+            &release_msg("child-a", &release.to_string()),
+            "release",
+            &sink,
+        )
+        .await
+        .unwrap();
+        role.handle(
+            &release_msg("child-a", &release.to_string()),
+            "release",
+            &sink,
+        )
+        .await
+        .unwrap();
+        assert_eq!(role.reservations.used_memory_mb(0).await, Some(0));
+
+        set_env_var("SCHEDULER_DISCOVERY_JSON", prev_discovery.as_deref());
+    }
+
+    #[tokio::test]
+    async fn ensemble_rounds_complete_retry_and_reject_stale_results_end_to_end() {
+        let (server, qm) = test_support::spawn_test_queue_manager("ensemble-e2e").await;
+        let env = scheduler_env_with_config(
+            "test:",
+            json!({"batching_enabled": false, "scatter_max_attempts": 2}),
+        );
+        let (role, _tasks) =
+            SchedulerRole::from_env(&env, qm.clone(), retry_dlq_policy(5), None).unwrap();
+        let collect_env = RoleEnv {
+            role_name: "collect".into(),
+            stream_prefix: "test:".into(),
+            inputs: vec![InputStreamSpec {
+                stream: "collect".into(),
+                max_dequeue_items: 10,
+                poll_interval_ms: 10,
+                block_ms: 50,
+                reclaim_idle_ms: 60_000,
+            }],
+            resolved_outputs: vec![],
+            role_config: None,
+            python_runtime_envs: Default::default(),
+        };
+        let (collect, _) =
+            CollectRole::from_env_with_queue_manager(&collect_env, qm.clone()).unwrap();
+        let sink = RecordingSink::new();
+        let mut parent = json!({
+            "run_id": "parent",
+            "workflow_id": "synthetic-ensemble",
+            "stage_invocation_id": "round-1",
+            "resource_profile": {"gpus_required": 1, "memory_mb": 128, "executor_class": "test"},
+            "stage_context": {"current_stage_id": "start", "current_phase": "execute", "pipeline": [
+                {"id": "start", "phase": "execute", "queue": "execute", "next": null},
+                {"id": "child", "phase": "execute", "queue": "execute", "next": null},
+                {"id": "resume", "phase": "execute", "queue": "execute", "next": null},
+                {"id": "finish", "phase": "results", "queue": "results", "next": null}
+            ]},
+            "scatter": {"kind": "scatter", "child_stage_id": "child",
+                "continuation_stage_id": "resume", "max_in_flight": 2, "children": [
+                    {"operation": "run", "parameters": {"member": 0}},
+                    {"operation": "run", "parameters": {"member": 1}}
+                ]}
+        });
+
+        role.handle(
+            &schedule_msg("parent", &parent.to_string()),
+            "schedule",
+            &sink,
+        )
+        .await
+        .unwrap();
+        let first_children = redis_stream_payloads(&qm, "schedule").await;
+        assert_eq!(first_children.len(), 2);
+        for (index, child) in first_children.iter().enumerate() {
+            let mut outcome = child.clone();
+            outcome["result"] = json!({"status": "succeeded", "member": index});
+            deliver_round_result(&collect, &outcome, &sink).await;
+        }
+        let mut duplicate = first_children[0].clone();
+        duplicate["result"] = json!({"status": "failed"});
+        deliver_round_result(&collect, &duplicate, &sink).await;
+        let after_first = redis_stream_payloads(&qm, "schedule").await;
+        assert_eq!(after_first.len(), 3, "one continuation must be emitted");
+
+        parent = after_first[2].clone();
+        parent["stage_invocation_id"] = json!("round-2");
+        parent["scatter"] = json!({"kind": "scatter", "child_stage_id": "child",
+        "continuation_stage_id": "finish", "max_in_flight": 1, "children": [
+            {"operation": "run", "parameters": {"member": 2}}
+        ]});
+        role.handle(
+            &schedule_msg_with_id("2-0", "parent", &parent.to_string()),
+            "schedule",
+            &sink,
+        )
+        .await
+        .unwrap();
+        let second_child = redis_stream_payloads(&qm, "schedule").await[3].clone();
+        let mut failure = second_child.clone();
+        failure["result"] = json!({"status": "failed", "retryable": true, "error": "transient"});
+        deliver_round_result(&collect, &failure, &sink).await;
+        let retry = redis_stream_payloads(&qm, "schedule").await[4].clone();
+        deliver_round_result(&collect, &failure, &sink).await;
+        let mut retry_failure = retry.clone();
+        retry_failure["result"] = failure["result"].clone();
+        deliver_round_result(&collect, &retry_failure, &sink).await;
+
+        assert_eq!(redis_stream_payloads(&qm, "schedule").await.len(), 5);
+        let failed = redis_stream_payloads(&qm, "results").await;
+        assert_eq!(failed.len(), 1);
+        assert_eq!(failed[0]["status"], "failed");
+        drop(server);
     }
 
     #[tokio::test]

@@ -372,7 +372,6 @@ COPY crates/worker-runtime/config/profiles.json /app/config/profiles.json
 COPY plugins/earth2-deterministic /app/plugins/earth2-deterministic
 COPY plugins/earth2-deterministic-batch /app/plugins/earth2-deterministic-batch
 COPY plugins/earth2-ensemble /app/plugins/earth2-ensemble
-COPY plugins/earth2-ensemble-fanout /app/plugins/earth2-ensemble-fanout
 COPY plugins/e2s-deterministic-earth2 /app/plugins/e2s-deterministic-earth2
 COPY plugins/e2s-deterministic /app/plugins/e2s-deterministic
 COPY plugins/e2s-deterministic-fcn /app/plugins/e2s-deterministic-fcn
@@ -392,6 +391,8 @@ COPY checkpoints /app/checkpoints
 COPY python/e2s_tools /app/python/e2s_tools
 # Copy Earth2Workflow base class used by e2s-* plugins
 COPY python/e2s_workflow.py /app/python/e2s_workflow.py
+# Copy scheduler-scatter helpers used by the e2s-ensemble plugin.
+COPY python/e2s_ensemble.py /app/python/e2s_ensemble.py
 # Copy import-light execution primitives shared by PhysicsNeMo-CFD plugins.
 COPY python/physicsnemo_cfd_runtime /app/python/physicsnemo_cfd_runtime
 # Copy the serve-owned per-item batch execution coordinator.

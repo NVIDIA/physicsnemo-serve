@@ -80,27 +80,24 @@ Use the same pattern for every plugin:
 2. `prefetch`
    - Rust stage
    - materializes `prefetch_plan`
-3. `fanout`
-   - Rust stage
-   - expands one parent run into many child runs from `fanout_items`
-4. `schedule`
+3. `schedule`
    - Rust stage
    - matches `resource_profile` to worker capabilities
-   - considers non-fanout requests for scheduler-owned batching
+   - starts scheduler-owned scatter rounds returned by prepare or execute
+   - considers ordinary requests for scheduler-owned batching
    - uses `batch_profile` as an optional override for grouping, size, wait, and memory scaling
-5. `execute`
+4. `execute`
    - Python worker
    - runs `execute(ctx)` for low-level hooks, or the typed SDK `run(inputs, ctx)` / `run_batch(items, ctx)` paths
    - older plugins may still provide `execute_batch(items, ctx)` directly
    - cacheable workflows may reuse one workflow instance per Python worker process
-6. `collect`
-   - Rust stage
-   - recombines child results for a parent run
-7. `postprocess`
+5. Internal gather
+   - records child results and resumes the parent automatically after the round completes
+6. `postprocess`
    - Rust stage
    - invokes Python `postprocess(ctx)` when present
    - applies built-in `result_ops`
-8. `results`
+7. `results`
    - Rust terminal persistence stage
 
 ## Model Warmup And Cache
@@ -139,34 +136,11 @@ The scheduler is responsible for:
 - matching `device_kind`
 - respecting `gpus_required`, memory, and tags
 - fairness and requeue behavior
-- `fanout_profile.max_in_flight` limits for child runs
-- scheduler-owned request batching for non-fanout requests, including single-GPU
+- scatter `max_in_flight` limits for child runs
+- scheduler-owned request batching for ordinary requests, including single-GPU
   capacity checks and per-GPU stream dispatch
 
 FIFO is only a queue-ingestion default. The scheduler should avoid letting one parent run or one workload shape monopolize capacity.
-
-## Fanout Status
-
-For fanout parent runs, `GET /v1/infer/<workflow_id>/<run_id>/status` can include:
-
-```json
-{
-  "status": "running",
-  "stage": "executing",
-  "fanout_progress": {
-    "expected_count": 20,
-    "collected_count": 7,
-    "remaining_count": 13,
-    "succeeded_count": 6,
-    "failed_count": 1,
-    "cancelled_count": 0,
-    "child_run_ids": [
-      "parent-run:item:0",
-      "parent-run:item:1"
-    ]
-  }
-}
-```
 
 ## Runtime Environments
 

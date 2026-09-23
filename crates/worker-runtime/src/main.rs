@@ -80,7 +80,7 @@ fn init_tracing() {
 }
 
 fn role_requires_queue_manager(role_name: &str) -> bool {
-    matches!(role_name, "collect" | "fanout" | "publish" | "scheduler")
+    matches!(role_name, "collect" | "publish" | "scheduler")
 }
 
 #[tokio::main]
@@ -244,7 +244,6 @@ mod tests {
     #[test]
     fn role_requires_queue_manager_for_shared_state_roles() {
         assert!(role_requires_queue_manager("collect"));
-        assert!(role_requires_queue_manager("fanout"));
         assert!(role_requires_queue_manager("scheduler"));
         assert!(!role_requires_queue_manager("prepare"));
         assert!(!role_requires_queue_manager("results"));

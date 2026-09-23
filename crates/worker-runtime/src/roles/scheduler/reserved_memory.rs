@@ -18,8 +18,8 @@ use tokio::sync::Mutex;
 
 use crate::traits::BoxFuture;
 
-const RESERVED_MEMORY_HASH_KEY: &str = "scheduler:reserved_memory_mb";
-const ACTIVE_RESERVED_MEMORY_HASH_KEY: &str = "scheduler:active_reserved_memory_mb";
+pub(super) const RESERVED_MEMORY_HASH_KEY: &str = "scheduler:reserved_memory_mb";
+pub(super) const ACTIVE_RESERVED_MEMORY_HASH_KEY: &str = "scheduler:active_reserved_memory_mb";
 
 pub(super) trait ReservedMemoryStore: Send + Sync {
     #[cfg(test)]

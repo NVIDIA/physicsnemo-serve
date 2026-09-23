@@ -101,10 +101,8 @@ PIPELINE_RECOMMENDED_CHECK_PHASE = {
 SUPPORTED_PIPELINE_STAGE_HANDLERS = {
     ("prepare", "plugin_phase"),
     ("prefetch", "prefetch"),
-    ("fanout", "fanout"),
     ("schedule", "schedule"),
     ("execute", "plugin_phase"),
-    ("collect", "collect"),
     ("postprocess", "plugin_phase"),
     ("publish", "plugin_phase"),
     ("publish", "publish_outputs"),
@@ -167,7 +165,7 @@ def _build_pipeline_phases(profile_name: str, options: dict[str, Any]) -> list[s
             raise ValueError(
                 "Plugin manifest pipeline.options.prefetch must be true, false, or 'parent'"
             )
-        phases.extend(["fanout", "schedule", "execute", "collect"])
+        phases.extend(["schedule", "execute"])
         if postprocess_enabled:
             phases.append("postprocess")
     else:
@@ -199,13 +197,6 @@ def _stage_definition(phase: str, execute_queue: str) -> dict[str, Any]:
             "handler": "prefetch",
             "queue": "prefetch",
         }
-    if phase == "fanout":
-        return {
-            "id": "fanout",
-            "phase": "fanout",
-            "handler": "fanout",
-            "queue": "fanout",
-        }
     if phase == "schedule":
         return {
             "id": "schedule",
@@ -219,13 +210,6 @@ def _stage_definition(phase: str, execute_queue: str) -> dict[str, Any]:
             "phase": "execute",
             "handler": "plugin_phase",
             "queue": execute_queue,
-        }
-    if phase == "collect":
-        return {
-            "id": "collect",
-            "phase": "collect",
-            "handler": "collect",
-            "queue": "collect",
         }
     if phase == "postprocess":
         return {

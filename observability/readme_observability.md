@@ -486,7 +486,6 @@ Prometheus runs as a supervisord-managed process inside the Docker container:
 | 10 | runtime-env-launcher (GPU execute workers) | — |
 | 40 | **Prometheus** | 9090 |
 | 40 | worker-runtime prepare | — |
-| 45 | worker-runtime fanout | — |
 | 50 | **inference-server** | 8080 |
 | 50 | worker-runtime prefetch, results | — |
 | 55 | worker-runtime collect, postprocess | — |

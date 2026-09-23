@@ -72,6 +72,13 @@ RESULT_METADATA_FIELDS = {
 }
 
 
+def _reject_fanout(fanout_items: Any) -> None:
+    if fanout_items:
+        raise ValueError(
+            "Direct inference does not support fanout_items; use run-local"
+        )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Run one manifest-driven plugin inference without service processes."
@@ -253,9 +260,13 @@ def run_plugin(
             payload["prefetch_artifacts"] = materialized["artifacts"]
             prefetch_stats = materialized["stats"]
         elif phase == "schedule":
-            pass
+            _reject_fanout(payload.get("fanout_items"))
         elif phase == "execute":
-            payload["result"] = _invoke_phase(module, workflow_id, phase, payload)
+            result = _invoke_phase(module, workflow_id, phase, payload)
+            updates = result.get("_pipeline_updates")
+            if isinstance(updates, dict):
+                _reject_fanout(updates.get("fanout_items"))
+            payload["result"] = result
         elif phase == "postprocess":
             payload["result"] = _invoke_phase(module, workflow_id, phase, payload)
         elif phase == "results":

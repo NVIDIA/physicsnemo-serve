@@ -1926,12 +1926,6 @@ def _should_handoff_to_postprocess(
     return isinstance(next_stage, dict) and next_stage.get("phase") == "postprocess"
 
 
-def _should_handoff_to_collect(payload: dict[str, Any]) -> bool:
-    """Return True when the next plugin stage is collect."""
-    next_stage = _next_plugin_stage(payload)
-    return isinstance(next_stage, dict) and next_stage.get("phase") == "collect"
-
-
 def _should_persist_run_status_after_execute(
     payload: dict[str, Any],
     result: dict[str, Any],
@@ -1944,13 +1938,29 @@ def _should_persist_run_status_after_execute(
     if not isinstance(next_stage, dict):
         return True
 
-    next_phase = next_stage.get("phase")
-    if next_phase in {"postprocess", "publish"}:
-        return False
+    return next_stage.get("phase") not in {"postprocess", "publish", "schedule"}
 
-    return not (
-        next_phase == "fanout" and isinstance(result.get("_pipeline_updates"), dict)
-    )
+
+def _validate_fanout_handoff(payload: dict[str, Any], result: dict[str, Any]) -> None:
+    """Reject fanout_items that the next stage cannot expand.
+
+    The scheduler expands fanout parents, so an execute stage returning
+    ``_pipeline_updates.fanout_items`` must hand off to a schedule stage.
+    """
+    updates = result.get("_pipeline_updates")
+    if not (
+        _is_success_status(result.get("status", "succeeded"))
+        and isinstance(updates, dict)
+        and updates.get("fanout_items")
+    ):
+        return
+    next_stage = _next_plugin_stage(payload)
+    next_phase = next_stage.get("phase") if isinstance(next_stage, dict) else None
+    if next_phase != "schedule":
+        raise ValueError(
+            "fanout_items require a schedule stage next, "
+            f"but the next stage phase is {next_phase!r}"
+        )
 
 
 def _should_mark_publication_skipped_after_execute_failure(
@@ -2842,34 +2852,38 @@ def process_job(
             worker_identity_tag(),
         )
         result = executor.execute(workflow_name, run_id, parameters, payload=payload)
+        _validate_fanout_handoff(payload, result)
         if isinstance(result.get("batch_results"), list):
-            for entry in result["batch_results"]:
-                if not isinstance(entry, dict):
-                    continue
-                item_result = entry.get("result")
-                item_payload = entry.get("payload")
-                item_run_id = str(entry.get("run_id") or "").strip()
-                if (
-                    item_run_id
-                    and isinstance(item_result, dict)
-                    and isinstance(item_payload, dict)
+            batch_items = [
+                (
+                    str(entry.get("run_id") or "").strip(),
+                    _batch_item_completion_payload(payload, entry["payload"]),
+                    entry["result"],
+                )
+                for entry in result["batch_results"]
+                if isinstance(entry, dict)
+                and str(entry.get("run_id") or "").strip()
+                and isinstance(entry.get("result"), dict)
+                and isinstance(entry.get("payload"), dict)
+            ]
+            # Validate every item before persisting any, so a bad handoff fails
+            # the whole batch consistently.
+            for _, item_payload, item_result in batch_items:
+                _validate_fanout_handoff(item_payload, item_result)
+            for item_run_id, item_payload, item_result in batch_items:
+                if not _should_persist_run_status_after_execute(
+                    item_payload, item_result
                 ):
-                    item_payload_for_status = _batch_item_completion_payload(
-                        payload, item_payload
-                    )
-                    if not _should_persist_run_status_after_execute(
-                        item_payload_for_status, item_result
-                    ):
-                        continue
-                    _persist_run_status_and_result(
-                        executor.redis_client,
-                        workflow_name,
-                        item_run_id,
-                        item_result,
-                        publication_skipped=_should_mark_publication_skipped_after_execute_failure(
-                            item_payload_for_status, item_result
-                        ),
-                    )
+                    continue
+                _persist_run_status_and_result(
+                    executor.redis_client,
+                    workflow_name,
+                    item_run_id,
+                    item_result,
+                    publication_skipped=_should_mark_publication_skipped_after_execute_failure(
+                        item_payload, item_result
+                    ),
+                )
         elif _should_persist_run_status_after_execute(payload, result):
             _persist_run_status_and_result(
                 executor.redis_client,
@@ -2891,7 +2905,7 @@ def process_job(
             response.setdefault(key, value)
         return response
     except ValueError as e:
-        # Workflow not found
+        # Workflow not found or invalid workflow output
         logger.error(f"Workflow error for {run_id}: {e}")
         return {
             "run_id": run_id,

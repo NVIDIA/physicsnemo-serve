@@ -15,7 +15,8 @@ replay remains a fallback when no `prepared_state_path` is provided.
 By default, perturbation materialization uses `scheduled_gpu`, which routes the
 materialization step through the scheduler and runs it on `execute.earth2-gpu`.
 Set `perturbation_materialization_mode` to `prepare_cpu` to materialize prepared
-states inside the CPU prepare hook and skip directly to fanout. CPU prepare mode
+states inside the CPU prepare hook and hand the fanout items straight to the
+scheduler. CPU prepare mode
 avoids GPU scheduling for perturbation, but it makes prepare a heavier hook and
 does not use scheduler resource accounting for that work.
 
@@ -45,7 +46,8 @@ python scripts/plugin_dev.py run-local plugins/earth2-ensemble-fanout --dry-run
 ```
 
 `run-example` only exercises the plugin hooks directly. Use `run-local` for the
-full `materialize_perturbations -> fanout -> collect -> postprocess` path.
+full `materialize_perturbations -> schedule (fanout) -> execute -> collect -> postprocess`
+path.
 
 ## Zarr backend
 

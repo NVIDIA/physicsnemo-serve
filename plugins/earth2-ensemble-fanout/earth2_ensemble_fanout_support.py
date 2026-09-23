@@ -26,7 +26,7 @@ from plugin_sdk import (  # pyright: ignore[reportMissingImports]
 
 _FANOUT_RUST_ZARR_MAX_POOL_BYTES = 2 * 1024 * 1024 * 1024
 _FANOUT_RUST_ZARR_MAX_INFLIGHT_TRANSIENT_BYTES = 4 * 1024 * 1024 * 1024
-_FANOUT_STAGE_ID = "fanout"
+_SCHEDULE_STAGE_ID = "schedule"
 
 
 @dataclass
@@ -499,7 +499,7 @@ def prepare_ensemble_fanout_request(
             "parameters": dict(normalized.__dict__),
             "fanout_profile": materialized["fanout_profile"],
             "fanout_items": materialized["fanout_items"],
-            "next_stage_id": _FANOUT_STAGE_ID,
+            "next_stage_id": _SCHEDULE_STAGE_ID,
         }
 
     return {

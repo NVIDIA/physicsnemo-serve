@@ -73,11 +73,6 @@ pipeline:
       phase: execute
       handler: plugin_phase
       queue: execute.earth2-gpu
-      next: fanout
-    - id: fanout
-      phase: fanout
-      handler: fanout
-      queue: fanout
       next: schedule
     - id: schedule
       phase: schedule
@@ -88,11 +83,6 @@ pipeline:
       phase: execute
       handler: plugin_phase
       queue: execute.earth2-gpu
-      next: collect
-    - id: collect
-      phase: collect
-      handler: collect
-      queue: collect
       next: postprocess
     - id: postprocess
       phase: postprocess

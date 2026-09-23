@@ -65,7 +65,8 @@ runtime:
   - `prepare -> schedule -> execute -> results`
   - compatible requests are grouped by the scheduler
 - `ensemble`
-  - `prepare -> fanout -> schedule -> execute -> collect -> results`
+  - `prepare -> schedule -> execute -> results`
+  - same shape as `batch`; use it for fanout plugins (see [Fanout](#fanout))
 
 `pipeline.options` only enables a small set of extra stages:
 
@@ -73,7 +74,7 @@ runtime:
   - append `postprocess` before `results`
 - `prefetch: parent`
   - only for `ensemble`
-  - insert `prefetch` before `fanout`
+  - insert `prefetch` before `schedule`
 
 Example:
 
@@ -87,7 +88,7 @@ pipeline:
 
 That expands to:
 
-`prepare -> prefetch -> fanout -> schedule -> execute -> collect -> postprocess -> results`
+`prepare -> prefetch -> schedule -> execute -> postprocess -> results`
 
 ## Runtime Profiles
 
@@ -266,10 +267,11 @@ Do not keep request-scoped state on the shared workflow instance:
 Framework-owned stages:
 
 - `prefetch`
-- `fanout`
-- `schedule`
-- `collect`
+- `schedule` (also expands fanout parents)
 - `results`
+
+`collect` also runs as a framework role, but it is never declared in a manifest:
+the scheduler routes fanout children to it.
 
 ## Prepare Output Contract
 
@@ -289,14 +291,15 @@ Common fields:
 - `batch_profile`
   - consumed by `schedule` as an optional scheduler hint for grouping compatible requests
 - `fanout_profile`
-  - consumed by `fanout`, `schedule`, and `collect`
+  - consumed by `schedule` and `collect`
 - `fanout_items`
-  - child inputs consumed by `fanout`
+  - child inputs; the scheduler expands the request into one child run per item
 
 If `prepare()` creates temporary files, write them under `ctx.run_dir` and pass
 their paths through `inputs` or `fanout_items`.
 
-The scheduler considers every non-fanout request for batching. `batch_profile`
+The scheduler considers every request for batching; fanout children only batch
+with siblings of the same parent. `batch_profile`
 overrides the scheduler defaults for compatible grouping, maximum size, maximum
 wait, and memory scaling. It does not force authors to implement a special hook:
 plugins may keep using `run(inputs, ctx)` and let the default adapter execute
@@ -329,9 +332,10 @@ Notes:
 - `register()` is useful when the plugin writes a file first and then attaches it as an output
 - simple JSON-only plugins can just return payload data; explicit output registration is mainly for additional files and datasets
 
-## Fanout And Collect
+## Fanout
 
-Use `fanout/collect` when one logical request expands into many independent child runs and later recombines.
+Use fanout when one logical request expands into many independent child runs
+that are later recombined.
 
 Good fits:
 
@@ -341,23 +345,55 @@ Good fits:
 - per-tile inference
 - per-region processing
 
-This contract is generic:
+Fanout is not declared in the manifest. Any plugin gets it by returning
+`fanout_items`, as long as the next stage is `schedule`. The `simple` profile has
+no `schedule` stage, so it cannot fan out. The scheduler creates one child run per
+item, schedules the children like any other request, and routes their results to
+the framework `collect` role. When every child has reported, the parent continues
+to its stage after `execute`: `postprocess`, `publish`, or `results`.
 
-```json
-{
-  "fanout_profile": {
-    "item_count": 20,
-    "max_in_flight": 4,
-    "failure_policy": "collect_all"
-  },
-  "fanout_items": [
-    {
-      "item_index": 0,
-      "parameters": {"seed": 1000}
-    }
-  ]
+Return the items from `prepare()`:
+
+```python
+def prepare(self, request, ctx) -> PrepareResult:
+    params = dict(request.raw_fields)
+    return PrepareResult(
+        inputs=params,
+        fanout_profile={"max_in_flight": 4, "failure_policy": "collect_all"},
+        fanout_items=[
+            {"item_index": i, "parameters": {**params, "seed": 1000 + i}}
+            for i in range(params["members"])
+        ],
+    )
+```
+
+Or, when items can only be computed on a GPU, from an execute stage whose `next`
+is a `schedule` stage (see `plugins/earth2-ensemble-fanout`):
+
+```python
+return {
+    "status": "succeeded",
+    "_pipeline_updates": {"fanout_profile": {...}, "fanout_items": [...]},
 }
 ```
+
+Contract:
+
+- `fanout_items[]`
+  - `item_index` (defaults to the item's position)
+  - optional per-child `operation`, `parameters`, and `resource_profile` overrides
+- `fanout_profile`
+  - `item_count`: defaults to `len(fanout_items)`; must match it when set
+  - `max_in_flight`: maximum concurrent scheduler dispatches for this parent. A
+    dispatch can be a batch of sibling children, so set
+    `batch_profile.enabled: false` for a strict per-child limit
+  - `failure_policy`: `collect_all` (default) or `fail_fast`
+- each child runs the normal `execute` / `run` path with its item's parameters;
+  the raw item is available as `ctx.fanout_item`
+- `postprocess` receives the parent result with `child_results[]`
+  (`item_index`, `child_run_id`, `fanout_item`, `result`, sorted by `item_index`)
+  and an `aggregation_summary`
+- parent run status includes `fanout_progress`
 
 ## Scheduling
 

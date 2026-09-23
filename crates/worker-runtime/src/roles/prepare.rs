@@ -260,6 +260,19 @@ fn apply_prepare_output(
         default_next_stage.clone()
     };
 
+    let has_fanout_items = hook_output
+        .fanout_items
+        .as_ref()
+        .and_then(JsonValue::as_array)
+        .is_some_and(|items| !items.is_empty());
+    if has_fanout_items && !schedule_follows(stage_context, &target_stage) {
+        return Err(anyhow!(
+            "prepare: fanout_items require a schedule stage next, but stage '{}' has phase '{}'",
+            target_stage.id,
+            target_stage.phase
+        ));
+    }
+
     let map = payload
         .as_object_mut()
         .ok_or_else(|| anyhow!("prepare: payload must remain a JSON object"))?;
@@ -303,6 +316,25 @@ fn apply_prepare_output(
     );
 
     Ok(target_stage)
+}
+
+/// Fanout parents are expanded by the scheduler, so `stage` must be `schedule`,
+/// or `prefetch` handing off to `schedule`.
+fn schedule_follows(stage_context: &StageContext, stage: &StageDescriptor) -> bool {
+    match stage.phase.as_str() {
+        "schedule" => true,
+        "prefetch" => stage
+            .next
+            .as_deref()
+            .and_then(|next_id| {
+                stage_context
+                    .pipeline
+                    .iter()
+                    .find(|next| next.id == next_id)
+            })
+            .is_some_and(|next| next.phase == "schedule"),
+        _ => false,
+    }
 }
 
 impl WorkerRole for PrepareRole {
@@ -766,8 +798,9 @@ def prepare(ctx):
                 "pipeline": [
                     {"id": "prepare", "phase": "prepare", "queue": "prepare", "next": "schedule_materialize"},
                     {"id": "schedule_materialize", "phase": "schedule", "queue": "schedule", "next": "materialize_perturbations"},
-                    {"id": "materialize_perturbations", "phase": "execute", "queue": "execute.earth2-gpu", "next": "fanout"},
-                    {"id": "fanout", "phase": "fanout", "queue": "fanout", "next": "results"},
+                    {"id": "materialize_perturbations", "phase": "execute", "queue": "execute.earth2-gpu", "next": "schedule"},
+                    {"id": "schedule", "phase": "schedule", "queue": "schedule", "next": "execute"},
+                    {"id": "execute", "phase": "execute", "queue": "execute.earth2-gpu", "next": "results"},
                     {"id": "results", "phase": "results", "queue": "results", "next": null}
                 ]
             }
@@ -777,7 +810,7 @@ def prepare(ctx):
         let default_next = stage_context.next_stage("prepare").unwrap();
         let output = PrepareHookOutput {
             operation: Some("run".to_string()),
-            next_stage_id: Some("fanout".to_string()),
+            next_stage_id: Some("schedule".to_string()),
             fanout_profile: Some(json!({"item_count": 1, "max_in_flight": 1})),
             fanout_items: Some(json!([{"item_index": 0, "parameters": {"value": 1}}])),
             ..Default::default()
@@ -786,13 +819,55 @@ def prepare(ctx):
         let next_stage =
             apply_prepare_output(&mut payload, output, &stage_context, &default_next).unwrap();
 
-        assert_eq!(next_stage.id, "fanout");
-        assert_eq!(next_stage.phase, "fanout");
-        assert_eq!(next_stage.queue, "fanout");
+        assert_eq!(next_stage.id, "schedule");
+        assert_eq!(next_stage.phase, "schedule");
+        assert_eq!(next_stage.queue, "schedule");
         assert_eq!(payload["operation"], "run");
         assert_eq!(payload["fanout_profile"]["item_count"], 1);
-        assert_eq!(payload["stage_context"]["current_stage_id"], "fanout");
-        assert_eq!(payload["stage_context"]["current_phase"], "fanout");
+        assert_eq!(payload["stage_context"]["current_stage_id"], "schedule");
+        assert_eq!(payload["stage_context"]["current_phase"], "schedule");
+    }
+
+    #[test]
+    fn prepare_output_requires_schedule_after_fanout_items() {
+        let apply = |pipeline: Value| {
+            let mut payload = json!({
+                "stage_context": {
+                    "current_stage_id": "prepare",
+                    "current_phase": "prepare",
+                    "pipeline": pipeline
+                }
+            });
+            let stage_context: crate::roles::stage::StageContext =
+                serde_json::from_value(payload["stage_context"].clone()).unwrap();
+            let default_next = stage_context.next_stage("prepare").unwrap();
+            let output = PrepareHookOutput {
+                fanout_items: Some(json!([{"item_index": 0}])),
+                ..Default::default()
+            };
+            apply_prepare_output(&mut payload, output, &stage_context, &default_next)
+        };
+
+        let error = apply(json!([
+            {"id": "prepare", "phase": "prepare", "queue": "prepare", "next": "execute"},
+            {"id": "execute", "phase": "execute", "queue": "execute.cpu", "next": "results"},
+            {"id": "results", "phase": "results", "queue": "results", "next": null}
+        ]))
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("require a schedule stage next"),
+            "{error:#}"
+        );
+
+        let next_stage = apply(json!([
+            {"id": "prepare", "phase": "prepare", "queue": "prepare", "next": "prefetch"},
+            {"id": "prefetch", "phase": "prefetch", "queue": "prefetch", "next": "schedule"},
+            {"id": "schedule", "phase": "schedule", "queue": "schedule", "next": "execute"},
+            {"id": "execute", "phase": "execute", "queue": "execute.cpu", "next": "results"},
+            {"id": "results", "phase": "results", "queue": "results", "next": null}
+        ]))
+        .unwrap();
+        assert_eq!(next_stage.phase, "prefetch");
     }
 
     #[cfg(unix)]

@@ -34,7 +34,7 @@ Then choose your path:
 - `crates/inference_server`
   - REST API for workflow discovery, schema/readiness inspection, run submission, status, and results
 - `crates/worker-runtime`
-  - Rust role workers for `prepare`, `prefetch`, `fanout`, `scheduler`, `collect`, `postprocess`, `publish`, and `results`
+  - Rust role workers for `prepare`, `prefetch`, `scheduler` (including fanout expansion), `collect`, `postprocess`, `publish`, and `results`
 - `crates/e2s_zarr_io`
   - Rust-backed Zarr IO backend for Earth2Studio
 - `crates/scicomp-rq`
@@ -66,8 +66,8 @@ with `--runtime-dir`.
 
 The direct runner supports JSON plugins using `simple`,
 `prefetch`/`default`, `postprocess`, and single-item `batch` profiles.
-Fanout/collect, publication, multipart ingress, and custom framework stages are
-rejected explicitly. See
+Fanout (`fanout_items`), publication, multipart ingress, and custom framework
+stages are rejected explicitly. See
 [`crates/physicsnemo-serve-cmd/README.md`](crates/physicsnemo-serve-cmd/README.md)
 for runtime assembly and packaging instructions.
 

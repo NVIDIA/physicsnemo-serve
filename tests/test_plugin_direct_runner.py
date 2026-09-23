@@ -1153,7 +1153,7 @@ WORKFLOW = FailedWorkflow
     assert result["payload"] == {"diagnostic_code": "E_MODEL"}
 
 
-def test_direct_runner_rejects_ensemble_pipeline_explicitly(tmp_path: Path) -> None:
+def test_direct_runner_rejects_fanout_items_explicitly(tmp_path: Path) -> None:
     plugin_root = _write_plugin(
         tmp_path,
         plugin_id="direct-ensemble",
@@ -1183,4 +1183,36 @@ WORKFLOW = EnsembleWorkflow
     proc = _run_direct(plugin_root, {}, tmp_path / "outputs")
 
     assert proc.returncode == 1
-    assert "does not support pipeline phase 'fanout'" in proc.stderr
+    assert "does not support fanout_items" in proc.stderr
+
+
+def test_direct_runner_rejects_execute_produced_fanout_items(tmp_path: Path) -> None:
+    plugin_root = _write_plugin(
+        tmp_path,
+        plugin_id="direct-execute-fanout",
+        profile="ensemble",
+        options={},
+        request_schema={"type": "object"},
+        workflow="""
+from plugin_sdk import PluginWorkflow, PrepareResult
+
+
+class EnsembleWorkflow(PluginWorkflow):
+    def prepare(self, request, ctx):
+        return PrepareResult(inputs={})
+
+    def execute(self, ctx):
+        return {
+            "status": "succeeded",
+            "_pipeline_updates": {"fanout_items": [{"item_index": 0}]},
+        }
+
+
+WORKFLOW = EnsembleWorkflow
+""",
+    )
+
+    proc = _run_direct(plugin_root, {}, tmp_path / "outputs")
+
+    assert proc.returncode == 1
+    assert "does not support fanout_items" in proc.stderr

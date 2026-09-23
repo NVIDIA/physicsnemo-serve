@@ -1170,12 +1170,8 @@ def _run_local_needs_cpu_direct_pipeline(
     if not _manifest_uses_compact_pipeline_profile(manifest):
         return False
     pipeline = manifest.get("pipeline", {})
-    if str(pipeline.get("profile") or "").strip() == "batch":
-        return False
-    if any(
-        str(stage.get("phase") or "").strip() == "fanout"
-        for stage in _pipeline_stages(manifest)
-    ):
+    # Batch and ensemble plugins rely on the scheduler for batching and fanout.
+    if str(pipeline.get("profile") or "").strip() in {"batch", "ensemble"}:
         return False
     return any(
         str(stage.get("phase") or "").strip() == "schedule"
@@ -1731,18 +1727,6 @@ def _build_runtime_config(
                 "inputs": [_input_stream_spec(queue)],
                 "outputs": [],
             }
-        elif phase == "collect" and handler == "collect":
-            add_stream(queue)
-            roles["collect"] = {
-                "inputs": [_input_stream_spec(queue)],
-                "outputs": [],
-            }
-        elif phase == "fanout" and handler == "fanout":
-            add_stream(queue)
-            roles["fanout"] = {
-                "inputs": [_input_stream_spec(queue)],
-                "outputs": [],
-            }
         elif phase == "prefetch" and handler == "prefetch":
             add_stream(queue)
             roles["prefetch"] = {
@@ -1769,6 +1753,12 @@ def _build_runtime_config(
                     "max_batch_size": 4,
                     "max_batch_wait_ms": 200,
                 },
+            }
+            # The scheduler expands fanout parents; collect gathers their children.
+            add_stream("collect")
+            roles["collect"] = {
+                "inputs": [_input_stream_spec("collect")],
+                "outputs": [],
             }
         elif phase == "postprocess" and handler == "plugin_phase":
             add_stream(queue)
@@ -1838,7 +1828,6 @@ def _runtime_roles_for_pipeline(
     )
     for candidate in (
         "prepare",
-        "fanout",
         "prefetch",
         "scheduler",
         "collect",
@@ -1850,7 +1839,7 @@ def _runtime_roles_for_pipeline(
             if include_publish or manifest_declares_publish:
                 roles.append(candidate)
             continue
-        if candidate == "scheduler":
+        if candidate in {"scheduler", "collect"}:
             if any(
                 str(stage.get("phase")) == "schedule"
                 and str(stage.get("handler")) == "schedule"
@@ -1876,10 +1865,6 @@ def _runtime_roles_for_pipeline(
             and (
                 str(stage.get("handler")) == "plugin_phase"
                 if candidate in {"prepare", "postprocess"}
-                else str(stage.get("handler")) == "fanout"
-                if candidate == "fanout"
-                else str(stage.get("handler")) == "collect"
-                if candidate == "collect"
                 else str(stage.get("handler")) == candidate
             )
             for stage in stages

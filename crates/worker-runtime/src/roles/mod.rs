@@ -4,7 +4,6 @@
  */
 
 pub mod collect;
-pub mod fanout;
 pub mod parent_run_state;
 pub mod postprocess;
 pub mod prefetch;
@@ -85,13 +84,6 @@ pub fn build_role(env: &RoleEnv, providers: RoleProviders) -> Result<RoleBuildRe
             };
             Ok((Box::new(role), tasks))
         }
-        "fanout" => {
-            let (role, tasks) = match providers.queue_manager {
-                Some(qm) => fanout::FanoutRole::from_env_with_queue_manager(env, qm)?,
-                None => fanout::FanoutRole::from_env(env)?,
-            };
-            Ok((Box::new(role), tasks))
-        }
         "prepare" => {
             let role = prepare::PrepareRole::from_env(env)?;
             Ok((Box::new(role), vec![]))
@@ -130,7 +122,7 @@ pub fn build_role(env: &RoleEnv, providers: RoleProviders) -> Result<RoleBuildRe
             Ok((Box::new(role), vec![]))
         }
         unknown => Err(anyhow!(
-            "unknown role '{}': expected collect, fanout, prepare, postprocess, prefetch, publish, scheduler, or results",
+            "unknown role '{}': expected collect, prepare, postprocess, prefetch, publish, scheduler, or results",
             unknown
         )),
     }
@@ -207,14 +199,6 @@ mod tests {
         let env = env_for("collect", &["results"]);
         let (role, tasks) = build_role(&env, RoleProviders::empty()).unwrap();
         assert_eq!(role.name(), "collect");
-        assert!(tasks.is_empty());
-    }
-
-    #[test]
-    fn build_role_creates_fanout() {
-        let env = env_for("fanout", &["schedule"]);
-        let (role, tasks) = build_role(&env, RoleProviders::empty()).unwrap();
-        assert_eq!(role.name(), "fanout");
         assert!(tasks.is_empty());
     }
 

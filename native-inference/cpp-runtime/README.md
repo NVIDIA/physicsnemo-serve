@@ -10,8 +10,9 @@ customer workflows are described in the [inference guide](../README.md).
 
 For native Windows x64, see the [Windows guide](../docs/windows.md). It covers
 MSVC, Release builds, external DLL paths, and AOTInductor/TensorRT validation.
-Windows builds support the baseline backends; the TensorRT exact-operator
-plugin option remains unavailable there.
+Windows environment setup builds the baseline backends. Exact TensorRT plugins
+require the [manual SDK configuration](../docs/windows.md#exact-tensorrt-profiles),
+matching PyTorch/CUTLASS headers, and target-GPU model qualification.
 
 From the repository root:
 
@@ -73,13 +74,14 @@ Native inference does not import the Python model.
 
 ### Exact TensorRT operators for Transolver and GeoTransolver
 
-The opt-in `PNMIR_ENABLE_TENSORRT_EXACT=ON` build adds eleven native TensorRT
+The opt-in `PNMIR_ENABLE_TENSORRT_EXACT=ON` build adds twelve native TensorRT
 plugins: Linear, GEMM, TokenSum, SliceBmm, LayerNorm, Softmax, Attention, GELU
 and WeightedBlend, plus ScalarDiv and InverseDistanceBlend for DoMINO surface
-aggregation.
+aggregation and DesliceBmm for Transolver deslicing.
 They preserve the arithmetic and layout choices used by the pinned PyTorch
 reference. Model Builder's `layout-order-exact` profile selects the original
-eight; `geotransolver-exact` also requires WeightedBlend. Each build verifies
+eight; `layout-order-exact-v2` also requires DesliceBmm and enforces byte equality.
+`geotransolver-exact` adds WeightedBlend to the original eight. Each build verifies
 its native results; these profiles do not guarantee bitwise parity for arbitrary
 models or different CUDA/cuBLAS/PyTorch versions.
 The option defaults to `OFF` and requires `PNMIR_ENABLE_TENSORRT=ON`.
@@ -109,8 +111,11 @@ Add `-DPNMIR_ENABLE_AOTI=ON` when configuring the SDK for the GeoTransolver
 example's default two-backend build. This also requires the matching installed
 Torch development libraries, as described above.
 
-Installation includes all eleven `libpnmir_tensorrt_exact_*_plugin.so` files in
-the SDK library directory. The TensorRT CMake target links its matching plugin
+Linux installation includes all twelve `libpnmir_tensorrt_exact_*_plugin.so`
+files in the SDK library directory. Windows installs
+`pnmir_tensorrt_exact_*_plugin.dll` files in `bin` and import libraries in `lib`.
+Keep all twelve plugin DLLs available when using the exact-enabled runtime.
+The TensorRT CMake target links its matching plugin
 targets, and the CLI and device runner register their operator IDs automatically.
 Applications using `Runtime` must call the public helper before creating a
 session whose manifest declares these required operators:
@@ -138,6 +143,14 @@ name and registration symbol. It evaluates two FP32 scalar-weighted tensors
 with separately rounded multiplies followed by a rounded add, preserving the
 eager reference's arithmetic instead of fusing it into an FMA. The original
 eight operators and Transolver profile remain compatible.
+
+Transolver's DesliceBmm plugin (`pnmir.tensorrt-exact-deslice-bmm`, ABI `1`)
+reproduces the pinned eager deslicing strided batched cuBLAS call. It consumes
+FP32 weights in BTHS order and the exact attention output in BSHD order, emits
+BHTD, and relies on the builder to restore BTHD. The v2 rewrite accepts static
+batch-one graphs with more than one head and the verified exact-attention
+producer; unsupported deslicing patterns fail export. It does not change the
+original eight plugin ABIs or the existing `layout-order-exact` profile.
 
 For a Model Builder project, copy the installed libraries into its declared
 asset paths before building. The [GeoTransolver example commands](../examples/README.md#geotransolver)

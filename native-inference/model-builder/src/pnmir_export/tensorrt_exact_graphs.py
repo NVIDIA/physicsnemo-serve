@@ -569,6 +569,100 @@ def _replace_slice_bmms(onnx: Any, model: Any) -> int:
     return len(replacements)
 
 
+def _replace_deslice_bmms(onnx: Any, model: Any) -> int:
+    """Replace every supported deslice, or reject the targeted graph unchanged.
+
+    ExactAttention returns physical BSHD; its restoring transpose presents BHSD
+    to ONNX. Keep BSHD for the strided cuBLAS call and restore the BTHD logical
+    result after the plugin's packed BHTD output. Existing consumers of the
+    attention transpose remain intact.
+    """
+    shapes = _static_tensor_shapes(model)
+    dtypes = _static_tensor_dtypes(model)
+    producer = {output: node for node in model.graph.node for output in node.output}
+    replacements: dict[_NodeKey, str] = {}
+
+    def attributes(node: Any) -> dict[str, Any]:
+        return {a.name: onnx.helper.get_attribute_value(a) for a in node.attribute}
+
+    def raw_attention(node: Any) -> str | None:
+        if node.domain not in ("", "ai.onnx") or len(node.input) != 2 or len(node.output) != 1:
+            return None
+        weights = shapes.get(node.input[0], [])
+        attention = shapes.get(node.input[1], [])
+        if len(weights) != 4 or len(attention) != 4:
+            return None
+        batch, tokens, heads, slices = weights
+        width = attention[-1]
+        if (
+            batch != 1 or heads <= 1
+            or any(not 0 < value <= 2**31 - 1 for value in (*weights, width))
+            or heads * slices > 2**31 - 1 or heads * width > 2**31 - 1
+            or attention != [batch, heads, slices, width]
+            or shapes.get(node.output[0]) != [batch, tokens, heads, width]
+            or any(dtypes.get(name) != onnx.TensorProto.FLOAT for name in (*node.input, *node.output))
+        ):
+            return None
+        transpose = producer.get(node.input[1])
+        if (
+            transpose is None or transpose.op_type != "Transpose"
+            or transpose.domain not in ("", "ai.onnx")
+            or len(transpose.input) != 1 or len(transpose.output) != 1
+            or attributes(transpose).get("perm") != [0, 2, 1, 3]
+        ):
+            return None
+        raw = transpose.input[0]
+        source = producer.get(raw)
+        if (
+            source is None or source.op_type != _EXACT_ATTENTION_PLUGIN_NAME
+            or source.domain != "" or len(source.input) != 3 or len(source.output) != 1
+            or attributes(source).get("plugin_version") != b"1"
+            or attributes(source).get("plugin_namespace") != b""
+            or any(shapes.get(name) != attention or dtypes.get(name) != onnx.TensorProto.FLOAT for name in source.input)
+        ):
+            return None
+        # Raw output metadata is absent in the attention rewrite. When present,
+        # it must agree with the creator's physical BSHD contract.
+        if raw in dtypes and dtypes[raw] != onnx.TensorProto.FLOAT:
+            return None
+        if raw in shapes and shapes[raw] != [batch, slices, heads, width]:
+            return None
+        return raw
+
+    for node in model.graph.node:
+        if node.op_type != "Einsum" or attributes(node).get("equation") != b"bths,bhsd->bthd":
+            continue
+        raw = raw_attention(node)
+        if raw is None:
+            raise ValueError(f"unsupported Transolver deslice graph pattern: {node.name or tuple(node.output)}")
+        replacements[_node_key(node)] = raw
+    if not replacements:
+        return 0
+
+    names = _OnnxValueNameAllocator.from_model(model)
+    rewritten = []
+    for node in model.graph.node:
+        raw = replacements.get(_node_key(node))
+        if raw is None:
+            rewritten.append(node)
+            continue
+        output = names.allocate(node.output[0] + "__pnmir_bhtd")
+        rewritten.extend((
+            onnx.helper.make_node(
+                "PNMIRExactDesliceBmm", (node.input[0], raw), (output,),
+                name=f"{node.name}__pnmir_exact_deslice_bmm",
+                plugin_version="1", plugin_namespace="",
+            ),
+            onnx.helper.make_node(
+                "Transpose", (output,), tuple(node.output),
+                name=f"{node.name}__pnmir_restore_bthd", perm=(0, 2, 1, 3),
+            ),
+        ))
+    del model.graph.node[:]
+    model.graph.node.extend(rewritten)
+    return len(replacements)
+
+
 def _replace_layer_norms(onnx: Any, model: Any) -> int:
     """Route last-dimension FP32 LayerNorm through the exact CUDA plugin."""
     shapes = _static_tensor_shapes(model)

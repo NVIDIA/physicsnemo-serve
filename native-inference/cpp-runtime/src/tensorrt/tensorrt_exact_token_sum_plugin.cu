@@ -64,20 +64,22 @@ bool valid_dimensions(const nvinfer1::Dims& input) {
 }
 
 ReductionConfig make_config(const nvinfer1::Dims& input) {
-  const int outputs = input.d[0] * input.d[2] * input.d[3];
+  const int outputs =
+      static_cast<int>(input.d[0] * input.d[2] * input.d[3]);
+  const int tokens = static_cast<int>(input.d[1]);
   const int output_vectors = outputs / kVectorSize;
   int dim0_power = output_vectors < kMaxThreads
                        ? last_power_of_two(output_vectors)
                        : kMaxThreads;
-  int dim1_power = input.d[1] < kMaxThreads
-                       ? last_power_of_two(input.d[1])
+  int dim1_power = tokens < kMaxThreads
+                       ? last_power_of_two(tokens)
                        : kMaxThreads;
   int block_width = std::min(dim0_power, kWarpSize);
   int block_height = std::min(dim1_power, kMaxThreads / block_width);
   block_width = std::min(dim0_power, kMaxThreads / block_height);
 
   const int threshold = std::min(block_height * 16, 256);
-  const bool split_across_warps = input.d[1] >= threshold;
+  const bool split_across_warps = tokens >= threshold;
   int output_step = block_width;
   int input_step = 1;
   if (split_across_warps) {
@@ -87,7 +89,7 @@ ReductionConfig make_config(const nvinfer1::Dims& input) {
   }
 
   int ctas_per_output = 1;
-  const int values_per_thread = ceil_div(input.d[1], input_step);
+  const int values_per_thread = ceil_div(tokens, input_step);
   int device = 0;
   cudaDeviceProp properties{};
   if (split_across_warps && values_per_thread >= 256 &&
@@ -109,7 +111,7 @@ ReductionConfig make_config(const nvinfer1::Dims& input) {
   }
 
   return {outputs,
-          static_cast<int>(input.d[1]),
+          tokens,
           static_cast<int>(input.d[2] * input.d[3]),
           block_width,
           block_height,

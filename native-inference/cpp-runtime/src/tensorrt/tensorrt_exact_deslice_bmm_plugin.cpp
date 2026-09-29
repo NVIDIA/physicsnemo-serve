@@ -1,4 +1,4 @@
-#include "physicsnemo/inference/backends/tensorrt_exact_slice_bmm_plugin.hpp"
+#include "physicsnemo/inference/backends/tensorrt_exact_deslice_bmm_plugin.hpp"
 
 #include <NvInfer.h>
 #include <cublas_v2.h>
@@ -11,13 +11,14 @@
 namespace physicsnemo::inference {
 namespace {
 
-constexpr char kPluginName[] = "PNMIRExactSliceBmm";
+constexpr char kPluginName[] = "PNMIRExactDesliceBmm";
 constexpr char kPluginVersion[] = "1";
 
 bool valid_dimensions(const nvinfer1::Dims& weights,
                       const nvinfer1::Dims& features) {
   if (weights.nbDims != 4 || features.nbDims != 4 || weights.d[0] != 1 ||
-      features.d[0] != weights.d[0] || features.d[1] != weights.d[1] ||
+      weights.d[2] <= 1 ||
+      features.d[0] != weights.d[0] || features.d[1] != weights.d[3] ||
       features.d[2] != weights.d[2]) {
     return false;
   }
@@ -33,12 +34,12 @@ bool valid_dimensions(const nvinfer1::Dims& weights,
          features.d[2] <= std::numeric_limits<int>::max() / features.d[3];
 }
 
-class ExactSliceBmmPlugin final : public nvinfer1::IPluginV3,
+class ExactDesliceBmmPlugin final : public nvinfer1::IPluginV3,
                                   public nvinfer1::IPluginV3OneCore,
                                   public nvinfer1::IPluginV3OneBuild,
                                   public nvinfer1::IPluginV3OneRuntime {
  public:
-  ~ExactSliceBmmPlugin() override {
+  ~ExactDesliceBmmPlugin() override {
     if (handle_ != nullptr) cublasDestroy(handle_);
   }
 
@@ -56,7 +57,7 @@ class ExactSliceBmmPlugin final : public nvinfer1::IPluginV3,
   }
 
   nvinfer1::IPluginV3* clone() noexcept override {
-    return new (std::nothrow) ExactSliceBmmPlugin();
+    return new (std::nothrow) ExactDesliceBmmPlugin();
   }
   const char* getPluginName() const noexcept override { return kPluginName; }
   const char* getPluginVersion() const noexcept override {
@@ -98,7 +99,7 @@ class ExactSliceBmmPlugin final : public nvinfer1::IPluginV3,
     outputs[0].nbDims = 4;
     outputs[0].d[0] = inputs[0].d[0];
     outputs[0].d[1] = inputs[0].d[2];
-    outputs[0].d[2] = inputs[0].d[3];
+    outputs[0].d[2] = inputs[0].d[1];
     outputs[0].d[3] = inputs[1].d[3];
     return 0;
   }
@@ -149,14 +150,18 @@ class ExactSliceBmmPlugin final : public nvinfer1::IPluginV3,
 
     constexpr float alpha = 1.0F;
     constexpr float beta = 0.0F;
+    // Reproduce eager einsum("bths,bhsd->bthd") with weights physically BTHS
+    // and attention physically BSHD. ATen folds batch/head into a strided BMM;
+    // packing either operand or using eight separate GEMMs changes rounding.
+    // The plugin emits packed BHTD; the graph restores logical BTHD afterwards.
     const auto status = cublasSgemmStridedBatched(
-        handle_, CUBLAS_OP_N, CUBLAS_OP_T, dimensions, slices, tokens, &alpha,
+        handle_, CUBLAS_OP_N, CUBLAS_OP_N, dimensions, tokens, slices, &alpha,
         static_cast<const float*>(inputs[1]), heads * dimensions, dimensions,
         static_cast<const float*>(inputs[0]), heads * slices, slices, &beta,
         static_cast<float*>(outputs[0]), dimensions,
-        static_cast<long long>(slices) * dimensions, heads);
+        static_cast<long long>(tokens) * dimensions, heads);
     if (status != CUBLAS_STATUS_SUCCESS) {
-      std::fprintf(stderr, "TensorRT exact slice BMM cuBLAS call failed: %d\n",
+      std::fprintf(stderr, "TensorRT exact deslice BMM cuBLAS call failed: %d\n",
                    static_cast<int>(status));
       return 1;
     }
@@ -178,13 +183,13 @@ class ExactSliceBmmPlugin final : public nvinfer1::IPluginV3,
   nvinfer1::PluginFieldCollection fields_{0, nullptr};
 };
 
-class ExactSliceBmmPluginCreator final
+class ExactDesliceBmmPluginCreator final
     : public nvinfer1::IPluginCreatorV3One {
  public:
   nvinfer1::IPluginV3* createPlugin(
       const char*, const nvinfer1::PluginFieldCollection*,
       nvinfer1::TensorRTPhase) noexcept override {
-    return new (std::nothrow) ExactSliceBmmPlugin();
+    return new (std::nothrow) ExactDesliceBmmPlugin();
   }
 
   const nvinfer1::PluginFieldCollection* getFieldNames() noexcept override {
@@ -200,9 +205,9 @@ class ExactSliceBmmPluginCreator final
   nvinfer1::PluginFieldCollection fields_{0, nullptr};
 };
 
-REGISTER_TENSORRT_PLUGIN(ExactSliceBmmPluginCreator);
+REGISTER_TENSORRT_PLUGIN(ExactDesliceBmmPluginCreator);
 
 }  // namespace
 }  // namespace physicsnemo::inference
 
-extern "C" int pnmir_tensorrt_exact_slice_bmm_register() noexcept { return 0; }
+extern "C" int pnmir_tensorrt_exact_deslice_bmm_register() noexcept { return 0; }

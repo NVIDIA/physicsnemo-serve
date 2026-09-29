@@ -627,12 +627,12 @@ def _validate_container_completion(plan: dict) -> None:
                 backend == "aoti"
                 and plan["recipe"].get("aoti_profile") == "aten-boundary-exact-v3"
             )
-            exact_label = (
-                "GeoTransolver"
-                if backend == "tensorrt"
-                and plan["recipe"].get("tensorrt_profile") == "geotransolver-exact"
-                else "DoMINO"
-            )
+            exact_label = "DoMINO"
+            if backend == "tensorrt":
+                exact_label = {
+                    "geotransolver-exact": "GeoTransolver",
+                    "layout-order-exact-v2": "Transolver",
+                }.get(plan["recipe"].get("tensorrt_profile"), "DoMINO")
             require(variant.get("status") == "complete", f"{backend} is not complete")
             require(
                 variant.get("package_base") == "model"

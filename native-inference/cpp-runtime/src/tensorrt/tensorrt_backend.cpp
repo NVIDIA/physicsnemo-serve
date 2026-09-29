@@ -3,6 +3,7 @@
 
 #ifdef PNMIR_HAS_TENSORRT_EXACT
 #include "physicsnemo/inference/backends/tensorrt_exact_attention_plugin.hpp"
+#include "physicsnemo/inference/backends/tensorrt_exact_deslice_bmm_plugin.hpp"
 #include "physicsnemo/inference/backends/tensorrt_exact_gelu_plugin.hpp"
 #include "physicsnemo/inference/backends/tensorrt_exact_gemm_plugin.hpp"
 #include "physicsnemo/inference/backends/tensorrt_exact_inverse_distance_blend_plugin.hpp"
@@ -41,6 +42,7 @@ void register_exact_plugins() {
       pnmir_tensorrt_exact_gemm_register() != 0 ||
       pnmir_tensorrt_exact_token_sum_register() != 0 ||
       pnmir_tensorrt_exact_slice_bmm_register() != 0 ||
+      pnmir_tensorrt_exact_deslice_bmm_register() != 0 ||
       pnmir_tensorrt_exact_layer_norm_register() != 0 ||
       pnmir_tensorrt_exact_softmax_register() != 0 ||
       pnmir_tensorrt_exact_attention_register() != 0 ||
@@ -444,6 +446,8 @@ void register_tensorrt_exact_operators(Runtime& runtime) {
                             std::string(kTensorRTExactTokenSumOperatorAbi));
   runtime.register_operator(std::string(kTensorRTExactSliceBmmOperatorId),
                             std::string(kTensorRTExactSliceBmmOperatorAbi));
+  runtime.register_operator(std::string(kTensorRTExactDesliceBmmOperatorId),
+                            std::string(kTensorRTExactDesliceBmmOperatorAbi));
   runtime.register_operator(std::string(kTensorRTExactLayerNormOperatorId),
                             std::string(kTensorRTExactLayerNormOperatorAbi));
   runtime.register_operator(std::string(kTensorRTExactSoftmaxOperatorId),

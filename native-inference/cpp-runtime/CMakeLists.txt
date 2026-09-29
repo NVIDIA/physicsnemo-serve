@@ -30,11 +30,6 @@ if(PNMIR_ENABLE_TENSORRT_EXACT)
     message(FATAL_ERROR
       "PNMIR_ENABLE_TENSORRT_EXACT requires PNMIR_ENABLE_TENSORRT=ON")
   endif()
-  if(WIN32)
-    message(FATAL_ERROR
-      "Exact TensorRT operators are not supported on native Windows by this SDK. "
-      "Use the generic TensorRT backend with PNMIR_ENABLE_TENSORRT_EXACT=OFF.")
-  endif()
   if(NOT EXISTS "${PNMIR_PYTORCH_SOURCE_ROOT}/aten/src/ATen/native/transformers/cuda/mem_eff_attention/kernel_forward.h")
     message(FATAL_ERROR
       "PNMIR_PYTORCH_SOURCE_ROOT must contain the pinned PyTorch attention kernel headers")
@@ -758,6 +753,27 @@ if(PNMIR_BUILD_TESTS)
       pnmir_tensorrt_device_runner PROPERTIES SKIP_RETURN_CODE 77
     )
     if(PNMIR_ENABLE_TENSORRT_EXACT)
+      add_executable(pnmir_tensorrt_exact_dimensions_test
+        tests/tensorrt_exact_dimensions_test.cpp)
+      target_include_directories(pnmir_tensorrt_exact_dimensions_test SYSTEM PRIVATE
+        "${PNMIR_TENSORRT_INCLUDE_DIR}")
+      target_link_libraries(pnmir_tensorrt_exact_dimensions_test PRIVATE
+        pnmir_tensorrt_exact_gemm_plugin pnmir_tensorrt_exact_slice_bmm_plugin
+        pnmir_tensorrt_exact_deslice_bmm_plugin
+        pnmir_tensorrt_exact_layer_norm_plugin pnmir_tensorrt_exact_softmax_plugin
+        "${PNMIR_TENSORRT_LIBRARY}" CUDA::cudart)
+      add_test(NAME pnmir_tensorrt_exact_dimensions
+        COMMAND pnmir_tensorrt_exact_dimensions_test)
+      add_test(
+        NAME pnmir_tensorrt_exact_deslice_bmm
+        COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_SOURCE_DIR}/tests/tensorrt_exact_deslice_bmm.py
+          --pnmir $<TARGET_FILE:pnmir_cli>
+          --plugin $<TARGET_FILE:pnmir_tensorrt_exact_deslice_bmm_plugin>
+          --output ${CMAKE_CURRENT_BINARY_DIR}/tensorrt-exact-deslice
+      )
+      set_tests_properties(pnmir_tensorrt_exact_deslice_bmm
+        PROPERTIES SKIP_RETURN_CODE 77)
       add_test(
         NAME pnmir_tensorrt_exact_weighted_blend
         COMMAND ${Python3_EXECUTABLE}

@@ -146,8 +146,9 @@ bool valid_dimensions(const nvinfer1::Dims& input,
                       const nvinfer1::Dims& gamma,
                       const nvinfer1::Dims& beta) {
   if (input.nbDims < 2 || gamma.nbDims != 1 || beta.nbDims != 1) return false;
-  const int size = input.d[input.nbDims - 1];
-  return size > 0 && size % kVectorSize == 0 && gamma.d[0] == size &&
+  const auto size = input.d[input.nbDims - 1];
+  return size > 0 && size <= std::numeric_limits<int>::max() &&
+         size % kVectorSize == 0 && gamma.d[0] == size &&
          beta.d[0] == size;
 }
 
@@ -281,7 +282,8 @@ class ExactLayerNormPlugin final : public nvinfer1::IPluginV3,
     }
     std::int32_t rows = 0;
     if (!row_count(input_desc[0].dims, &rows)) return 1;
-    const int size = input_desc[0].dims.d[input_desc[0].dims.nbDims - 1];
+    const int size = static_cast<int>(
+        input_desc[0].dims.d[input_desc[0].dims.nbDims - 1]);
     const dim3 threads(kWarpSize, kThreads / kWarpSize, 1);
     const std::size_t shared_bytes =
         static_cast<std::size_t>(threads.y) * 3U / 2U * sizeof(float);

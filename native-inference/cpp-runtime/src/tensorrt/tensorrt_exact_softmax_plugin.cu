@@ -108,7 +108,7 @@ __global__ void exact_softmax_kernel(const float* input, float* output,
 
 bool valid_dimensions(const nvinfer1::Dims& input) {
   if (input.nbDims < 1) return false;
-  const int width = input.d[input.nbDims - 1];
+  const auto width = input.d[input.nbDims - 1];
   return width == 128 || width == 512;
 }
 
@@ -215,8 +215,8 @@ class ExactSoftmaxPlugin final : public nvinfer1::IPluginV3,
     std::int32_t rows = 0;
     if (!row_count(input_desc[0].dims, &rows)) return 1;
     const dim3 threads(kWarpSize, kWarpsPerBlock, 1);
-    const int elements_per_row =
-        input_desc[0].dims.d[input_desc[0].dims.nbDims - 1];
+    const int elements_per_row = static_cast<int>(
+        input_desc[0].dims.d[input_desc[0].dims.nbDims - 1]);
     if (elements_per_row == 128) {
       constexpr int kRowsPerWarp = 2;
       const int blocks =

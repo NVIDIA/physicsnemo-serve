@@ -21,7 +21,9 @@ bool valid_dimensions(const nvinfer1::Dims& input,
                       const nvinfer1::Dims& weight) {
   return input.nbDims >= 2 && weight.nbDims == 2 &&
          input.d[input.nbDims - 1] > 0 && weight.d[0] > 0 &&
-         weight.d[1] > 0 && input.d[input.nbDims - 1] == weight.d[1];
+         weight.d[1] > 0 && input.d[input.nbDims - 1] == weight.d[1] &&
+         weight.d[0] <= std::numeric_limits<int>::max() &&
+         weight.d[1] <= std::numeric_limits<int>::max();
 }
 
 bool matrix_rows(const nvinfer1::Dims& input, std::int32_t* rows) {
@@ -139,8 +141,8 @@ class ExactGemmPlugin final : public nvinfer1::IPluginV3,
     }
     std::int32_t rows = 0;
     if (!matrix_rows(input_desc[0].dims, &rows)) return 1;
-    const auto columns = input_desc[1].dims.d[0];
-    const auto inner = input_desc[1].dims.d[1];
+    const int columns = static_cast<int>(input_desc[1].dims.d[0]);
+    const int inner = static_cast<int>(input_desc[1].dims.d[1]);
 
     if (handle_ == nullptr && cublasCreate(&handle_) != CUBLAS_STATUS_SUCCESS) {
       return 1;

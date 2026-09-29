@@ -3,7 +3,6 @@
 import argparse
 from pathlib import Path
 import subprocess
-import sys
 import tempfile
 import unittest
 
@@ -41,12 +40,22 @@ class ExactConfigurationTests(unittest.TestCase):
             "-DPNMIR_ENABLE_TENSORRT_EXACT=ON", "-DPNMIR_ENABLE_TENSORRT=ON"
         )
         self.assertNotEqual(result.returncode, 0)
-        diagnostic = (
-            "Exact TensorRT operators are not supported on native Windows"
-            if sys.platform == "win32"
-            else "PNMIR_PYTORCH_SOURCE_ROOT must contain"
+        self.assertIn(
+            "PNMIR_PYTORCH_SOURCE_ROOT must contain", result.stdout + result.stderr
         )
-        self.assertIn(diagnostic, result.stdout + result.stderr)
+
+    def test_windows_exact_requires_explicit_pytorch_headers(self):
+        # Exercise the Windows option-validation path on CPU-only hosts too.
+        # This fails before CUDA discovery, so no Windows compiler is needed.
+        result = self.configure(
+            "-DWIN32=TRUE",
+            "-DPNMIR_ENABLE_TENSORRT_EXACT=ON",
+            "-DPNMIR_ENABLE_TENSORRT=ON",
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(
+            "PNMIR_PYTORCH_SOURCE_ROOT must contain", result.stdout + result.stderr
+        )
 
     def test_domino_sidecar_requires_aoti_backend(self):
         result = self.configure("-DPNMIR_BUILD_DOMINO_EXACT_OPS=ON")

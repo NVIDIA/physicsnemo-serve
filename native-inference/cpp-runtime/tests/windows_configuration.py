@@ -79,13 +79,13 @@ endif()
         result = self.configure("-DPNMIR_ENABLE_TENSORRT=ON", tensorrt=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
-    def test_windows_exact_tensorrt_reports_unsupported_profile(self):
+    def test_windows_exact_tensorrt_requires_pinned_pytorch_headers(self):
         result = self.configure(
             "-DPNMIR_ENABLE_TENSORRT=ON", "-DPNMIR_ENABLE_TENSORRT_EXACT=ON"
         )
         self.assertNotEqual(result.returncode, 0)
         self.assertIn(
-            "Exact TensorRT operators are not supported on native Windows",
+            "PNMIR_PYTORCH_SOURCE_ROOT must contain",
             result.stdout + result.stderr,
         )
 

@@ -1,7 +1,9 @@
 # Native Windows 11 development
 
 Model Builder and the C++ Inference SDK have native Windows build paths for
-baseline AOTInductor and TensorRT. Run the commands below in **Developer
+AOTInductor and TensorRT. The standard environment setup builds the generic
+TensorRT backend; exact TensorRT profiles require the manually configured SDK
+described below. Run the commands in **Developer
 PowerShell for VS 2022**, targeting x64, from the repository root. WSL and Docker
 are not required. `setup-env` does not install system compilers or GPU drivers.
 
@@ -169,6 +171,71 @@ For installation, pass `--config Release` to `cmake --install` too. DLLs go into
 the SDK's `bin` directory; add it and the external dependency DLL directories to
 `PATH` for a separate C++ application. The SDK's native dependencies are not bundled.
 
-The TensorRT exact-operator plugin option remains unavailable on native Windows.
-Baseline AOTInductor and generic TensorRT are the initial Windows path; the
-Linux-specific exact CFD workflows need separate porting and model qualification.
+## Exact TensorRT profiles
+
+`setup-env` does not enable exact TensorRT plugins. For a supported Transolver
+graph, build a separate SDK with `PNMIR_ENABLE_TENSORRT_EXACT=ON`, then select
+`layout-order-exact-v2` and its nine plugin assets in the model project. Leaving
+`tensorrt_profile` at `baseline` uses ordinary TensorRT operators, even when the
+runtime contains exact plugins. Missing exact-profile assets fail the build;
+there is no automatic fallback.
+
+The exact attention plugin requires a PyTorch source checkout matching the
+installed wheel's `torch.version.git_version`, that checkout's pinned CUTLASS
+headers, and the installed Torch include tree. These are build-time dependencies.
+Use the same CUDA/TensorRT installations for compilation, Python export and
+native execution. Build for the target GPU; use `89` for L4 rather than the
+SDK's default `90`. Use CMake 3.24 or newer with the Visual Studio generator
+for external-header handling and CUDA warning settings.
+
+From the same activated developer shell, set the source paths and reuse the
+`$generatorArgs` from the C++ test setup:
+
+```powershell
+$torchSource = 'C:\src\pytorch'  # checkout matching torch.version.git_version
+$cutlassInclude = Join-Path $torchSource 'third_party\cutlass\include'
+$torchInclude = & "$builderEnv\Scripts\python.exe" -c "from torch.utils.cpp_extension import include_paths; print(include_paths()[0])"
+if ($LASTEXITCODE -ne 0) { throw 'Torch header discovery failed.' }
+$exactBuild = Join-Path (Get-Location) 'out\inference\windows-exact-build'
+$exactSdk = Join-Path (Get-Location) 'out\inference\windows-exact-sdk'
+
+cmake -S native-inference/cpp-runtime -B $exactBuild `
+  -G 'Visual Studio 17 2022' -A x64 @generatorArgs `
+  -DPNMIR_BUILD_TESTS=ON -DPNMIR_ENABLE_AOTI=ON `
+  -DPNMIR_ENABLE_TENSORRT=ON -DPNMIR_ENABLE_TENSORRT_EXACT=ON `
+  -DCMAKE_CUDA_ARCHITECTURES=89 `
+  "-DPython3_EXECUTABLE=$builderEnv\Scripts\python.exe" `
+  "-DPNMIR_TENSORRT_ROOT=$tensorRt" "-DCUDAToolkit_ROOT=$env:CUDA_PATH" `
+  "-DPNMIR_PYTORCH_SOURCE_ROOT=$torchSource" `
+  "-DPNMIR_CUTLASS_INCLUDE_DIR=$cutlassInclude" `
+  "-DPNMIR_TORCH_INCLUDE_DIR=$torchInclude" `
+  "-DCMAKE_INSTALL_PREFIX=$exactSdk"
+if ($LASTEXITCODE -ne 0) { throw 'Exact SDK configuration failed.' }
+cmake --build $exactBuild --config Release --parallel 4
+if ($LASTEXITCODE -ne 0) { throw 'Exact SDK build failed.' }
+ctest --test-dir $exactBuild -C Release --output-on-failure --no-tests=error
+if ($LASTEXITCODE -ne 0) { throw 'Exact SDK tests failed.' }
+cmake --install $exactBuild --config Release
+if ($LASTEXITCODE -ne 0) { throw 'Exact SDK installation failed.' }
+
+$exactRuntime = Join-Path $exactSdk 'bin\physicsnemo-infer.exe'
+$env:PATH = "$exactSdk\bin;$env:PATH"
+```
+
+Keep the entire installed `bin` directory available: the runtime registers all
+twelve compiled plugin DLLs, while Transolver's v2 profile uses nine. Set the
+project's `runtime` to `$exactRuntime` and declare the assets listed in
+[TensorRT profiles](add-model.md#tensorrt-profiles). On Windows their filenames
+are `pnmir_tensorrt_exact_<operator>_plugin.dll`, without the Linux `lib` prefix.
+Copy the selected DLLs into the project's declared asset paths so Model Builder
+captures and hashes them. Updating a project's profile or assets requires
+updating its lock with `build --update-lock`. The older `layout-order-exact`
+profile retains its eight-plugin contract; use v2 to require byte equality and
+preserve the deslicing BMM layout as well.
+
+Require actual passes for the exact dimension, DesliceBmm and WeightedBlend tests as well
+as the enabled backend integration tests; an optional-test skip is insufficient.
+Then rerun Model Builder and independent Python/native comparisons on the target
+Windows GPU with the original validation cases and tolerances. Compiling the SDK
+does not establish byte equality. The prior H100 result and a successful baseline
+affine test do not qualify a Windows Transolver exact-profile package.

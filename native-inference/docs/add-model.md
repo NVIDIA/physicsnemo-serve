@@ -347,12 +347,34 @@ them requires `build --update-lock`. Missing plugin assets fail before ONNX
 export. Plugin binaries and the runtime must match the build's TensorRT/CUDA
 environment; an ordinary TensorRT-only SDK cannot load this exact package.
 
+For native Windows, follow the [manual exact SDK build](windows.md#exact-tensorrt-profiles).
+Use the same asset keys with the installed
+`pnmir_tensorrt_exact_<operator>_plugin.dll` filenames instead of the Linux `.so`
+paths. Windows `setup-env` prepares the generic TensorRT runtime, so select the
+separately built exact-enabled runtime explicitly.
+
 The `layout-order-exact` profile leaves the eager references, validation inputs
 and acceptance limits unchanged. It targets the supported Transolver graph, rather
 than promising byte equality for arbitrary models or untested environments.
 Native parity remains required for every supplied case. AOTI compilation remains
 controlled by `aoti_profile`; selecting this TensorRT profile does not alter it.
 Omit `tensorrt_profile` or select `"baseline"` for standard TensorRT compilation.
+
+For byte-identical Transolver qualification, select
+`"tensorrt_profile": "layout-order-exact-v2"` and add a ninth asset:
+`"tensorrt_exact_deslice_bmm_plugin": "plugins/libpnmir_tensorrt_exact_deslice_bmm_plugin.so"`
+(use `pnmir_tensorrt_exact_deslice_bmm_plugin.dll` on Windows). This version also
+preserves the original deslicing BMM's physical layout and batched cuBLAS call;
+a generic TensorRT MatMul can meet numeric tolerances while producing different
+bytes. The rewrite requires static FP32, batch one, more than one head, and a
+supported exact-attention producer. Unmatched deslicing fails export.
+
+V2 keeps the original Python model and references. It requires identical native
+output bytes for every TensorRT case, in addition to shape, dtype and finite
+value checks; `checks/tensorrt.json` records `require_byte_identical: true` and
+output hashes. A mismatch fails the build. Update the project lock when selecting
+v2 and its plugin. Existing `layout-order-exact` projects keep their eight assets
+and numeric acceptance policy; AOTI remains independently configured.
 
 For the supported GeoTransolver cached core, select
 `"tensorrt_profile": "geotransolver-exact"`. It requires the same eight assets

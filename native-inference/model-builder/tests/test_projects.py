@@ -214,6 +214,17 @@ class ProjectConfigurationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "model-build.json"):
             apply_project(self.args())
 
+    def test_missing_windows_project_paths_do_not_fall_back_to_model_lookup(self):
+        for value in (
+            rf"C:\{self.root.name}\missing",
+            rf"{self.root.name}\missing",
+        ):
+            with (
+                self.subTest(value=value),
+                self.assertRaisesRegex(ValueError, "Cannot find project"),
+            ):
+                apply_project(self.args(model=value))
+
     def test_profiles_require_a_project_and_existing_name(self):
         with self.assertRaisesRegex(ValueError, "profile.*project"):
             apply_project(self.args(model="affine", profile="gpu"))

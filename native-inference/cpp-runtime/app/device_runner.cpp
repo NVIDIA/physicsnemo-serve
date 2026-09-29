@@ -50,6 +50,16 @@ std::size_t parse_count(const char* value, const std::string& name,
   return static_cast<std::size_t>(result);
 }
 
+std::filesystem::path tensor_file_path(const std::filesystem::path& directory,
+                                       const std::string& name) {
+  if (name.empty() || std::filesystem::path(name).has_root_path() ||
+      name.find_first_of("/\\") != std::string::npos ||
+      name.find('\0') != std::string::npos) {
+    throw std::invalid_argument("tensor name must be a filename: " + name);
+  }
+  return directory / (name + ".bin");
+}
+
 std::vector<std::byte> read_bytes(const std::filesystem::path& path,
                                   std::size_t expected_size) {
   std::ifstream input(path, std::ios::binary | std::ios::ate);
@@ -224,7 +234,7 @@ int main(int argc, char** argv) {
       const auto shape = resolve_shape(spec, shape_overrides);
       const std::size_t byte_size = tensor_bytes(spec.dtype, shape);
       const auto host =
-          read_bytes(input_dir / (spec.name + ".bin"), byte_size);
+          read_bytes(tensor_file_path(input_dir, spec.name), byte_size);
       auto owner = allocate_cuda(byte_size);
       check_cuda(cudaMemcpy(owner.get(), host.data(), byte_size,
                             cudaMemcpyHostToDevice),
@@ -264,8 +274,8 @@ int main(int argc, char** argv) {
         }
         const auto& storage = output_storage.back();
         outputs.push_back(
-            {spec.name, spec.dtype, storage.device, spec.shape,
-             storage.data, storage.byte_size});
+            {storage.spec.name, storage.spec.dtype, storage.device,
+             storage.spec.shape, storage.data, storage.byte_size});
       }
     }
 
@@ -311,7 +321,7 @@ int main(int argc, char** argv) {
         std::copy_n(static_cast<const std::byte*>(output.data),
                     output.byte_size, host.begin());
       }
-      write_bytes(output_dir / (output.name + ".bin"), host);
+      write_bytes(tensor_file_path(output_dir, output.name), host);
     };
     if (use_backend_owned_outputs) {
       for (const auto& output : retained_outputs) {

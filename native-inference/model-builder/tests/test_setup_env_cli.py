@@ -8,7 +8,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 import unittest
 from unittest import mock
 
@@ -21,6 +21,21 @@ class SetupEnvironmentCommandTests(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name).resolve()
+        # These command tests model POSIX by default; Windows cases override
+        # the platform explicitly. External tools are simulated on every host.
+        platform = mock.patch.object(sys, "platform", "linux")
+        platform.start()
+        self.addCleanup(platform.stop)
+        self.cmake = self.root / "cmake"
+        self.make_executable(self.cmake)
+        which = mock.patch(
+            "shutil.which",
+            side_effect=lambda name: str(self.cmake)
+            if name == "cmake"
+            else (str(name) if Path(name).is_file() else None),
+        )
+        which.start()
+        self.addCleanup(which.stop)
         self.destination = self.root / "new environment"
         self.selected_python = self.root / "customer python"
         self.make_executable(self.selected_python)
@@ -164,6 +179,180 @@ class SetupEnvironmentCommandTests(unittest.TestCase):
         )
         return trt_root
 
+    def invoke_windows(self, *options, behavior=None):
+        python = sys.executable
+        cmake = self.root / "cmake.exe"
+        self.make_executable(cmake)
+        with (
+            mock.patch.object(sys, "platform", "win32"),
+            mock.patch(
+                "shutil.which",
+                side_effect=lambda name: str(cmake) if name == "cmake" else python,
+            ),
+        ):
+            return self.invoke(*options, behavior=behavior or self.windows_success)
+
+    def windows_success(self, command, **kwargs):
+        command = [str(value) for value in command]
+        if "venv" in command:
+            self.make_executable(self.destination / "Scripts" / "python.exe")
+            (self.destination / "Scripts" / "Activate.ps1").write_text(
+                "# venv activation\n"
+            )
+        if "pip" in command and "install" in command:
+            self.make_executable(
+                self.destination / "Scripts" / "physicsnemo-model-builder.exe"
+            )
+        if "--build" in command and "cmake" in Path(command[0]).name:
+            self.make_executable(
+                self.destination
+                / ".physicsnemo"
+                / "runtime"
+                / "Release"
+                / "physicsnemo-infer.exe"
+            )
+        if "build" in command:
+            return subprocess.CompletedProcess(
+                command, 0, stdout=json.dumps({"status": "complete"}), stderr=""
+            )
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    def test_windows_tensorrt_builds_release_executable(self):
+        trt_root = self.fake_tensorrt_sdk()
+        (trt_root / "bin").mkdir()
+        (trt_root / "lib").mkdir()
+        cuda_root = self.root / "CUDA Toolkit"
+        (cuda_root / "bin").mkdir(parents=True)
+        with mock.patch.dict("os.environ", {"CUDA_PATH": str(cuda_root)}):
+            code, result, _, run = self.invoke_windows(
+                "--backend", "tensorrt", "--tensorrt-root", str(trt_root)
+            )
+        self.assertEqual(code, 0, result)
+        self.assertEqual(result["backends"], ["tensorrt"])
+        self.assertEqual(
+            result["python"], str(self.destination / "Scripts" / "python.exe")
+        )
+        self.assertEqual(
+            result["runtime"],
+            str(
+                self.destination / ".physicsnemo/runtime/Release/physicsnemo-infer.exe"
+            ),
+        )
+        commands = [call.args[0] for call in run.call_args_list]
+        configure = next(command for command in commands if "-S" in command)
+        self.assertEqual(configure[configure.index("-G") + 1], "Visual Studio 17 2022")
+        self.assertEqual(configure[configure.index("-A") + 1], "x64")
+        self.assertIn("-DPNMIR_ENABLE_AOTI=OFF", configure)
+        build = next(command for command in commands if "--build" in command)
+        self.assertEqual(build[build.index("--config") + 1], "Release")
+        self.assertEqual(
+            result["build_command"][:3], [result["python"], "-m", "pnmir_build.cli"]
+        )
+        for call in run.call_args_list[1:]:
+            self.assertIn(str(trt_root / "bin"), call.kwargs["env"]["PATH"])
+            self.assertIn(str(trt_root / "lib"), call.kwargs["env"]["PATH"])
+            self.assertIn(str(cuda_root / "bin"), call.kwargs["env"]["PATH"])
+            self.assertIn(
+                str(self.destination / "Lib/site-packages/torch/lib"),
+                call.kwargs["env"]["PATH"],
+            )
+        activation = self.destination / ".physicsnemo" / "activate.ps1"
+        self.assertEqual(result["activate"], f". '{activation}'")
+        self.assertIn(
+            str(self.destination / "Scripts" / "Activate.ps1"), activation.read_text()
+        )
+        self.assertIn(str(trt_root / "bin"), activation.read_text())
+        self.assertIn(str(cuda_root / "bin"), activation.read_text())
+        # Windows PowerShell 5.1 needs a BOM to decode Unicode paths as UTF-8.
+        self.assertTrue(activation.read_bytes().startswith(b"\xef\xbb\xbf"))
+
+    def test_windows_default_aoti_builds_matching_runtime(self):
+        code, result, _, run = self.invoke_windows()
+        self.assertEqual(code, 0, result)
+        self.assertEqual(result["backends"], ["aoti"])
+        configure = next(
+            call.args[0] for call in run.call_args_list if "-S" in call.args[0]
+        )
+        self.assertIn("-DPNMIR_ENABLE_AOTI=ON", configure)
+        self.assertIn("-DPNMIR_ENABLE_TENSORRT=OFF", configure)
+
+    def test_windows_forwards_caller_generator_toolset_and_instance(self):
+        toolset = r"cuda=C:\CUDA SDK\cuda-12.8,host=x64"
+        instance = r"C:\Build Tools\2022"
+        with mock.patch.dict(
+            "os.environ",
+            {
+                "CMAKE_GENERATOR_TOOLSET": toolset,
+                "CMAKE_GENERATOR_INSTANCE": instance,
+            },
+        ):
+            code, result, _, run = self.invoke_windows()
+        self.assertEqual(code, 0, result)
+        configure = next(
+            call.args[0] for call in run.call_args_list if "-S" in call.args[0]
+        )
+        self.assertIn("-T", configure)
+        self.assertEqual(configure[configure.index("-T") + 1], toolset)
+        self.assertIn(f"-DCMAKE_GENERATOR_INSTANCE={instance}", configure)
+
+    def test_windows_keeps_generator_defaults_without_caller_preferences(self):
+        for index, preferences in enumerate(
+            (
+                {},
+                {
+                    "CMAKE_GENERATOR_TOOLSET": "",
+                    "CMAKE_GENERATOR_INSTANCE": "",
+                },
+            )
+        ):
+            with self.subTest(preferences=preferences):
+                self.destination = self.root / f"environment-{index}"
+                with mock.patch.dict("os.environ", preferences, clear=True):
+                    code, result, _, run = self.invoke_windows()
+                self.assertEqual(code, 0, result)
+                configure = next(
+                    call.args[0] for call in run.call_args_list if "-S" in call.args[0]
+                )
+                self.assertNotIn("-T", configure)
+                self.assertFalse(
+                    any(
+                        str(value).startswith("-DCMAKE_GENERATOR_INSTANCE=")
+                        for value in configure
+                    )
+                )
+
+    def test_windows_preserves_both_backends_from_project_settings(self):
+        code, result, _, run = self.invoke_windows(
+            "--build", str(self.project), "--runtime", str(self.runtime)
+        )
+        self.assertEqual(code, 0, result)
+        self.assertEqual(result["backends"], ["aoti", "tensorrt"])
+        build = next(
+            call.args[0] for call in run.call_args_list if "build" in call.args[0]
+        )
+        self.assertIn("aoti", build)
+        self.assertIn("tensorrt", build)
+
+    def test_windows_project_build_uses_python_module_and_explicit_tensorrt(self):
+        code, result, _, run = self.invoke_windows(
+            "--build",
+            str(self.project),
+            "--runtime",
+            str(self.runtime),
+            "--backend",
+            "tensorrt",
+        )
+        self.assertEqual(code, 0, result)
+        build = next(
+            call.args[0] for call in run.call_args_list if "build" in call.args[0]
+        )
+        self.assertEqual(
+            build[:3],
+            [str(self.destination / "Scripts" / "python.exe"), "-m", "pnmir_build.cli"],
+        )
+        self.assertEqual(result["build"]["status"], "complete")
+        self.assertEqual(self.project_file.read_bytes(), self.project_bytes)
+
     def test_tensorrt_sdk_version_pins_python_bindings_and_enables_both_backends(self):
         trt_root = self.fake_tensorrt_sdk()
         code, result, _, run = self.invoke(
@@ -215,6 +404,58 @@ class SetupEnvironmentCommandTests(unittest.TestCase):
         self.assertFalse(any(value.startswith("tensorrt==") for value in install))
         self.assertFalse(any(value.endswith("[tensorrt]") for value in install))
 
+    def test_windows_tensorrt_enterprise_version_aliases_pin_matching_wheels(self):
+        trt_root = self.fake_tensorrt_sdk()
+        (trt_root / "include" / "NvInferVersion.h").write_text(
+            "#define TRT_MAJOR_ENTERPRISE 10\n"
+            "#define TRT_MINOR_ENTERPRISE 13\n"
+            "#define TRT_PATCH_ENTERPRISE 3\n"
+            "#define TRT_BUILD_ENTERPRISE 9\n"
+            "#define NV_TENSORRT_MAJOR TRT_MAJOR_ENTERPRISE //!< TensorRT major version.\n"
+            "#define NV_TENSORRT_MINOR TRT_MINOR_ENTERPRISE //!< TensorRT minor version.\n"
+            "#define NV_TENSORRT_PATCH TRT_PATCH_ENTERPRISE //!< TensorRT patch version.\n"
+            "#define NV_TENSORRT_BUILD TRT_BUILD_ENTERPRISE //!< TensorRT build number.\n"
+        )
+        code, result, _, run = self.invoke_windows(
+            "--backend",
+            "tensorrt",
+            "--tensorrt-root",
+            str(trt_root),
+            "--tensorrt-cuda-major",
+            "12",
+        )
+        self.assertEqual(code, 0, result)
+        commands = [call.args[0] for call in run.call_args_list]
+        install = next(
+            command for command in commands if "pip" in command and "install" in command
+        )
+        self.assertIn("tensorrt-cu12==10.13.3.9", install)
+        probe = next(command for command in commands if "-c" in command)
+        self.assertIn("10.13.3.9", probe)
+
+    def test_invalid_tensorrt_version_macros_fail_before_environment_creation(self):
+        trt_root = self.fake_tensorrt_sdk()
+        header = trt_root / "include" / "NvInferVersion.h"
+        valid = header.read_text()
+        for definition in (
+            "#define NV_TENSORRT_MAJOR MISSING_MAJOR",
+            "#define NV_TENSORRT_MAJOR TRT_MAJOR\n#define TRT_MAJOR NV_TENSORRT_MAJOR",
+            "#define NV_TENSORRT_MAJOR 10 + 1",
+        ):
+            with self.subTest(definition=definition):
+                header.write_text(
+                    valid.replace("#define NV_TENSORRT_MAJOR 10", definition)
+                )
+                code, result, _, run = self.invoke_windows(
+                    "--backend", "tensorrt", "--tensorrt-root", str(trt_root)
+                )
+                self.assertEqual(code, 2, result)
+                self.assertIn(
+                    "TensorRT 10 or newer", result["diagnostics"][0]["message"]
+                )
+                run.assert_not_called()
+                self.assertFalse(self.destination.exists())
+
     def test_failed_dependency_probe_prevents_sdk_bootstrap(self):
         def fail_probe(command, **kwargs):
             if "-c" in command:
@@ -243,7 +484,16 @@ class SetupEnvironmentCommandTests(unittest.TestCase):
             (self.destination / ".physicsnemo" / "environment.json").exists()
         )
 
-    def execute_dependency_probe(self, installed_variants):
+    def execute_dependency_probe(
+        self,
+        installed_variants,
+        *,
+        cuda="12.8",
+        sdk_version="",
+        tensorrt=True,
+        aoti=False,
+        triton=True,
+    ):
         modules = {}
         for name in (
             "pnmir_build.cli",
@@ -252,10 +502,14 @@ class SetupEnvironmentCommandTests(unittest.TestCase):
             "onnx",
             "onnxscript",
             "tensorrt",
+            "triton",
         ):
             module = ModuleType(name)
             module.__version__ = "10.14.1.48"
             modules[name] = module
+        modules["torch"].version = SimpleNamespace(cuda=cuda)
+        if not triton:
+            modules["triton"] = None
 
         def installed_version(name):
             normalized = name.lower().replace("_", "-")
@@ -265,7 +519,11 @@ class SetupEnvironmentCommandTests(unittest.TestCase):
 
         with (
             mock.patch.dict(sys.modules, modules),
-            mock.patch.object(sys, "argv", ["-c", "12"]),
+            mock.patch.object(
+                sys,
+                "argv",
+                ["-c", "12" if tensorrt else "", sdk_version, "aoti" if aoti else ""],
+            ),
             mock.patch.object(metadata, "version", side_effect=installed_version),
             contextlib.redirect_stdout(io.StringIO()),
         ):
@@ -277,6 +535,28 @@ class SetupEnvironmentCommandTests(unittest.TestCase):
 
     def test_actual_dependency_probe_accepts_only_the_selected_cuda_variant(self):
         self.execute_dependency_probe({"tensorrt-cu12"})
+
+    def test_windows_dependency_probe_rejects_cpu_only_torch(self):
+        with mock.patch.object(sys, "platform", "win32"):
+            with self.assertRaisesRegex(RuntimeError, "CUDA-enabled PyTorch"):
+                self.execute_dependency_probe({"tensorrt-cu12"}, cuda=None)
+
+    def test_windows_cuda_aoti_requires_triton_in_new_environment(self):
+        with mock.patch.object(sys, "platform", "win32"):
+            with self.assertRaisesRegex(RuntimeError, "triton-windows"):
+                self.execute_dependency_probe(
+                    set(), tensorrt=False, aoti=True, triton=False
+                )
+
+    def test_windows_cpu_aoti_does_not_require_cuda_or_triton(self):
+        with mock.patch.object(sys, "platform", "win32"):
+            self.execute_dependency_probe(
+                set(), tensorrt=False, aoti=True, cuda=None, triton=False
+            )
+
+    def test_dependency_probe_rejects_tensorrt_sdk_version_mismatch(self):
+        with self.assertRaisesRegex(RuntimeError, "TensorRT Python version.*SDK"):
+            self.execute_dependency_probe({"tensorrt-cu12"}, sdk_version="10.13.0.35")
 
     def test_missing_installed_builder_entrypoint_cannot_report_ready(self):
         unrelated = self.root / "unrelated package"

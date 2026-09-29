@@ -8,6 +8,11 @@ customer workflows are described in the [inference guide](../README.md).
 
 ## Build and install
 
+For native Windows x64, see the [Windows guide](../docs/windows.md). It covers
+MSVC, Release builds, external DLL paths, and AOTInductor/TensorRT validation.
+Windows builds support the baseline backends; the TensorRT exact-operator
+plugin option remains unavailable there.
+
 From the repository root:
 
 ```bash
@@ -58,8 +63,9 @@ For a complete external application, see the
 [Transolver E2E CLI example](../workflows/transolver/README.md). It links the
 installed SDK to C++ mesh preprocessing and physical-unit postprocessing.
 
-Static and shared core installs are tested for relocation. Optional GPU
-backend libraries are not bundled into a complete runtime distribution.
+Static and shared installs of the core and each enabled optional backend have
+relocation tests. Optional GPU backend libraries are not bundled into a complete
+runtime distribution.
 AOTI source builds discover matching Torch through Python. Installed GPU
 executables require compatible native backend libraries on the loader path;
 installed CMake exports do not preserve the builder's absolute library paths.
@@ -216,6 +222,11 @@ ctest --test-dir out/inference/runtime-tests --output-on-failure
 Core tests use Python as a driver and include static/shared installation tests
 that copy this source tree, relocate the installed prefix, remove source/build
 directories, and build an external consumer using the public names above.
+Enabling AOTI, ONNX Runtime or TensorRT also registers static/shared installed
+consumer tests for that component. Each consumer links the exported backend
+target and instantiates it before running mock inference; native dependency
+roots remain external to the relocated SDK. CPU CI exercises the core and ONNX
+Runtime consumers. These packaging checks complement backend inference tests.
 Optional backend integration tests require the corresponding producer
 frameworks and native dependencies. CTest supplies
 `native-inference/model-builder/src` through `PYTHONPATH` so those tests use the single

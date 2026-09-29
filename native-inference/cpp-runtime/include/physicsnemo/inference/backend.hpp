@@ -5,6 +5,7 @@
 #include <string>
 #include <vector>
 
+#include "physicsnemo/inference/export.hpp"
 #include "physicsnemo/inference/manifest.hpp"
 #include "physicsnemo/inference/prepared_state.hpp"
 #include "physicsnemo/inference/tensor.hpp"
@@ -25,7 +26,7 @@ struct SessionOptions {
   std::string precision{"auto"};
 };
 
-class BackendSession {
+class PNMIR_API BackendSession {
  public:
   virtual ~BackendSession() = default;
   virtual SessionCapabilities capabilities() const;

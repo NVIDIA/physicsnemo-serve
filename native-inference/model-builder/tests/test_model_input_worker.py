@@ -237,7 +237,7 @@ class ModelInputWorkerTests(unittest.TestCase):
         ]:
             relative = Path(value["path"])
             self.assertFalse(relative.is_absolute())
-            self.assertTrue(str(relative).startswith("model-inputs/"))
+            self.assertTrue(value["path"].startswith("model-inputs/"))
             retained = self.output / "source" / relative
             self.assertTrue(retained.is_file())
             self.assertEqual(

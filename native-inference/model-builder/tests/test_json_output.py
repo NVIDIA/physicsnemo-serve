@@ -1,6 +1,7 @@
 """JSON command results survive Python, subprocess and buffered native logs."""
 
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -17,6 +18,14 @@ class JsonOutputTests(unittest.TestCase):
             "import ctypes, json, os, sys\n"
             f"sys.path.insert(0, {str(BUILDER)!r})\n"
             "from pnmir_build.results import capture_stdout\n"
+            "crt = ctypes.CDLL('ucrtbase' if os.name == 'nt' else None)\n"
+            "if os.name == 'nt':\n"
+            "    crt.__acrt_iob_func.argtypes = [ctypes.c_uint]\n"
+            "    crt.__acrt_iob_func.restype = ctypes.c_void_p\n"
+            "    crt.fputs.argtypes = [ctypes.c_char_p, ctypes.c_void_p]\n"
+            "    native_write = lambda message: crt.fputs(message, crt.__acrt_iob_func(1))\n"
+            "else:\n"
+            "    native_write = crt.printf\n"
         ) + textwrap.dedent(body)
         run = subprocess.run(
             [sys.executable, "-S", "-c", script],
@@ -25,6 +34,7 @@ class JsonOutputTests(unittest.TestCase):
             encoding="utf-8",
             errors="replace",
             timeout=15,
+            env=dict(os.environ, PYTHONIOENCODING="utf-8"),
         )
         self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
         return run
@@ -38,7 +48,7 @@ class JsonOutputTests(unittest.TestCase):
     def test_buffered_c_stdio_is_flushed_before_stdout_is_restored(self):
         run = self.run_capture("""
             with capture_stdout(True, {}):
-                ctypes.CDLL(None).printf(b'buffered C diagnostic\\n')
+                native_write(b'buffered C diagnostic\\n')
             print(json.dumps({'status': 'complete'}))
         """)
         self.assertEqual(self.one_result(run)["status"], "complete")
@@ -46,7 +56,7 @@ class JsonOutputTests(unittest.TestCase):
 
     def test_preexisting_c_buffers_are_flushed_into_capture(self):
         run = self.run_capture("""
-            ctypes.CDLL(None).printf(b'previous native diagnostic\\n')
+            native_write(b'previous native diagnostic\\n')
             with capture_stdout(True, {}):
                 pass
             print(json.dumps({'status': 'complete'}))
@@ -63,11 +73,11 @@ class JsonOutputTests(unittest.TestCase):
                     print('Python diagnostic')
                     os.write(1, b'fd diagnostic \\xff\\n')
                     subprocess.run([sys.executable, '-S', '-c', "print('child diagnostic')"], check=True)
-                    ctypes.CDLL(None).printf(b'buffered diagnostic\\n')
+                    native_write(b'buffered diagnostic\\n')
                 print(json.dumps({{'status': 'complete'}}))
             """)
             self.assertEqual(self.one_result(run)["status"], "complete")
-            retained = (Path(directory) / "frontend.log").read_text()
+            retained = (Path(directory) / "frontend.log").read_text(encoding="utf-8")
             for message in (
                 "Python diagnostic",
                 "fd diagnostic \ufffd",
@@ -83,7 +93,7 @@ class JsonOutputTests(unittest.TestCase):
                 try:
                     with capture_stdout(True, {{'output': {directory!r}}}):
                         print('Python failure diagnostic')
-                        ctypes.CDLL(None).printf(b'buffered failure diagnostic\\n')
+                        native_write(b'buffered failure diagnostic\\n')
                         raise ValueError('model failed')
                 except ValueError as error:
                     print(json.dumps({{'status': 'failed', 'message': str(error)}}))
@@ -92,7 +102,7 @@ class JsonOutputTests(unittest.TestCase):
             self.assertIn("buffered failure diagnostic", run.stderr)
             self.assertIn(
                 "buffered failure diagnostic",
-                (Path(directory) / "frontend.log").read_text(),
+                (Path(directory) / "frontend.log").read_text(encoding="utf-8"),
             )
 
     def test_unavailable_native_flush_fails_before_running_the_command(self):
@@ -116,7 +126,7 @@ class JsonOutputTests(unittest.TestCase):
         run = self.run_capture("""
             with capture_stdout(False, {}):
                 print('regular stdout')
-                ctypes.CDLL(None).printf(b'regular native stdout\\n')
+                native_write(b'regular native stdout\\n')
         """)
         self.assertIn("regular stdout", run.stdout)
         self.assertIn("regular native stdout", run.stdout)
@@ -135,6 +145,54 @@ class JsonOutputTests(unittest.TestCase):
             """)
             self.assertEqual(self.one_result(run)["status"], "failed")
             self.assertEqual(retained.read_text(), "preserve previous log")
+
+    def test_windows_capture_redirects_native_handle_and_flushes_ucrt(self):
+        run = self.run_capture("""
+            from types import SimpleNamespace
+            from unittest import mock
+            from pnmir_build import results
+            events = []
+            flush = mock.Mock(side_effect=lambda _: events.append('flush') or 0)
+            set_handle = mock.Mock(side_effect=lambda *_: events.append('handle') or 1)
+            kernel = SimpleNamespace(SetStdHandle=set_handle)
+            with (
+                mock.patch.object(results.os, 'name', 'nt'),
+                mock.patch.object(ctypes, 'CDLL', return_value=SimpleNamespace(fflush=flush)) as load,
+                mock.patch.object(ctypes, 'WinDLL', create=True, return_value=kernel),
+                mock.patch.dict(sys.modules, {'msvcrt': SimpleNamespace(get_osfhandle=lambda fd: fd + 1000)}),
+            ):
+                with capture_stdout(True, {}):
+                    events.append('body')
+                    os.write(1, b'Windows native diagnostic\\n')
+                loaded = load.call_args.args[0]
+            print(json.dumps({'events': events, 'runtime': loaded}))
+        """)
+        result = self.one_result(run)
+        self.assertEqual(result["runtime"], "ucrtbase")
+        self.assertEqual(result["events"], ["handle", "body", "flush", "handle"])
+        self.assertIn("Windows native diagnostic", run.stderr)
+
+    @unittest.skipUnless(os.name == "nt", "requires the actual Win32 stdout API")
+    def test_windows_writefile_and_child_output_are_captured(self):
+        run = self.run_capture("""
+            import subprocess
+            from ctypes import wintypes
+            kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+            kernel.GetStdHandle.argtypes = [wintypes.DWORD]
+            kernel.GetStdHandle.restype = wintypes.HANDLE
+            kernel.WriteFile.argtypes = [wintypes.HANDLE, wintypes.LPCVOID, wintypes.DWORD,
+                                         ctypes.POINTER(wintypes.DWORD), wintypes.LPVOID]
+            kernel.WriteFile.restype = wintypes.BOOL
+            with capture_stdout(True, {}):
+                data = b'Win32 WriteFile diagnostic\\n'
+                written = wintypes.DWORD()
+                assert kernel.WriteFile(kernel.GetStdHandle(-11), data, len(data), ctypes.byref(written), None)
+                subprocess.run([sys.executable, '-S', '-c', "print('Windows child diagnostic')"], check=True)
+            print(json.dumps({'status': 'complete'}))
+        """)
+        self.assertEqual(self.one_result(run)["status"], "complete")
+        self.assertIn("Win32 WriteFile diagnostic", run.stderr)
+        self.assertIn("Windows child diagnostic", run.stderr)
 
 
 if __name__ == "__main__":

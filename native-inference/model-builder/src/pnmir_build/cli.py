@@ -59,7 +59,8 @@ def assets_root() -> Path:
         distribution = None
     if distribution is not None:
         for entry in distribution.files or ():
-            if entry.parts[-3:] != (
+            # Installed RECORD entries may use native Windows separators.
+            if Path(entry).parts[-3:] != (
                 "share",
                 "physicsnemo-model-builder",
                 "toolchain.lock.json",
@@ -155,7 +156,12 @@ def parser() -> argparse.ArgumentParser:
     setup.add_argument(
         "--python", default=sys.executable, help="Python 3.10+ used to create the venv."
     )
-    setup.add_argument("--backend", action="append", choices=("aoti", "tensorrt"))
+    setup.add_argument(
+        "--backend",
+        action="append",
+        choices=("aoti", "tensorrt"),
+        help="Backend to prepare; repeat for both (default: project backends or aoti).",
+    )
     setup.add_argument("--requirements", action="append", type=Path, default=[])
     setup.add_argument(
         "--sdk-source",
@@ -429,6 +435,11 @@ def resolve_executor(args, root: Path, plan: dict, *, require_runtime=True) -> d
             raise UsageError(
                 "Builder image must be an immutable image digest (name@sha256:... or local sha256:...); mutable tags are not accepted."
             )
+        if sys.platform == "win32":
+            raise UsageError(
+                "Native Windows builds require --executor local; run the launcher "
+                "inside WSL for Linux container execution."
+            )
         if not shutil.which("docker"):
             raise UsageError(
                 "Docker is unavailable; install/configure GPU container access or explicitly select local execution."
@@ -609,13 +620,16 @@ def _validate_container_completion(plan: dict) -> None:
         for backend, variant in variants.items():
             byte_identical = (
                 backend == "tensorrt"
-                and requires_byte_identical(plan["recipe"].get("tensorrt_profile", "baseline"))
+                and requires_byte_identical(
+                    plan["recipe"].get("tensorrt_profile", "baseline")
+                )
             ) or (
                 backend == "aoti"
                 and plan["recipe"].get("aoti_profile") == "aten-boundary-exact-v3"
             )
             exact_label = (
-                "GeoTransolver" if backend == "tensorrt"
+                "GeoTransolver"
+                if backend == "tensorrt"
                 and plan["recipe"].get("tensorrt_profile") == "geotransolver-exact"
                 else "DoMINO"
             )
@@ -672,7 +686,10 @@ def _validate_container_completion(plan: dict) -> None:
                             correctness.get("version") == 3
                             and all(
                                 correctness.get(key, {}).get("shape_padding") is False
-                                for key in ("requested_compiler_settings", "applied_compiler_settings")
+                                for key in (
+                                    "requested_compiler_settings",
+                                    "applied_compiler_settings",
+                                )
                             ),
                             "DoMINO AOTI v3 requires shape padding disabled",
                         )
@@ -730,13 +747,20 @@ def _validate_container_completion(plan: dict) -> None:
                     require(
                         correctness.get("version") == profile_version(profile)
                         and correctness.get("plugins") == list(names)
-                        and artifact.get("required_operators") == required_operators(profile)
+                        and artifact.get("required_operators")
+                        == required_operators(profile)
                         and isinstance(counts, dict)
                         and set(counts) == set(names)
-                        and all(type(value) is int and value > 0 for value in counts.values())
+                        and all(
+                            type(value) is int and value > 0
+                            for value in counts.values()
+                        )
                         and isinstance(libraries, dict)
                         and set(libraries) == set(names)
-                        and all(correctness.get(key) == value for key, value in selection_metadata(profile).items()),
+                        and all(
+                            correctness.get(key) == value
+                            for key, value in selection_metadata(profile).items()
+                        ),
                         f"{exact_label} exact operator metadata is incomplete",
                     )
                     for name in names:
@@ -749,8 +773,10 @@ def _validate_container_completion(plan: dict) -> None:
                             f"{exact_label} exact plugin identity is invalid",
                         )
                         if plan.get("model_inputs") is not None:
-                            selected = plan["model_inputs"].get("assets", {}).get(
-                                f"tensorrt_{name}_plugin", {}
+                            selected = (
+                                plan["model_inputs"]
+                                .get("assets", {})
+                                .get(f"tensorrt_{name}_plugin", {})
                             )
                             require(
                                 record["sha256"] == selected.get("sha256"),
@@ -1199,3 +1225,11 @@ def main(argv=None) -> int:
     if json_mode:
         print(json.dumps(result, indent=2, allow_nan=False))
     return exit_code
+
+
+if __name__ == "__main__":
+    # Workers import this module by its package name; use the same UsageError
+    # class for module execution and the installed console entry point.
+    from pnmir_build.cli import main as entry_main
+
+    raise SystemExit(entry_main())

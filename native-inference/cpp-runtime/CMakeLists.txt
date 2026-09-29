@@ -30,6 +30,11 @@ if(PNMIR_ENABLE_TENSORRT_EXACT)
     message(FATAL_ERROR
       "PNMIR_ENABLE_TENSORRT_EXACT requires PNMIR_ENABLE_TENSORRT=ON")
   endif()
+  if(WIN32)
+    message(FATAL_ERROR
+      "Exact TensorRT operators are not supported on native Windows by this SDK. "
+      "Use the generic TensorRT backend with PNMIR_ENABLE_TENSORRT_EXACT=OFF.")
+  endif()
   if(NOT EXISTS "${PNMIR_PYTORCH_SOURCE_ROOT}/aten/src/ATen/native/transformers/cuda/mem_eff_attention/kernel_forward.h")
     message(FATAL_ERROR
       "PNMIR_PYTORCH_SOURCE_ROOT must contain the pinned PyTorch attention kernel headers")
@@ -65,6 +70,12 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+if(WIN32)
+  # Export the C++ SDK symbols and avoid Windows SDK min/max macro collisions.
+  set(CMAKE_WINDOWS_EXPORT_ALL_SYMBOLS ON)
+  add_compile_definitions(NOMINMAX WIN32_LEAN_AND_MEAN)
+endif()
+
 if(PNMIR_ENABLE_ONNXRUNTIME_CUDA AND NOT PNMIR_ENABLE_ONNXRUNTIME)
   message(
     FATAL_ERROR
@@ -98,6 +109,9 @@ add_library(pnmir
 add_library(PhysicsNeMoInference::runtime ALIAS pnmir)
 set_target_properties(pnmir PROPERTIES OUTPUT_NAME physicsnemo_inference EXPORT_NAME runtime)
 target_compile_features(pnmir PUBLIC cxx_std_20)
+if(BUILD_SHARED_LIBS)
+  target_compile_definitions(pnmir PUBLIC PNMIR_SHARED=1)
+endif()
 
 target_include_directories(pnmir
   PUBLIC
@@ -255,7 +269,6 @@ if(PNMIR_ENABLE_ONNXRUNTIME)
   target_link_libraries(
     pnmir_onnxruntime
     PUBLIC PhysicsNeMoInference::runtime
-    PRIVATE
       $<BUILD_INTERFACE:${PNMIR_ONNXRUNTIME_LIBRARY}>
       $<INSTALL_INTERFACE:PhysicsNeMoInference::onnxruntime_native>
   )
@@ -292,7 +305,7 @@ if(PNMIR_ENABLE_TENSORRT)
   )
   find_library(
     PNMIR_TENSORRT_LIBRARY
-    NAMES nvinfer
+    NAMES nvinfer nvinfer_10
     HINTS
       "${PNMIR_TENSORRT_ROOT}/lib"
       "${PNMIR_TENSORRT_ROOT}/lib64"
@@ -301,7 +314,7 @@ if(PNMIR_ENABLE_TENSORRT)
   )
   find_library(
     PNMIR_TENSORRT_PLUGIN_LIBRARY
-    NAMES nvinfer_plugin
+    NAMES nvinfer_plugin nvinfer_plugin_10
     HINTS
       "${PNMIR_TENSORRT_ROOT}/lib"
       "${PNMIR_TENSORRT_ROOT}/lib64"
@@ -316,18 +329,18 @@ if(PNMIR_ENABLE_TENSORRT)
     PUBLIC
       $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
       $<INSTALL_INTERFACE:include>
-    PRIVATE
-      "${PNMIR_TENSORRT_INCLUDE_DIR}"
+  )
+  target_include_directories(pnmir_tensorrt SYSTEM PRIVATE
+    "${PNMIR_TENSORRT_INCLUDE_DIR}"
   )
   target_link_libraries(
     pnmir_tensorrt
     PUBLIC PhysicsNeMoInference::runtime
-    PRIVATE
       $<BUILD_INTERFACE:${PNMIR_TENSORRT_LIBRARY}>
       $<BUILD_INTERFACE:${PNMIR_TENSORRT_PLUGIN_LIBRARY}>
       $<INSTALL_INTERFACE:PhysicsNeMoInference::tensorrt_native>
       $<INSTALL_INTERFACE:PhysicsNeMoInference::tensorrt_plugin_native>
-      CUDA::cudart
+    PRIVATE CUDA::cudart
   )
   if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
     target_compile_options(
@@ -406,6 +419,25 @@ if(PNMIR_BUILD_TESTS)
   )
 
   add_test(
+    NAME pnmir_windows_configuration
+    COMMAND ${Python3_EXECUTABLE} -S
+      ${CMAKE_CURRENT_SOURCE_DIR}/tests/windows_configuration.py
+      --sdk-source ${CMAKE_CURRENT_SOURCE_DIR} -v
+  )
+
+  add_test(
+    NAME pnmir_install_consumer_portability
+    COMMAND ${Python3_EXECUTABLE} -S
+      ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_install_consumer_portability.py -v
+  )
+
+  add_test(
+    NAME pnmir_device_runner_cuda_skip
+    COMMAND ${Python3_EXECUTABLE} -S
+      ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_device_runner_cuda_skip.py -v
+  )
+
+  add_test(
     NAME pnmir_cli_output_metadata
     COMMAND ${Python3_EXECUTABLE} -S
       ${CMAKE_CURRENT_SOURCE_DIR}/tests/cli_output_metadata.py
@@ -422,6 +454,35 @@ if(PNMIR_BUILD_TESTS)
         ${CMAKE_CURRENT_SOURCE_DIR}/tests/install_consumer.py
         --sdk-source ${CMAKE_CURRENT_SOURCE_DIR} ${install_test_options} -v
     )
+    foreach(component IN ITEMS aoti onnxruntime tensorrt)
+      string(TOUPPER "${component}" component_option)
+      if(PNMIR_ENABLE_${component_option})
+        set(component_test_options --component ${component})
+        if(component STREQUAL "aoti")
+          list(APPEND component_test_options --torch-root "${PNMIR_TORCH_PYTHON_ROOT}")
+        elseif(component STREQUAL "onnxruntime")
+          list(APPEND component_test_options --onnxruntime-root "${PNMIR_ONNXRUNTIME_ROOT}")
+        elseif(PNMIR_TENSORRT_ROOT)
+          list(APPEND component_test_options --tensorrt-root "${PNMIR_TENSORRT_ROOT}")
+        endif()
+        if(CUDAToolkit_ROOT)
+          list(APPEND component_test_options --cuda-root "${CUDAToolkit_ROOT}")
+        elseif(CUDA_TOOLKIT_ROOT_DIR)
+          list(APPEND component_test_options --cuda-root "${CUDA_TOOLKIT_ROOT_DIR}")
+        endif()
+        if(CMAKE_CUDA_ARCHITECTURES)
+          string(REPLACE ";" "," cuda_test_architectures "${CMAKE_CUDA_ARCHITECTURES}")
+          list(APPEND component_test_options --cuda-architectures "${cuda_test_architectures}")
+        endif()
+        add_test(
+          NAME pnmir_install_${component}_${linkage}_consumer
+          COMMAND ${Python3_EXECUTABLE} -S
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/install_consumer.py
+            --sdk-source ${CMAKE_CURRENT_SOURCE_DIR}
+            ${install_test_options} ${component_test_options} -v
+        )
+      endif()
+    endforeach()
   endforeach()
 
   add_executable(pnmir_tests tests/runtime_test.cpp)
@@ -579,6 +640,13 @@ if(PNMIR_BUILD_TESTS)
 
     if(PNMIR_ENABLE_ONNXRUNTIME_CUDA)
       add_test(
+        NAME pnmir_onnxruntime_device_runner
+        COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_SOURCE_DIR}/tests/device_runner_integration.py
+          --runner $<TARGET_FILE:pnmir_device_runner>
+          --backend onnxruntime -v
+      )
+      add_test(
         NAME pnmir_onnxruntime_cuda_integration
         COMMAND
           ${Python3_EXECUTABLE}
@@ -678,6 +746,16 @@ if(PNMIR_BUILD_TESTS)
         ${CMAKE_CURRENT_SOURCE_DIR}/tests/tensorrt_integration.py
         --pnmir $<TARGET_FILE:pnmir_cli>
         --output ${CMAKE_CURRENT_BINARY_DIR}/tensorrt-affine.pnmir
+    )
+    add_test(
+      NAME pnmir_tensorrt_device_runner
+      COMMAND ${Python3_EXECUTABLE}
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/device_runner_integration.py
+        --runner $<TARGET_FILE:pnmir_device_runner>
+        --backend tensorrt -v
+    )
+    set_tests_properties(
+      pnmir_tensorrt_device_runner PROPERTIES SKIP_RETURN_CODE 77
     )
     if(PNMIR_ENABLE_TENSORRT_EXACT)
       add_test(
@@ -787,6 +865,7 @@ install(TARGETS pnmir pnmir_cli EXPORT PhysicsNeMoInferenceCoreTargets
 )
 if(PNMIR_ENABLE_AOTI)
   install(TARGETS pnmir_aoti EXPORT PhysicsNeMoInferenceAotiTargets
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
     ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
   )
@@ -801,6 +880,7 @@ if(PNMIR_ENABLE_AOTI)
 endif()
 if(PNMIR_ENABLE_ONNXRUNTIME)
   install(TARGETS pnmir_onnxruntime EXPORT PhysicsNeMoInferenceOnnxruntimeTargets
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
     ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
   )
@@ -809,6 +889,7 @@ if(PNMIR_ENABLE_ONNXRUNTIME)
 endif()
 if(PNMIR_ENABLE_TENSORRT)
   install(TARGETS pnmir_tensorrt ${pnmir_tensorrt_exact_targets} EXPORT PhysicsNeMoInferenceTensorrtTargets
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
     ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
   )

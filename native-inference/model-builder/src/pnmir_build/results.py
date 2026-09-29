@@ -11,15 +11,16 @@ import tempfile
 def _native_flusher():
     """Return a flusher for the process C runtime, or reject unsupported capture.
 
-    POSIX libraries share this stdio runtime. Separately buffered C++ streams
-    and background writers still need to drain before their operation returns.
-    Windows extensions may use distinct CRTs, so flushing one cannot establish
-    the same contract there.
+    POSIX libraries share the process runtime. Supported Windows builds use
+    the shared UCRT (Python and MSVC /MD). Separately buffered C++ streams,
+    privately linked CRTs and background writers must drain before returning.
     """
-    if os.name != "posix":
-        raise RuntimeError("Capturing native stdout requires a POSIX C runtime.")
+    if os.name not in ("posix", "nt"):
+        raise RuntimeError("Capturing native stdout requires POSIX or Windows UCRT.")
     try:
-        flush = ctypes.CDLL(None, use_errno=True).fflush
+        flush = ctypes.CDLL(
+            "ucrtbase" if os.name == "nt" else None, use_errno=True
+        ).fflush
     except (OSError, AttributeError) as exc:
         raise RuntimeError(
             "Cannot capture native stdout: the process C runtime must expose fflush."
@@ -34,12 +35,33 @@ def _native_flusher():
     return flush_streams
 
 
+def _windows_stdout_setter():
+    if os.name != "nt":
+        return None
+    import msvcrt
+    from ctypes import wintypes
+
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    set_handle = kernel.SetStdHandle
+    set_handle.argtypes = (wintypes.DWORD, wintypes.HANDLE)
+    set_handle.restype = wintypes.BOOL
+
+    def redirect(fd):
+        # dup2 updates the CRT descriptor table. Win32 writers and subprocess
+        # inheritance also use the separate process standard-handle table.
+        if not set_handle(-11, msvcrt.get_osfhandle(fd)):
+            raise ctypes.WinError(ctypes.get_last_error())
+
+    return redirect
+
+
 @contextmanager
 def capture_stdout(enabled, result):
     if not enabled:
         yield
         return
     flush_native = _native_flusher()
+    set_windows_stdout = _windows_stdout_setter()
     # Redirect the descriptor as well as Python stdout: framework extensions and
     # Docker children may write directly to fd 1.
     with tempfile.TemporaryFile(mode="w+", encoding="utf-8", errors="replace") as log:
@@ -47,6 +69,8 @@ def capture_stdout(enabled, result):
         original = os.dup(1)
         try:
             os.dup2(log.fileno(), 1)
+            if set_windows_stdout:
+                set_windows_stdout(1)
             with redirect_stdout(log):
                 try:
                     yield
@@ -61,6 +85,8 @@ def capture_stdout(enabled, result):
         finally:
             os.dup2(original, 1)
             os.close(original)
+            if set_windows_stdout:
+                set_windows_stdout(1)
             log.seek(0)
             shutil.copyfileobj(log, sys.stderr)
             output = result.get("output")

@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import re
+import sys
 import tempfile
 
 from .authoring_config import validate_source
@@ -99,7 +100,7 @@ def initialize(
         "config": {},
         "assets": {},
         "backends": ["aoti"],
-        "executor": "container",
+        "executor": "local" if sys.platform == "win32" else "container",
         "builder_image": None,
         "device": "cuda",
         "output_root": "builds",
@@ -128,7 +129,11 @@ def initialize(
         "next_steps": [
             "Set checkpoint, config, source and optional assets in model-build.json.",
             "Connect your model and validation inputs in build_adapter.py.",
-            "Select builder_image or a compatible local environment in model-build.json.",
+            (
+                "Set runtime to the native SDK executable returned by setup-env in model-build.json."
+                if sys.platform == "win32"
+                else "Select builder_image or a compatible local environment in model-build.json."
+            ),
             f"Run physicsnemo-model-builder check {root}.",
             f"Run physicsnemo-model-builder build {root}.",
         ],

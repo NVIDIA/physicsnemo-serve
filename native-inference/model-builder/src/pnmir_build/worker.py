@@ -48,7 +48,7 @@ def _file_identity(path: Path, root: Path | None = None) -> dict:
     if path.is_symlink() or not path.is_file():
         raise ValueError(f"artifact must be a regular file: {path}")
     return {
-        "path": str(path.relative_to(root)) if root else str(path),
+        "path": path.relative_to(root).as_posix() if root else str(path),
         "sha256": _sha256(path),
         "size_bytes": path.stat().st_size,
     }
@@ -405,7 +405,9 @@ def _build_backend(
             from pnmir_export.domino_exact import load_exact_ops, REQUIRED_OPERATORS
 
             if profile != "aten-boundary-exact-v3":
-                raise ValueError("domino_exact_ops requires aoti_profile=aten-boundary-exact-v3")
+                raise ValueError(
+                    "domino_exact_ops requires aoti_profile=aten-boundary-exact-v3"
+                )
             load_exact_ops(Path(sidecar))
             compilation["required_operators"] = REQUIRED_OPERATORS
         export_package(
@@ -576,7 +578,9 @@ def _native_case(
         raise ValueError("native metadata output count does not match reference")
     metrics = [
         _compare_output(
-            path.read_bytes(), expected, actual,
+            path.read_bytes(),
+            expected,
+            actual,
             require_byte_identical=require_byte_identical,
         )
         for path, expected, actual in zip(
@@ -767,14 +771,16 @@ def execute_build(
             exported = output / "exported" / backend
             variant = {
                 "status": "building",
-                "package": str(package.relative_to(output / "model")),
+                "package": package.relative_to(output / "model").as_posix(),
                 "package_base": "model",
                 "evidence_base": "build",
             }
             receipt["variants"][backend] = variant
             _write_json(output / "build.json", receipt)
             with (
-                (output / "logs" / f"{backend}-build.log").open("w") as log,
+                (output / "logs" / f"{backend}-build.log").open(
+                    "w", encoding="utf-8"
+                ) as log,
                 redirect_stdout(log),
                 redirect_stderr(log),
             ):
@@ -797,7 +803,8 @@ def execute_build(
                 "runtime": receipt["runtime"],
                 "limits": (
                     {"max_abs": 0.0, "relative_l2": 0.0}
-                    if byte_identical else PARITY_LIMITS
+                    if byte_identical
+                    else PARITY_LIMITS
                 ),
                 "cases": [],
             }
@@ -820,7 +827,11 @@ def execute_build(
                             references,
                             output / "checks" / backend / f"case-{index}",
                             output / "logs" / f"{backend}-case-{index}.log",
-                            **({"require_byte_identical": True} if byte_identical else {}),
+                            **(
+                                {"require_byte_identical": True}
+                                if byte_identical
+                                else {}
+                            ),
                         )
                     )
                     _write_json(check_path, check)

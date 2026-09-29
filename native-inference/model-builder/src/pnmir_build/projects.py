@@ -182,6 +182,7 @@ def _project_path(model):
         return candidate
     if (
         "/" in str(model)
+        or "\\" in str(model)
         or str(model).startswith((".", "~"))
         or str(model).endswith(".json")
     ):

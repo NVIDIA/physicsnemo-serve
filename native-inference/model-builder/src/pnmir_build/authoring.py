@@ -555,8 +555,8 @@ def command(args, result):
             _write_json(retained / "model-build.json", project["document"])
             _write_json(retained / "effective-config.json", effective)
             if published:
-                (retained / "model-build.lock.json").write_text(
-                    published["serialized_text"]
+                (retained / "model-build.lock.json").write_bytes(
+                    published["serialized_text"].encode("utf-8")
                 )
             _write_json(
                 output / "execution.json",

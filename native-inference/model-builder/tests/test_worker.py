@@ -76,6 +76,22 @@ class WorkerTest(unittest.TestCase):
         (self.root / "export.py").write_text("# frozen recipe adapter\n")
         self.runtime = self.root / "physicsnemo-infer"
         self.set_runtime("ok")
+        if sys.platform == "win32":
+            real_run = subprocess.run
+            runtime_path = str(self.runtime.resolve())
+
+            def run_script(command, *args, **kwargs):
+                if command[0] == runtime_path:
+                    command = [sys.executable, *command]
+                return real_run(command, *args, **kwargs)
+
+            launch = mock.patch.object(
+                worker,
+                "subprocess",
+                SimpleNamespace(run=run_script, STDOUT=subprocess.STDOUT),
+            )
+            launch.start()
+            self.addCleanup(launch.stop)
         self.output = self.root / "build"
         values = [[-2.0, 0.0, 1.0, 2.0], [0.25, 4.0, 10.0, -4.0]]
         self.prepared = {
@@ -160,6 +176,37 @@ class WorkerTest(unittest.TestCase):
             "exported/tensorrt/model.onnx.data",
             [f["path"] for f in report["variants"]["tensorrt"]["graphs"]],
         )
+
+    def test_build_logs_preserve_unicode_with_legacy_locale(self):
+        real_open = Path.open
+        backend = self.backend
+        stdout_message = "export \u2705 \u6a21\u578b"
+        stderr_message = "diagnostic \u26a0 \u6a21\u578b"
+
+        def legacy_open(
+            path, mode="r", buffering=-1, encoding=None, errors=None, newline=None
+        ):
+            # Simulate the Windows ANSI default on every test host.
+            if "b" not in mode and encoding is None:
+                encoding = "cp1252"
+            return real_open(path, mode, buffering, encoding, errors, newline)
+
+        def export_with_progress(*args):
+            print(stdout_message)
+            print(stderr_message, file=sys.stderr)
+            return backend(*args)
+
+        with (
+            mock.patch.object(Path, "open", legacy_open),
+            mock.patch.object(self, "backend", side_effect=export_with_progress),
+        ):
+            report = self.run_build()
+
+        self.assertEqual(report["status"], "complete", report)
+        for name in ("aoti", "tensorrt"):
+            content = (self.output / "logs" / f"{name}-build.log").read_bytes()
+            self.assertIn(stdout_message.encode("utf-8"), content)
+            self.assertIn(stderr_message.encode("utf-8"), content)
 
     def test_backend_packages_are_direct_siblings_and_independently_portable(self):
         report = self.run_build()

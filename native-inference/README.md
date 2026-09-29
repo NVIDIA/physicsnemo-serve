@@ -78,6 +78,7 @@ for prerequisites and both-backend commands.
 
 | Task | Guide |
 | --- | --- |
+| Set up native Windows 11 with AOTInductor and TensorRT | [Windows development and L4 checks](docs/windows.md) |
 | Configure a repeatable model build | [Projects, profiles and locks](docs/model-build-projects.md) |
 | Export a GeoTransolver checkpoint | [External GeoTransolver example](examples/README.md#geotransolver) |
 | Export a DoMINO surface core | [External DoMINO example](docs/domino-workflow.md) |

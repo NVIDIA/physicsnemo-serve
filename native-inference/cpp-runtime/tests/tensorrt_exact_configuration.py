@@ -3,6 +3,7 @@
 import argparse
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -13,27 +14,45 @@ class ExactConfigurationTests(unittest.TestCase):
     def configure(self, *options):
         with tempfile.TemporaryDirectory(prefix="pnmir-exact-config-") as build:
             return subprocess.run(
-                ["cmake", "-S", str(self.sdk_source), "-B", build,
-                 "-DPNMIR_BUILD_TESTS=OFF", *options],
-                capture_output=True, text=True,
+                [
+                    "cmake",
+                    "-S",
+                    str(self.sdk_source),
+                    "-B",
+                    build,
+                    "-DPNMIR_BUILD_TESTS=OFF",
+                    *options,
+                ],
+                capture_output=True,
+                text=True,
             )
 
     def test_exact_requires_tensorrt_backend(self):
         result = self.configure("-DPNMIR_ENABLE_TENSORRT_EXACT=ON")
-        self.assertNotEqual(result.returncode, 0,
-                            "exact plugins must not silently disable themselves")
-        self.assertIn("requires PNMIR_ENABLE_TENSORRT=ON", result.stdout + result.stderr)
+        self.assertNotEqual(
+            result.returncode, 0, "exact plugins must not silently disable themselves"
+        )
+        self.assertIn(
+            "requires PNMIR_ENABLE_TENSORRT=ON", result.stdout + result.stderr
+        )
 
     def test_exact_requires_explicit_pytorch_headers(self):
-        result = self.configure("-DPNMIR_ENABLE_TENSORRT_EXACT=ON",
-                                "-DPNMIR_ENABLE_TENSORRT=ON")
+        result = self.configure(
+            "-DPNMIR_ENABLE_TENSORRT_EXACT=ON", "-DPNMIR_ENABLE_TENSORRT=ON"
+        )
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("PNMIR_PYTORCH_SOURCE_ROOT must contain", result.stdout + result.stderr)
+        diagnostic = (
+            "Exact TensorRT operators are not supported on native Windows"
+            if sys.platform == "win32"
+            else "PNMIR_PYTORCH_SOURCE_ROOT must contain"
+        )
+        self.assertIn(diagnostic, result.stdout + result.stderr)
 
     def test_domino_sidecar_requires_aoti_backend(self):
         result = self.configure("-DPNMIR_BUILD_DOMINO_EXACT_OPS=ON")
-        self.assertNotEqual(result.returncode, 0,
-                            "DoMINO exact operators must not be silently disabled")
+        self.assertNotEqual(
+            result.returncode, 0, "DoMINO exact operators must not be silently disabled"
+        )
         self.assertIn("requires PNMIR_ENABLE_AOTI=ON", result.stdout + result.stderr)
 
 

@@ -53,6 +53,12 @@ Docker and a local Python environment are both supported. Docker remains the
 default executor; `setup-env` creates a reusable local environment and can build
 an already configured format-2 model project in the same command.
 
+Native Windows uses the local executor. Follow the [Windows guide](../docs/windows.md)
+for a PowerShell setup with both AOTInductor and TensorRT, matching CUDA/Triton
+dependencies, and L4 validation. Run the checkout launcher as
+`python native-inference/physicsnemo-model-builder` on Windows. Setup returns a
+PowerShell activation wrapper that also configures native DLL search paths.
+
 For a trusted PhysicsNeMo `.mdlus` checkpoint, the checkout or installed CLI can
 generate reusable weights and constructor settings with
 `physicsnemo-model-builder import-checkpoint model.mdlus --output imported --json`.

@@ -30,7 +30,7 @@ foreach(component IN LISTS PhysicsNeMoInference_FIND_COMPONENTS)
   elseif(component STREQUAL "tensorrt" AND PhysicsNeMoInference_tensorrt_FOUND)
     find_dependency(CUDAToolkit)
     foreach(library IN ITEMS nvinfer nvinfer_plugin)
-      find_library(PNMIR_${library}_NATIVE_LIBRARY NAMES ${library}
+      find_library(PNMIR_${library}_NATIVE_LIBRARY NAMES ${library} ${library}_10
         HINTS "${PNMIR_TENSORRT_ROOT}/lib" "${PNMIR_TENSORRT_ROOT}/lib64"
               "${PNMIR_TENSORRT_ROOT}/lib/x86_64-linux-gnu"
               "${PACKAGE_PREFIX_DIR}/@CMAKE_INSTALL_LIBDIR@")

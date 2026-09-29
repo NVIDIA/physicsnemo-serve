@@ -80,7 +80,7 @@ class OnnxPackageLayoutTests(unittest.TestCase):
                     expected.add(location)
                 self.assertEqual(
                     {
-                        str(p.relative_to(package))
+                        p.relative_to(package).as_posix()
                         for p in package.rglob("*")
                         if p.is_file()
                     },

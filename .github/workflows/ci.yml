@@ -140,7 +140,7 @@ jobs:
       - name: Install CPU build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends build-essential cmake nlohmann-json3-dev python3 python3-venv
+          sudo apt-get install -y --no-install-recommends build-essential ca-certificates cmake curl nlohmann-json3-dev python3 python3-venv
       - name: Prepare isolated builder packaging environment
         run: |
           python3 -m venv "$RUNNER_TEMP/inference-packaging-venv"
@@ -151,6 +151,21 @@ jobs:
           set -euo pipefail
           python3 -S -m unittest discover -s native-inference/model-builder/tests -p 'test_*.py' -v \
             2>&1 | tee "$RUNNER_TEMP/inference-cpu-evidence/builder-tests.log"
+      - name: Prepare isolated exact graph test environment
+        run: |
+          python3 -m venv "$RUNNER_TEMP/inference-graph-venv"
+          "$RUNNER_TEMP/inference-graph-venv/bin/python" -m pip install numpy==2.1.0 onnx==1.18.0 pytest==8.3.5
+      - name: Run exact TensorRT graph tests on CPU
+        env:
+          PYTHONPATH: ${{ github.workspace }}/native-inference/model-builder/src
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/inference-graph-venv/bin/python" -m pytest \
+            native-inference/model-builder/tests/test_tensorrt_exact_graphs.py \
+            native-inference/model-builder/tests/test_tensorrt_domino_graphs.py \
+            native-inference/model-builder/tests/test_tensorrt_weighted_blend.py \
+            -v --junitxml="$RUNNER_TEMP/inference-cpu-evidence/exact-graph-tests.xml" \
+            2>&1 | tee "$RUNNER_TEMP/inference-cpu-evidence/exact-graph-tests.log"
       - name: Build and verify the installed builder wheel
         run: |
           set -euo pipefail
@@ -180,6 +195,27 @@ jobs:
           cmake --build "$RUNNER_TEMP/inference-core-build" --parallel 4
           ctest --test-dir "$RUNNER_TEMP/inference-core-build" --output-on-failure --no-tests=error \
             2>&1 | tee "$RUNNER_TEMP/inference-cpu-evidence/core-sdk-tests.log"
+      - name: Prepare ONNX Runtime CPU SDK
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 3 \
+            https://github.com/microsoft/onnxruntime/releases/download/v1.27.1/onnxruntime-linux-x64-1.27.1.tgz \
+            --output "$RUNNER_TEMP/onnxruntime-linux-x64-1.27.1.tgz"
+          printf '%s  %s\n' \
+            25b1ef1fea1acd210d63f8f24dc870ad6e077795ce1f54876252c6d3803c15af \
+            "$RUNNER_TEMP/onnxruntime-linux-x64-1.27.1.tgz" | sha256sum --check
+          tar -xzf "$RUNNER_TEMP/onnxruntime-linux-x64-1.27.1.tgz" -C "$RUNNER_TEMP"
+      - name: Test installed ONNX Runtime SDK consumers
+        run: |
+          set -euo pipefail
+          python3 -S native-inference/cpp-runtime/tests/install_consumer.py \
+            --sdk-source native-inference/cpp-runtime --component onnxruntime \
+            --onnxruntime-root "$RUNNER_TEMP/onnxruntime-linux-x64-1.27.1" \
+            2>&1 | tee "$RUNNER_TEMP/inference-cpu-evidence/onnxruntime-static-consumer.log"
+          python3 -S native-inference/cpp-runtime/tests/install_consumer.py \
+            --sdk-source native-inference/cpp-runtime --component onnxruntime --shared \
+            --onnxruntime-root "$RUNNER_TEMP/onnxruntime-linux-x64-1.27.1" \
+            2>&1 | tee "$RUNNER_TEMP/inference-cpu-evidence/onnxruntime-shared-consumer.log"
       - name: Preserve CPU qualification evidence
         if: always()
         uses: actions/upload-artifact@v4
@@ -188,6 +224,121 @@ jobs:
           path: |
             ${{ runner.temp }}/inference-cpu-evidence/
             ${{ runner.temp }}/inference-core-build/Testing/Temporary/LastTest.log
+
+  inference-windows:
+    name: Model Builder and Native SDK Windows CPU
+    runs-on: windows-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      CMAKE_GENERATOR_PLATFORM: x64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Prepare Windows qualification evidence and symlink support
+        run: |
+          New-Item -ItemType Directory -Force "$env:RUNNER_TEMP/inference-windows-evidence"
+          New-Item -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\AppModelUnlock' -Force | Out-Null
+          New-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\AppModelUnlock' `
+            -Name AllowDevelopmentWithoutDevLicense -PropertyType DWord -Value 1 -Force | Out-Null
+      - name: Run portable builder contract tests without ML frameworks
+        working-directory: native-inference/model-builder/tests
+        run: |
+          python -S -m unittest test_cli test_project_targets test_tensor_contracts `
+            test_windows_frontend test_setup_env_cli test_init_scaffold test_cuda_environment `
+            test_json_output test_windows_paths -v 2>&1 |
+            Tee-Object "$env:RUNNER_TEMP/inference-windows-evidence/builder-tests.log"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Build and test the core C++ SDK with MSVC
+        run: |
+          cmake -S native-inference -B "$env:RUNNER_TEMP/inference-windows-build" `
+            -A x64 -DPNMIR_BUILD_TESTS=ON `
+            -DPNMIR_ENABLE_AOTI=OFF -DPNMIR_ENABLE_ONNXRUNTIME=OFF -DPNMIR_ENABLE_TENSORRT=OFF `
+            "-DPython3_EXECUTABLE=$((Get-Command python).Source)" 2>&1 |
+            Tee-Object "$env:RUNNER_TEMP/inference-windows-evidence/configure.log"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $env:CMAKE_GENERATOR = (Select-String -Path "$env:RUNNER_TEMP/inference-windows-build/CMakeCache.txt" `
+            -Pattern '^CMAKE_GENERATOR:INTERNAL=').Line -replace '^CMAKE_GENERATOR:INTERNAL=', ''
+          cmake --build "$env:RUNNER_TEMP/inference-windows-build" --config Release --parallel 4 2>&1 |
+            Tee-Object "$env:RUNNER_TEMP/inference-windows-evidence/build.log"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ctest --test-dir "$env:RUNNER_TEMP/inference-windows-build" -C Release `
+            --output-on-failure --no-tests=error 2>&1 |
+            Tee-Object "$env:RUNNER_TEMP/inference-windows-evidence/core-sdk-tests.log"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Preserve Windows qualification evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: inference-windows-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/inference-windows-evidence/
+            ${{ runner.temp }}/inference-windows-build/Testing/Temporary/LastTest.log
+
+  inference-windows-aoti:
+    name: Native SDK Windows AOTI CPU
+    runs-on: windows-latest
+    timeout-minutes: 40
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      CMAKE_GENERATOR: Ninja
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+      - name: Install the CPU AOTI producer and native dependencies
+        run: |
+          New-Item -ItemType Directory -Force "$env:RUNNER_TEMP/inference-windows-aoti-evidence"
+          python -m pip install torch==2.10.0 --index-url https://download.pytorch.org/whl/cpu
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -m pip install numpy==2.1.0 ninja==1.13.0
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $torchLib = python -c 'from pathlib import Path; import torch; print(Path(torch.__file__).resolve().parent / "lib")'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $torchLib | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+      - name: Build and qualify CPU AOTI with MSVC
+        run: |
+          cmake -S native-inference/cpp-runtime -B "$env:RUNNER_TEMP/inference-windows-aoti-build" `
+            -DCMAKE_BUILD_TYPE=Release -DPNMIR_BUILD_TESTS=ON -DPNMIR_ENABLE_AOTI=ON `
+            -DPNMIR_ENABLE_ONNXRUNTIME=OFF -DPNMIR_ENABLE_TENSORRT=OFF `
+            "-DPython3_EXECUTABLE=$((Get-Command python).Source)" 2>&1 |
+            Tee-Object "$env:RUNNER_TEMP/inference-windows-aoti-evidence/configure.log"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cmake --build "$env:RUNNER_TEMP/inference-windows-aoti-build" --config Release --parallel 4 2>&1 |
+            Tee-Object "$env:RUNNER_TEMP/inference-windows-aoti-evidence/build.log"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ctest --test-dir "$env:RUNNER_TEMP/inference-windows-aoti-build" -C Release `
+            -R '^pnmir_(aoti_integration|install_aoti_(static|shared)_consumer)$' `
+            --output-on-failure --no-tests=error 2>&1 |
+            Tee-Object "$env:RUNNER_TEMP/inference-windows-aoti-evidence/aoti-tests.log"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Build and verify an affine package through the public builder
+        run: |
+          python native-inference/physicsnemo-model-builder build affine `
+            --executor local --device cpu --backend aoti `
+            --runtime "$env:RUNNER_TEMP/inference-windows-aoti-build/physicsnemo-infer.exe" `
+            --output "$env:RUNNER_TEMP/inference-windows-affine" --json 2>&1 |
+            Tee-Object "$env:RUNNER_TEMP/inference-windows-aoti-evidence/affine-build.log"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Preserve Windows AOTI qualification evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: inference-windows-aoti-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/inference-windows-aoti-evidence/
+            ${{ runner.temp }}/inference-windows-aoti-build/Testing/Temporary/LastTest.log
+            ${{ runner.temp }}/inference-windows-affine/
 
   e2s-zarr-io-parity:
     name: E2S Zarr IO Parity

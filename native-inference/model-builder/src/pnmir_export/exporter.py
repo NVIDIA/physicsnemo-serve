@@ -56,7 +56,8 @@ def _compiler_options_metadata(options: dict[str, bool]) -> dict | None:
     from torch._inductor import config
 
     unavailable = [
-        key for key in options
+        key
+        for key in options
         if not hasattr(config, key) or type(getattr(config, key)) is not bool
     ]
     if unavailable:
@@ -65,7 +66,8 @@ def _compiler_options_metadata(options: dict[str, bool]) -> dict | None:
             + ", ".join(sorted(unavailable))
         )
     effective = {
-        key: getattr(config, key) for key in sorted(SUPPORTED_AOTI_OPTIONS)
+        key: getattr(config, key)
+        for key in sorted(SUPPORTED_AOTI_OPTIONS)
         if hasattr(config, key) and type(getattr(config, key)) is bool
     }
     effective.update(options)
@@ -86,7 +88,7 @@ def _configure_cuda_export_environment() -> None:
     if CUDA_HOME is None:
         return
     cuda_home = Path(CUDA_HOME)
-    ptxas = cuda_home / "bin" / "ptxas"
+    ptxas = cuda_home / "bin" / ("ptxas.exe" if sys.platform == "win32" else "ptxas")
     if ptxas.is_file():
         os.environ.setdefault("TRITON_PTXAS_PATH", str(ptxas))
     cuda_include = cuda_home / "include"
@@ -368,7 +370,9 @@ def export_package(
                 package_config = nullcontext()
             with package_config:
                 compilation = (
-                    {"inductor_configs": dict(selected_options)} if selected_options else {}
+                    {"inductor_configs": dict(selected_options)}
+                    if selected_options
+                    else {}
                 )
                 torch._inductor.aoti_compile_and_package(
                     exported, package_path=str(artifact_path), **compilation

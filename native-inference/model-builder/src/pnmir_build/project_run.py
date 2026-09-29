@@ -131,7 +131,7 @@ def retain(plan):
         "model-build.lock.json": lock_text,
     }
     for name, value in documents.items():
-        (directory / name).write_text(value)
+        (directory / name).write_bytes(value.encode("utf-8"))
     return {
         "source": {
             "path": "project/model-build.json",

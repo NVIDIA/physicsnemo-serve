@@ -15,7 +15,7 @@ Python/native libraries and ONNX/ONNXScript. See
 [builder environments](../model-builder/README.md#builder-environment).
 The default project requires an AOTI-enabled SDK built with
 `PNMIR_ENABLE_TENSORRT=ON` and `PNMIR_ENABLE_TENSORRT_EXACT=ON`. This installs
-all nine matching exact plugin libraries. Follow the
+the matching exact plugin libraries, including all ten used by GeoTransolver v2. Follow the
 [SDK build instructions](../cpp-runtime/README.md#exact-tensorrt-operators-for-transolver-and-geotransolver).
 
 The public reference is
@@ -89,7 +89,7 @@ operator available to the current native exporter/runtime.
 `check` executes the core eagerly on its cases. `build` repeats eager checks,
 exports each requested backend and compares its actual C++ outputs against
 core Python outputs. Every case and requested backend must pass the existing
-checks before a complete candidate is written. TensorRT's `geotransolver-exact`
+checks before a complete candidate is written. TensorRT's `geotransolver-exact-v2`
 profile additionally requires identical output bytes for every case. This is core/native
 parity only; there is no full-geometry or full-model/native gate.
 
@@ -98,7 +98,7 @@ The project defaults to both AOTI and TensorRT on CUDA:
 | Backend | Profile | Behavior |
 | --- | --- | --- |
 | AOTI | `aten-boundary-exact-v2` | Uses the existing exactness-preserving compiler settings and AOTI parity checks. |
-| TensorRT | `geotransolver-exact` | Uses nine exact plugins and requires byte-identical eager/C++ outputs. |
+| TensorRT | `geotransolver-exact-v2` | Uses ten exact plugins and requires byte-identical eager/C++ outputs. |
 
 For TensorRT, the adapter's `NormalizeClampBounds` hook remains in use.
 The selected profile automatically adds `FreezeScalarSigmoidGates`: it evaluates
@@ -107,6 +107,14 @@ before ONNX conversion. This retains the eager result's rounding for GALE mixing
 gates. It leaves the original checkpoint, eager model, input-dependent sigmoids
 and vector gates unchanged. The WeightedBlend plugin then preserves separately
 rounded multiplies and addition for the gated mixture.
+The DesliceBmm plugin preserves the original strided BMM layout after mixing
+self- and cross-attention. Its bounded rewrite requires static FP32, batch one,
+and supported exact-attention producers; unsupported deslicing fails export.
+
+Existing `geotransolver-exact` projects retain their nine plugins and metadata
+version 2. The example selects `geotransolver-exact-v2` (metadata version 3),
+which adds DesliceBmm. Copy that matching SDK library and use
+`build --update-lock` when migrating an existing project.
 
 `checks/tensorrt.json` records `require_byte_identical: true`, zero error limits,
 and native/reference output hashes. A byte difference fails the build even when

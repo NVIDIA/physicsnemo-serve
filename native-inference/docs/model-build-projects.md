@@ -47,11 +47,11 @@ The importer creates `weights/config.json`, `weights/checkpoint.pt` and
 to local CUDA execution with AOTI and TensorRT. Use an AOTI-enabled SDK built
 with `PNMIR_ENABLE_TENSORRT=ON` and `PNMIR_ENABLE_TENSORRT_EXACT=ON`; see
 [building the exact plugins](../cpp-runtime/README.md#exact-tensorrt-operators-for-transolver-and-geotransolver).
-The nine copied libraries are declared assets whose hashes enter the project lock.
+The ten copied libraries are declared assets whose hashes enter the project lock.
 
 The adapter creates three deterministic synthetic core-input cases with 32
 points. `check` runs the cached core eagerly; `build` compiles it and requires
-C++ parity against those eager results. TensorRT uses `geotransolver-exact`,
+C++ parity against those eager results. TensorRT uses `geotransolver-exact-v2`,
 which automatically freezes scalar parameter sigmoid gates before ONNX conversion
 and requires byte-identical outputs. AOTI uses `aten-boundary-exact-v2`.
 There are no model-specific fixture
@@ -131,6 +131,7 @@ an explicit recipe supplies its compiler selection.
 | `baseline` (default) | None. | Existing numerical parity limits. |
 | `layout-order-exact` | Eight exact plugins for the supported Transolver graph. | Existing numerical parity limits. |
 | `geotransolver-exact` | Those eight plugins plus WeightedBlend. | Byte-identical eager/C++ outputs for every case. |
+| `geotransolver-exact-v2` | The nine GeoTransolver plugins plus DesliceBmm. | Byte-identical eager/C++ outputs for every case, preserving deslicing layout after attention mixing. |
 | `domino-surface-exact` | Linear, GELU, ScalarDiv and InverseDistanceBlend. | Byte-identical eager/C++ outputs for every case. |
 
 GeoTransolver's profile also selects `FreezeScalarSigmoidGates` automatically;

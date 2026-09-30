@@ -233,6 +233,24 @@ updating its lock with `build --update-lock`. The older `layout-order-exact`
 profile retains its eight-plugin contract; use v2 to require byte equality and
 preserve the deslicing BMM layout as well.
 
+For the GeoTransolver cached surface core, select `geotransolver-exact-v2`
+and its ten DLL assets, including WeightedBlend and DesliceBmm. This profile
+retains scalar sigmoid gate freezing and preserves the original BMM layout
+after self/cross-attention mixing. The legacy `geotransolver-exact` keeps
+its nine-plugin contract; migrate explicitly with the additional DLL and
+`build --update-lock`. Both profiles reject native/reference byte differences.
+Geometry preprocessing remains outside the native core package.
+
+For the DoMINO surface core, add `-DPNMIR_BUILD_DOMINO_EXACT_OPS=ON` to the
+exact SDK configuration above. Select `aten-boundary-exact-v3` for AOTI and
+`domino-surface-exact` for TensorRT. Copy the sidecar `pnmir_domino_exact_ops.dll`
+and the four TensorRT DLLs for Linear, GELU, ScalarDiv and InverseDistanceBlend
+into the [DoMINO project's declared assets](../examples/domino-surface-core/model-build.json),
+using Windows filenames in place of its `.so` paths. Keep the SDK `bin`
+directory, including the sidecar DLL, on `PATH` for native execution. Both
+backends require byte-identical core outputs; the package consumes prepared
+surface neighborhoods and does not include the full geometry preprocessing.
+
 Require actual passes for the exact dimension, DesliceBmm and WeightedBlend tests as well
 as the enabled backend integration tests; an optional-test skip is insufficient.
 Then rerun Model Builder and independent Python/native comparisons on the target

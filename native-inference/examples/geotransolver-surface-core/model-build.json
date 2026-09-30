@@ -23,7 +23,7 @@
   "executor": "local",
   "device": "cuda",
   "output_root": "builds",
-  "tensorrt_profile": "geotransolver-exact",
+  "tensorrt_profile": "geotransolver-exact-v2",
   "assets": {
     "tensorrt_exact_linear_plugin": "assets/tensorrt/libpnmir_tensorrt_exact_linear_plugin.so",
     "tensorrt_exact_gemm_plugin": "assets/tensorrt/libpnmir_tensorrt_exact_gemm_plugin.so",
@@ -33,6 +33,7 @@
     "tensorrt_exact_softmax_plugin": "assets/tensorrt/libpnmir_tensorrt_exact_softmax_plugin.so",
     "tensorrt_exact_attention_plugin": "assets/tensorrt/libpnmir_tensorrt_exact_attention_plugin.so",
     "tensorrt_exact_gelu_plugin": "assets/tensorrt/libpnmir_tensorrt_exact_gelu_plugin.so",
-    "tensorrt_exact_weighted_blend_plugin": "assets/tensorrt/libpnmir_tensorrt_exact_weighted_blend_plugin.so"
+    "tensorrt_exact_weighted_blend_plugin": "assets/tensorrt/libpnmir_tensorrt_exact_weighted_blend_plugin.so",
+    "tensorrt_exact_deslice_bmm_plugin": "assets/tensorrt/libpnmir_tensorrt_exact_deslice_bmm_plugin.so"
   }
 }

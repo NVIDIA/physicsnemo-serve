@@ -125,7 +125,7 @@ def check_tensorrt(args, torch):
 
     handles = []
     for name, creator_name in PLUGINS.items():
-        library = args.plugin_dir / f"libpnmir_tensorrt_exact_{name}_plugin.so"
+        library = getattr(args, name + "_plugin")
         handles.append(ctypes.CDLL(str(library.resolve()), mode=ctypes.RTLD_GLOBAL))
         assert trt.get_plugin_registry().get_creator(creator_name, "1", "") is not None
     logger = trt.Logger(trt.Logger.WARNING)
@@ -235,7 +235,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--pnmir", type=Path, required=True)
     parser.add_argument("--sidecar", type=Path, required=True)
-    parser.add_argument("--plugin-dir", type=Path, required=True)
+    parser.add_argument("--scalar-div-plugin", type=Path, required=True)
+    parser.add_argument("--inverse-distance-blend-plugin", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=True)

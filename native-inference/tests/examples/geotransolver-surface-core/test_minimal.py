@@ -22,9 +22,9 @@ from pnmir_build import (  # noqa: E402
 
 @unittest.skipIf(fixture.torch is None, "requires Torch")
 class MinimalExampleTests(unittest.TestCase):
-    def test_customer_project_selects_exact_backends_and_nine_plugin_assets(self):
+    def test_customer_project_selects_exact_backends_and_ten_plugin_assets(self):
         document = json.loads((EXAMPLE / "model-build.json").read_text())
-        self.assertEqual(document.get("tensorrt_profile"), "geotransolver-exact")
+        self.assertEqual(document.get("tensorrt_profile"), "geotransolver-exact-v2")
         self.assertEqual(document["aoti_profile"], "aten-boundary-exact-v2")
         names = {
             "linear",
@@ -36,6 +36,7 @@ class MinimalExampleTests(unittest.TestCase):
             "attention",
             "gelu",
             "weighted_blend",
+            "deslice_bmm",
         }
         self.assertEqual(
             set(document["assets"]), {f"tensorrt_exact_{name}_plugin" for name in names}

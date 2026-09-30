@@ -216,7 +216,12 @@ if(PNMIR_ENABLE_AOTI)
       $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
       $<INSTALL_INTERFACE:include>)
     target_link_libraries(pnmir_domino_exact_ops PRIVATE torch)
-    target_compile_options(pnmir_domino_exact_ops PRIVATE -O3 -DNDEBUG ${TORCH_CXX_FLAGS})
+    target_compile_definitions(pnmir_domino_exact_ops PRIVATE NDEBUG)
+    if(MSVC)
+      target_compile_options(pnmir_domino_exact_ops PRIVATE /O2 ${TORCH_CXX_FLAGS})
+    else()
+      target_compile_options(pnmir_domino_exact_ops PRIVATE -O3 ${TORCH_CXX_FLAGS})
+    endif()
     target_link_libraries(pnmir_aoti PRIVATE pnmir_domino_exact_ops)
     target_compile_definitions(pnmir_aoti PRIVATE PNMIR_HAS_DOMINO_EXACT_OPS=1)
   endif()
@@ -430,6 +435,12 @@ if(PNMIR_BUILD_TESTS)
     NAME pnmir_device_runner_cuda_skip
     COMMAND ${Python3_EXECUTABLE} -S
       ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_device_runner_cuda_skip.py -v
+  )
+
+  add_test(
+    NAME pnmir_domino_plugin_paths
+    COMMAND ${Python3_EXECUTABLE} -S
+      ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_domino_plugin_paths.py -v
   )
 
   add_test(
@@ -791,7 +802,8 @@ if(PNMIR_BUILD_TESTS)
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/domino_exact_integration.py
             --pnmir $<TARGET_FILE:pnmir_cli>
             --sidecar $<TARGET_FILE:pnmir_domino_exact_ops>
-            --plugin-dir $<TARGET_FILE_DIR:pnmir_tensorrt_exact_scalar_div_plugin>
+            --scalar-div-plugin $<TARGET_FILE:pnmir_tensorrt_exact_scalar_div_plugin>
+            --inverse-distance-blend-plugin $<TARGET_FILE:pnmir_tensorrt_exact_inverse_distance_blend_plugin>
             --output ${CMAKE_CURRENT_BINARY_DIR}/domino-exact-integration
         )
         set_tests_properties(pnmir_domino_exact_integration

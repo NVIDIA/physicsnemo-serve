@@ -377,11 +377,12 @@ v2 and its plugin. Existing `layout-order-exact` projects keep their eight asset
 and numeric acceptance policy; AOTI remains independently configured.
 
 For the supported GeoTransolver cached core, select
-`"tensorrt_profile": "geotransolver-exact"`. It requires the same eight assets
-plus `tensorrt_exact_weighted_blend_plugin`, pointing to
-`libpnmir_tensorrt_exact_weighted_blend_plugin.so`. The
+`"tensorrt_profile": "geotransolver-exact-v2"`. It requires the same eight assets
+plus `tensorrt_exact_weighted_blend_plugin` and
+`tensorrt_exact_deslice_bmm_plugin`, pointing to the matching WeightedBlend and
+DesliceBmm libraries. The
 [two-file GeoTransolver project](../examples/geotransolver-surface-core/model-build.json)
-already declares all nine under `assets/tensorrt/`. Copy those libraries from
+already declares all ten under `assets/tensorrt/`. Copy those libraries from
 the matching exact-enabled SDK as shown in the
 [example commands](../examples/README.md#geotransolver). Model Builder captures
 and hashes these assets; their identities and the profile participate in the
@@ -393,13 +394,19 @@ on the reference device, preserving the rounding used by GeoTransolver's mixing
 gates. Original model/checkpoint parameters and input-dependent or vector
 sigmoids remain unchanged. WeightedBlend preserves separate rounding of the
 two multiplications and the addition when those scalar gates mix tensors.
+V2 also preserves the deslicing BMM's physical layout after the weighted
+attention mixture. It requires static FP32, batch one, more than one head,
+and two supported exact-attention producers; unsupported deslicing fails export.
 
-TensorRT builds with `geotransolver-exact` require identical native/reference
+TensorRT builds with either GeoTransolver exact profile require identical native/reference
 output bytes for every case, in addition to the usual shape, dtype and finite
 value checks. `checks/tensorrt.json` records `require_byte_identical: true`,
 zero error limits, and the output hashes. A mismatch fails the build. This
 requirement applies to the selected GeoTransolver TensorRT profile; AOTI and
-`layout-order-exact` retain their existing checks.
+`layout-order-exact` retain their existing checks. Existing `geotransolver-exact`
+projects retain their nine-plugin contract and profile metadata version 2.
+The new `geotransolver-exact-v2` records metadata version 3. Changing a project
+to v2 requires adding DesliceBmm and updating its lock with `build --update-lock`.
 
 For the supported DoMINO surface core, select
 `"tensorrt_profile": "domino-surface-exact"`. It requires four declared

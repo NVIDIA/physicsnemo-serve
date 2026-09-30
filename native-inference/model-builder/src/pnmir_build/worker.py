@@ -425,7 +425,7 @@ def _build_backend(
     if target["type"] != "cuda":
         raise ValueError("TensorRT requires a CUDA device")
     profile = validate_tensorrt_profile(recipe.get("tensorrt_profile", "baseline"))
-    if profile == "geotransolver-exact":
+    if profile in ("geotransolver-exact", "geotransolver-exact-v2"):
         from pnmir_export.compat import FreezeScalarSigmoidGates
 
         options = ExportOptions(

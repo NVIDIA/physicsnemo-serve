@@ -631,6 +631,7 @@ def _validate_container_completion(plan: dict) -> None:
             if backend == "tensorrt":
                 exact_label = {
                     "geotransolver-exact": "GeoTransolver",
+                    "geotransolver-exact-v2": "GeoTransolver",
                     "layout-order-exact-v2": "Transolver",
                 }.get(plan["recipe"].get("tensorrt_profile"), "DoMINO")
             require(variant.get("status") == "complete", f"{backend} is not complete")

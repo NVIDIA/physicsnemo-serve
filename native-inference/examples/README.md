@@ -55,7 +55,7 @@ checks; the names do not guarantee accuracy or speed. See
 Builds the surface cached core using pretrained weights and three synthetic
 core-input cases. Use a compatible environment with PhysicsNeMo 2.1.1, Torch,
 Warp, CUDA and matching AOTI/TensorRT libraries. The SDK must include AOTI and
-the nine exact TensorRT plugins built with `PNMIR_ENABLE_TENSORRT_EXACT=ON`;
+the ten exact TensorRT plugins selected by its v2 profile, built with `PNMIR_ENABLE_TENSORRT_EXACT=ON`;
 see the [SDK build instructions](../cpp-runtime/README.md#exact-tensorrt-operators-for-transolver-and-geotransolver).
 Download the trusted
 `.mdlus` checkpoint separately; see
@@ -79,9 +79,11 @@ for 32 points; there are no fixture files or a model-specific preparation tool.
 The copied plugin libraries are declared assets: Model Builder captures and
 hashes them for the build and project lock.
 
-The project selects `aten-boundary-exact-v2` for AOTI and `geotransolver-exact`
+The project selects `aten-boundary-exact-v2` for AOTI and `geotransolver-exact-v2`
 for TensorRT. The latter automatically freezes constant scalar sigmoid gates
-using PyTorch's result and requires byte-identical C++ outputs for every case.
+using PyTorch's result, preserves the deslicing layout after weighted attention,
+and requires byte-identical C++ outputs for every case. Its ten plugin assets
+include WeightedBlend and DesliceBmm.
 See [exact profile behavior](../docs/geotransolver-workflow.md#build-checks-and-outputs).
 
 The example checks cached-core Python/C++ parity. It does not validate full

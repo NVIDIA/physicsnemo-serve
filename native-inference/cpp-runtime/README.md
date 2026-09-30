@@ -154,11 +154,14 @@ original eight plugin ABIs or the existing `layout-order-exact` profile.
 
 For a Model Builder project, copy the installed libraries into its declared
 asset paths before building. The [GeoTransolver example commands](../examples/README.md#geotransolver)
-copy all nine from the SDK's `lib/` directory to `assets/tensorrt/`. Model Builder
+copy the exact libraries from the SDK's `lib/` directory to `assets/tensorrt/`;
+the default v2 example declares ten, including WeightedBlend and DesliceBmm. Model Builder
 captures and hashes those copies; run the resulting engine with the same
 compatible SDK and plugin libraries. The runtime registers native operators;
 the automatic scalar-sigmoid preparation and byte-identical acceptance gate are
-provided by the builder's `geotransolver-exact` profile.
+provided by the builder's GeoTransolver exact profiles. The default
+`geotransolver-exact-v2` also preserves deslicing layout after attention mixing;
+the older `geotransolver-exact` retains its nine-plugin contract.
 
 ### DoMINO AOTI boundary operators
 

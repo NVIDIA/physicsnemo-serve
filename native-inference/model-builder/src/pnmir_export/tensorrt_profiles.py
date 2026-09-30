@@ -15,6 +15,7 @@ _PLUGIN_CREATORS = (
     "PNMIRExactLayerNorm", "PNMIRExactSoftmax", "PNMIRExactAttention", "PNMIRExactGelu",
 )
 GEOTRANSOLVER_PLUGIN_NAMES = (*EXACT_PLUGIN_NAMES, "exact_weighted_blend")
+GEOTRANSOLVER_V2_PLUGIN_NAMES = (*GEOTRANSOLVER_PLUGIN_NAMES, "exact_deslice_bmm")
 TRANSOLVER_V2_PLUGIN_NAMES = (*EXACT_PLUGIN_NAMES, "exact_deslice_bmm")
 DOMINO_PLUGIN_NAMES = (
     "exact_linear", "exact_gelu", "exact_scalar_div", "exact_inverse_distance_blend",
@@ -31,11 +32,11 @@ _CREATORS_BY_NAME["exact_deslice_bmm"] = "PNMIRExactDesliceBmm"
 def validate_tensorrt_profile(name: str) -> str:
     if not isinstance(name, str) or name not in (
         "baseline", "layout-order-exact", "layout-order-exact-v2",
-        "geotransolver-exact", "domino-surface-exact"
+        "geotransolver-exact", "geotransolver-exact-v2", "domino-surface-exact"
     ):
         raise ValueError(
-            "tensorrt_profile must be baseline, layout-order-exact, layout-order-exact-v2, geotransolver-exact "
-            "or domino-surface-exact"
+            "tensorrt_profile must be baseline, layout-order-exact, layout-order-exact-v2, "
+            "geotransolver-exact, geotransolver-exact-v2 or domino-surface-exact"
         )
     return name
 
@@ -48,6 +49,8 @@ def plugin_names(profile):
         return TRANSOLVER_V2_PLUGIN_NAMES
     if profile == "geotransolver-exact":
         return GEOTRANSOLVER_PLUGIN_NAMES
+    if profile == "geotransolver-exact-v2":
+        return GEOTRANSOLVER_V2_PLUGIN_NAMES
     if profile == "domino-surface-exact":
         return DOMINO_PLUGIN_NAMES
     return EXACT_PLUGIN_NAMES
@@ -55,6 +58,8 @@ def plugin_names(profile):
 
 def profile_version(profile):
     validate_tensorrt_profile(profile)
+    if profile == "geotransolver-exact-v2":
+        return 3
     return 2 if profile in ("layout-order-exact-v2", "geotransolver-exact") else 1
 
 
@@ -70,7 +75,7 @@ def selection_metadata(profile):
 
 def requires_byte_identical(profile):
     validate_tensorrt_profile(profile)
-    return profile in ("layout-order-exact-v2", "geotransolver-exact", "domino-surface-exact")
+    return profile in ("layout-order-exact-v2", "geotransolver-exact", "geotransolver-exact-v2", "domino-surface-exact")
 
 
 def resolve_plugin_libraries(profile, libraries=None):
@@ -80,7 +85,7 @@ def resolve_plugin_libraries(profile, libraries=None):
             raise ValueError("baseline TensorRT profile does not accept plugin libraries")
         return {}
     if not isinstance(libraries, Mapping) or set(libraries) != set(names):
-        count = {4: "four", 8: "eight", 9: "nine"}[len(names)]
+        count = {4: "four", 8: "eight", 9: "nine", 10: "ten"}[len(names)]
         raise ValueError(
             f"{profile} requires all {count} plugin libraries: " + ", ".join(names)
         )
@@ -134,8 +139,11 @@ def prepare_exact_graph(onnx, model, profile="layout-order-exact"):
             ("exact_deslice_bmm", graphs._replace_deslice_bmms),
             *transforms[4:],
         )
-    elif profile == "geotransolver-exact":
+    elif profile in ("geotransolver-exact", "geotransolver-exact-v2"):
         transforms += (("exact_weighted_blend", graphs._replace_weighted_blends),)
+        if profile == "geotransolver-exact-v2":
+            # Prove both attention layouts only after recognizing their blend.
+            transforms += (("exact_deslice_bmm", graphs._replace_deslice_bmms),)
     elif profile == "domino-surface-exact":
         transforms = (
             ("exact_linear", partial(

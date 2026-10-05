@@ -437,6 +437,9 @@ if(PNMIR_BUILD_TESTS)
       ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_device_runner_cuda_skip.py -v
   )
 
+  add_executable(pnmir_device_runner_count_test tests/device_runner_count_test.cpp)
+  add_test(NAME pnmir_device_runner_count COMMAND pnmir_device_runner_count_test)
+
   add_test(
     NAME pnmir_domino_plugin_paths
     COMMAND ${Python3_EXECUTABLE} -S
@@ -557,6 +560,54 @@ if(PNMIR_BUILD_TESTS)
   endif()
 
   if(PNMIR_ENABLE_AOTI)
+    if(TARGET torch_cuda)
+      add_executable(
+        pnmir_aoti_device_index_test tests/aoti_device_index_test.cpp
+      )
+      target_link_libraries(
+        pnmir_aoti_device_index_test PRIVATE PhysicsNeMoInference::aoti torch
+      )
+      add_test(
+        NAME pnmir_aoti_device_index
+        COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_SOURCE_DIR}/tests/aoti_device_index.py
+          --runner $<TARGET_FILE:pnmir_aoti_device_index_test>
+          --output ${CMAKE_CURRENT_BINARY_DIR}/aoti-device-index.pnmir
+      )
+      set_tests_properties(
+        pnmir_aoti_device_index PROPERTIES SKIP_RETURN_CODE 77
+      )
+    endif()
+
+    add_executable(
+      pnmir_aoti_owned_outputs_test tests/aoti_owned_outputs_test.cpp
+    )
+    target_link_libraries(
+      pnmir_aoti_owned_outputs_test PRIVATE PhysicsNeMoInference::aoti torch
+    )
+    foreach(target_device IN ITEMS cpu cuda)
+      add_test(
+        NAME pnmir_aoti_owned_outputs_${target_device}
+        COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_SOURCE_DIR}/tests/aoti_owned_outputs.py
+          --runner $<TARGET_FILE:pnmir_aoti_owned_outputs_test>
+          --output ${CMAKE_CURRENT_BINARY_DIR}/aoti-owned-outputs-${target_device}.pnmir
+          --target ${target_device}
+      )
+      add_test(
+        NAME pnmir_aoti_dynamic_outputs_${target_device}
+        COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_SOURCE_DIR}/tests/aoti_dynamic_outputs.py
+          --pnmir $<TARGET_FILE:pnmir_cli>
+          --output ${CMAKE_CURRENT_BINARY_DIR}/aoti-dynamic-outputs-${target_device}.pnmir
+          --target ${target_device}
+      )
+    endforeach()
+    set_tests_properties(
+      pnmir_aoti_owned_outputs_cuda pnmir_aoti_dynamic_outputs_cuda
+      PROPERTIES SKIP_RETURN_CODE 77
+    )
+
     add_test(
       NAME pnmir_aoti_integration
       COMMAND

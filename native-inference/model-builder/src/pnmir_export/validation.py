@@ -57,11 +57,18 @@ def validate_pnmir_package(
             path = root / f"input-{index}.bin"
             path.write_bytes(value.detach().cpu().contiguous().numpy().tobytes())
             command.extend(("--input-file", f"{spec['name']}={path}"))
+            if -1 in spec["shape"]:
+                shape = ",".join(str(dimension) for dimension in value.shape)
+                command.extend(("--input-shape", f"{spec['name']}={shape}"))
         output_paths = []
         for index, spec in enumerate(output_specs):
             path = root / f"output-{index}.bin"
             output_paths.append(path)
             command.extend(("--output-file", f"{spec['name']}={path}"))
+        dynamic_outputs = any(-1 in spec["shape"] for spec in output_specs)
+        metadata_path = root / "output-metadata.json"
+        if dynamic_outputs:
+            command.extend(("--output-metadata", str(metadata_path)))
 
         result = subprocess.run(command, capture_output=True, text=True)
         if result.returncode != 0:
@@ -71,6 +78,12 @@ def validate_pnmir_package(
                 f"\nstderr:\n{result.stderr}"
             )
 
+        output_shapes = {spec["name"]: spec["shape"] for spec in output_specs}
+        if dynamic_outputs:
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            output_shapes = {
+                spec["name"]: spec["shape"] for spec in metadata["outputs"]
+            }
         metrics = []
         for spec, path, expected in zip(
             output_specs, output_paths, outputs, strict=True
@@ -81,7 +94,7 @@ def validate_pnmir_package(
                 )
             storage = bytearray(path.read_bytes())
             actual = torch.frombuffer(storage, dtype=torch.float32).clone()
-            actual = actual.reshape(tuple(spec["shape"]))
+            actual = actual.reshape(tuple(output_shapes[spec["name"]]))
             metrics.append(
                 assert_tensor_parity(
                     actual,

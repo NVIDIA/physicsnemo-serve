@@ -98,6 +98,126 @@ class OnnxPackageLayoutTests(unittest.TestCase):
                 )
                 self.np.testing.assert_array_equal(actual[0], [5, 7, 9])
 
+    def subgraph_source(self, directory):
+        onnx = self.onnx
+        directory.mkdir()
+        value_info = onnx.helper.make_tensor_value_info
+        bias = onnx.numpy_helper.from_array(
+            self.np.array([1, 2, 3], dtype="float32"), "branch-bias.bin"
+        )
+        offset = onnx.numpy_helper.from_array(
+            self.np.array([10, 20, 30], dtype="float32"), "branch-offset.bin"
+        )
+        branch = onnx.helper.make_graph(
+            [
+                onnx.helper.make_node("Constant", [], ["offset"], value=offset),
+                onnx.helper.make_node("Add", ["input", bias.name], ["biased"]),
+                onnx.helper.make_node("Add", ["biased", "offset"], ["result"]),
+            ],
+            "branch",
+            [],
+            [value_info("result", onnx.TensorProto.FLOAT, [3])],
+            [bias],
+        )
+        graph = onnx.helper.make_graph(
+            [
+                onnx.helper.make_node(
+                    "If",
+                    ["condition"],
+                    ["output"],
+                    then_branch=branch,
+                    else_branch=branch,
+                )
+            ],
+            "external-branch",
+            [value_info("input", onnx.TensorProto.FLOAT, [3])],
+            [value_info("output", onnx.TensorProto.FLOAT, [3])],
+            [onnx.helper.make_tensor("condition", onnx.TensorProto.BOOL, [], [True])],
+        )
+        source = directory / "source.onnx"
+        onnx.save_model(
+            onnx.helper.make_model(
+                graph, opset_imports=[onnx.helper.make_opsetid("", 18)], ir_version=8
+            ),
+            source,
+            save_as_external_data=True,
+            all_tensors_to_one_file=False,
+            size_threshold=0,
+            convert_attribute=True,
+        )
+        return source
+
+    def test_subgraph_initializers_and_tensor_attributes_survive_relocation(self):
+        from onnx.reference import ReferenceEvaluator
+
+        source = self.subgraph_source(self.root / "subgraph-source")
+        source_bytes = source.read_bytes()
+        weights = {
+            name: (source.parent / name).read_bytes()
+            for name in ("branch-bias.bin", "branch-offset.bin")
+        }
+        package = self.import_package(
+            source, self.root / "subgraph-package", model_name="branch", model_version="1"
+        )
+        moved = self.root / "subgraph-deployed"
+        package.rename(moved)
+        shutil.rmtree(source.parent)
+        self.assertEqual((moved / "model.onnx").read_bytes(), source_bytes)
+        self.assertTrue((moved / "branch-bias.bin").is_file())
+        self.assertTrue((moved / "branch-offset.bin").is_file())
+        for name, contents in weights.items():
+            self.assertEqual((moved / name).read_bytes(), contents)
+        loaded = self.onnx.load_model(moved / "model.onnx")
+        actual = ReferenceEvaluator(loaded).run(
+            None, {"input": self.np.array([4, 5, 6], dtype="float32")}
+        )
+        self.np.testing.assert_array_equal(actual[0], [15, 27, 39])
+
+    def test_external_data_in_sparse_tensors_and_attribute_lists(self):
+        from pnmir_export.onnx_importer import _external_data_locations
+
+        onnx = self.onnx
+        locations = []
+
+        def external_tensor(name, dtype="float32"):
+            values = self.np.array([1], dtype=dtype)
+            tensor = onnx.numpy_helper.from_array(values, name)
+            onnx.external_data_helper.set_external_data(tensor, name)
+            tensor.ClearField("raw_data")
+            (self.root / name).write_bytes(values.tobytes())
+            locations.append(name)
+            return tensor
+
+        def sparse_tensor(name):
+            return onnx.helper.make_sparse_tensor(
+                external_tensor(f"{name}-values.bin"),
+                external_tensor(f"{name}-indices.bin", "int64"),
+                [3],
+            )
+
+        nested_graph = onnx.helper.make_graph(
+            [], "nested", [], [], [external_tensor("graph-list.bin")]
+        )
+        node = onnx.helper.make_node(
+            "Custom",
+            [],
+            [],
+            branches=[nested_graph],
+            tensors=[external_tensor("tensor-list.bin")],
+            sparse=sparse_tensor("attribute"),
+            sparse_list=[sparse_tensor("attribute-list")],
+        )
+        graph = onnx.helper.make_graph(
+            [node], "graph", [], [], sparse_initializer=[sparse_tensor("initializer")]
+        )
+        actual = _external_data_locations(
+            onnx.helper.make_model(graph), self.root / "source.onnx"
+        )
+        self.assertEqual(
+            actual,
+            [(self.root.resolve() / name, Path(name)) for name in sorted(locations)],
+        )
+
     def test_reserved_external_paths_cannot_replace_existing_package(self):
         package = self.root / "existing"
         package.mkdir()

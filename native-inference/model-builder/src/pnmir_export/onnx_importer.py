@@ -85,11 +85,24 @@ def _graph_contract(model: Any) -> tuple[list[dict[str, Any]], list[dict[str, An
 def _external_data_locations(model: Any, source: Path) -> list[tuple[Path, Path]]:
     onnx = _onnx_module()
     locations: set[str] = set()
-    for tensor in (*model.graph.initializer, *model.graph.sparse_initializer):
-        values = tensor.values if hasattr(tensor, "values") else tensor
-        if values.data_location != onnx.TensorProto.EXTERNAL:
+    messages = [model]
+    while messages:
+        tensor = messages.pop()
+        if not isinstance(tensor, onnx.TensorProto):
+            # Public protobuf traversal includes nested graphs, attributes, and
+            # both the values and indices of sparse tensors.
+            for field, value in tensor.ListFields():
+                if field.message_type is not None:
+                    is_repeated = (
+                        field.is_repeated
+                        if hasattr(field, "is_repeated")
+                        else field.label == field.LABEL_REPEATED
+                    )
+                    messages.extend(value if is_repeated else (value,))
             continue
-        metadata = {entry.key: entry.value for entry in values.external_data}
+        if tensor.data_location != onnx.TensorProto.EXTERNAL:
+            continue
+        metadata = {entry.key: entry.value for entry in tensor.external_data}
         location = metadata.get("location", "")
         relative = Path(location)
         if not location or relative.is_absolute() or ".." in relative.parts:

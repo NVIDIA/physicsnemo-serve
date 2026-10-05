@@ -185,6 +185,136 @@ def _check_model_with_tensorrt_plugins(model: onnx.ModelProto) -> None:
     onnx.checker.check_model(checkable, full_check=True)
 
 
+def _append_subgraph_capture(
+    model: onnx.ModelProto,
+    name: str,
+    shape: tuple[int, ...],
+    *,
+    nested_loop: bool,
+) -> None:
+    branch = helper.make_graph(
+        [helper.make_node("Identity", (name,), ("branch_result",))],
+        "capture-branch",
+        [],
+        [helper.make_tensor_value_info("branch_result", TensorProto.FLOAT, shape)],
+    )
+    model.graph.input.append(
+        helper.make_tensor_value_info("condition", TensorProto.BOOL, ())
+    )
+    if nested_loop:
+        body = helper.make_graph(
+            [
+                helper.make_node("Identity", ("loop_condition",), ("next_condition",)),
+                helper.make_node(
+                    "If", ("loop_condition",), ("scan_value",),
+                    then_branch=branch, else_branch=branch,
+                ),
+            ],
+            "capture-loop-body",
+            [
+                helper.make_tensor_value_info("iteration", TensorProto.INT64, ()),
+                helper.make_tensor_value_info("loop_condition", TensorProto.BOOL, ()),
+            ],
+            [
+                helper.make_tensor_value_info("next_condition", TensorProto.BOOL, ()),
+                helper.make_tensor_value_info("scan_value", TensorProto.FLOAT, shape),
+            ],
+        )
+        model.graph.initializer.append(
+            numpy_helper.from_array(np.array(1, dtype=np.int64), name="trip_count")
+        )
+        model.graph.node.append(
+            helper.make_node("Loop", ("trip_count", "condition"), ("retained",), body=body)
+        )
+        retained_shape = (None, *shape)
+    else:
+        model.graph.node.append(
+            helper.make_node(
+                "If", ("condition",), ("retained",),
+                then_branch=branch, else_branch=branch,
+            )
+        )
+        retained_shape = shape
+    model.graph.output.append(
+        helper.make_tensor_value_info("retained", TensorProto.FLOAT, retained_shape)
+    )
+
+
+def _linear_capture_model(*, transpose: bool = False) -> onnx.ModelProto:
+    weight = np.arange(12, dtype=np.float32).reshape(3, 4)
+    nodes = []
+    if transpose:
+        weight = weight.T.copy()
+        nodes.append(helper.make_node("Transpose", ("weight",), ("weight_t",), perm=(1, 0)))
+    nodes.extend([
+        helper.make_node("MatMul", ("input", "weight_t" if transpose else "weight"), ("projected",)),
+        helper.make_node("Add", ("projected", "bias"), ("output",)),
+    ])
+    return helper.make_model(helper.make_graph(
+        nodes,
+        "linear-with-subgraph-capture",
+        [helper.make_tensor_value_info("input", TensorProto.FLOAT, (2, 3))],
+        [helper.make_tensor_value_info("output", TensorProto.FLOAT, (2, 4))],
+        [
+            numpy_helper.from_array(weight, name="weight"),
+            numpy_helper.from_array(np.arange(4, dtype=np.float32), name="bias"),
+        ],
+        value_info=[helper.make_tensor_value_info("projected", TensorProto.FLOAT, (2, 4))],
+    ))
+
+
+@pytest.mark.parametrize("nested_loop", (False, True))
+def test_linear_keeps_intermediate_captured_by_subgraph(nested_loop: bool) -> None:
+    model = _linear_capture_model()
+    _append_subgraph_capture(model, "projected", (2, 4), nested_loop=nested_loop)
+    onnx.checker.check_model(model, full_check=True)
+
+    assert _replace_linear_subgraphs(onnx, _with_rematerialized_nodes(model)) == 0
+
+    onnx.checker.check_model(model, full_check=True)
+    assert model.graph.node[0].op_type == "MatMul"
+
+
+@pytest.mark.parametrize("nested_loop", (False, True))
+@pytest.mark.parametrize("rewrite", (_replace_linear_subgraphs, _replace_constant_rhs_matmuls))
+def test_exact_projection_preserves_weight_captured_by_subgraph(rewrite, nested_loop: bool) -> None:
+    model = _linear_capture_model()
+    weight = numpy_helper.to_array(model.graph.initializer[0]).copy()
+    _append_subgraph_capture(model, "weight", (3, 4), nested_loop=nested_loop)
+    onnx.checker.check_model(model, full_check=True)
+
+    assert rewrite(onnx, model) == 1
+
+    np.testing.assert_array_equal(numpy_helper.to_array(model.graph.initializer[0]), weight)
+    assert model.graph.node[0].input[1] != "weight"
+    _check_model_with_tensorrt_plugins(model)
+
+
+@pytest.mark.parametrize("nested_loop", (False, True))
+def test_linear_preserves_transpose_captured_by_subgraph(nested_loop: bool) -> None:
+    model = _linear_capture_model(transpose=True)
+    _append_subgraph_capture(model, "weight_t", (3, 4), nested_loop=nested_loop)
+    onnx.checker.check_model(model, full_check=True)
+
+    assert _replace_linear_subgraphs(onnx, _with_rematerialized_nodes(model)) == 1
+
+    assert model.graph.node[0].op_type == "Transpose"
+    _check_model_with_tensorrt_plugins(model)
+
+
+@pytest.mark.parametrize("nested_loop", (False, True))
+@pytest.mark.parametrize("intermediate", ("divided", "erf", "plus_one", "scaled"))
+def test_gelu_keeps_intermediate_captured_by_subgraph(intermediate: str, nested_loop: bool) -> None:
+    model = _gelu_model()
+    _append_subgraph_capture(model, intermediate, (2, 512), nested_loop=nested_loop)
+    onnx.checker.check_model(model, full_check=True)
+
+    assert _replace_gelu_subgraphs(onnx, _with_rematerialized_nodes(model)) == 0
+
+    onnx.checker.check_model(model, full_check=True)
+    assert model.graph.node[0].op_type == "Div"
+
+
 def test_replaces_static_fp32_matmul_with_transposed_plugin_weight() -> None:
     weight = np.arange(12, dtype=np.float32).reshape(3, 4)
     graph = helper.make_graph(

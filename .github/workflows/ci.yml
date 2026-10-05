@@ -318,7 +318,7 @@ jobs:
             Tee-Object "$env:RUNNER_TEMP/inference-windows-aoti-evidence/build.log"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           ctest --test-dir "$env:RUNNER_TEMP/inference-windows-aoti-build" -C Release `
-            -R '^pnmir_(aoti_integration|install_aoti_(static|shared)_consumer)$' `
+            -R '^pnmir_(aoti_integration|aoti_(owned|dynamic)_outputs_cpu|install_aoti_(static|shared)_consumer)$' `
             --output-on-failure --no-tests=error 2>&1 |
             Tee-Object "$env:RUNNER_TEMP/inference-windows-aoti-evidence/aoti-tests.log"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

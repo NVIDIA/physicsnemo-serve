@@ -14,7 +14,9 @@
 #include <torch/csrc/inductor/aoti_package/model_package_loader.h>
 #include <torch/torch.h>
 
+#include <cstdint>
 #include <cstring>
+#include <limits>
 #include <stdexcept>
 #include <utility>
 #include <vector>
@@ -63,6 +65,15 @@ std::vector<std::int64_t> torch_shape(const TensorView& tensor) {
   return tensor.shape;
 }
 
+c10::DeviceIndex loader_device_index(Device target) {
+  if (target.type != DeviceType::kCuda) return -1;
+  if (target.index < 0 ||
+      target.index > std::numeric_limits<c10::DeviceIndex>::max()) {
+    throw std::invalid_argument("AOTInductor CUDA device index is out of range");
+  }
+  return static_cast<c10::DeviceIndex>(target.index);
+}
+
 std::string prepare_artifact(const std::filesystem::path& artifact_path,
                              Device target) {
   if (target.type == DeviceType::kCuda) {
@@ -79,7 +90,8 @@ class AOTISession final : public BackendSession {
  public:
   AOTISession(std::filesystem::path artifact_path,
               std::vector<TensorSpec> output_specs, Device target)
-      : loader_(prepare_artifact(artifact_path, target)),
+      : loader_(prepare_artifact(artifact_path, target), "model", false, 1,
+                loader_device_index(target)),
         outputs_(std::move(output_specs)),
         target_(target) {}
 
@@ -129,6 +141,28 @@ class AOTISession final : public BackendSession {
           tensor.is_cuda()
               ? Device{DeviceType::kCuda, tensor.get_device()}
               : Device{};
+      // detach()/contiguous() can retain from_blob's non-owning input storage.
+      // Copy those aliases, including offset views, before the caller may reuse
+      // its allocation. Other outputs already retain their Torch-owned storage.
+      const auto output_begin =
+          reinterpret_cast<std::uintptr_t>(tensor.const_data_ptr());
+      for (const auto& input : inputs) {
+        if (bytes == 0 || input.byte_size == 0 ||
+            input.device.type != device.type ||
+            (device.type == DeviceType::kCuda &&
+             input.device.index != device.index)) {
+          continue;
+        }
+        const auto input_begin =
+            reinterpret_cast<std::uintptr_t>(input.data);
+        const bool overlaps = output_begin >= input_begin
+                                  ? output_begin - input_begin < input.byte_size
+                                  : input_begin - output_begin < bytes;
+        if (overlaps) {
+          tensor = tensor.clone();
+          break;
+        }
+      }
       auto owner = std::make_shared<at::Tensor>(std::move(tensor));
       const void* data = owner->const_data_ptr();
       std::shared_ptr<void> storage_owner = owner;
@@ -147,6 +181,13 @@ class AOTISession final : public BackendSession {
  private:
   std::vector<at::Tensor> execute(
       const std::vector<TensorView>& inputs) {
+#ifdef PNMIR_TORCH_HAS_CUDA
+    // AOTI selects its launch stream from the current CUDA device.
+    c10::cuda::OptionalCUDAGuard guard;
+    if (target_.type == DeviceType::kCuda) {
+      guard.set_index(static_cast<c10::DeviceIndex>(target_.index));
+    }
+#endif
     c10::InferenceMode inference_mode;
     std::vector<at::Tensor> torch_inputs;
     torch_inputs.reserve(inputs.size());
@@ -210,6 +251,14 @@ class AOTIBackend final : public Backend {
   std::unique_ptr<BackendSession> create_session(
       const ModelPackage& package, const ArtifactSpec& artifact,
       const SessionOptions& options) const override {
+#ifdef PNMIR_TORCH_HAS_CUDA
+    // AOTI's generated constructor changes the current CUDA device while
+    // loading constants; restore the caller's device even if loading fails.
+    c10::cuda::OptionalCUDAGuard guard;
+    if (options.device.type == DeviceType::kCuda) {
+      guard.set_index(loader_device_index(options.device));
+    }
+#endif
     return std::make_unique<AOTISession>(package.artifact_path(artifact),
                                          package.manifest().outputs,
                                          options.device);

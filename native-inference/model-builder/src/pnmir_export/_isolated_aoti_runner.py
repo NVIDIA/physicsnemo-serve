@@ -20,6 +20,7 @@ def main() -> int:
         # Match the exporter and C++ runtime, including fresh NGC processes
         # whose environment enables TF32 by default.
         torch.set_float32_matmul_precision("highest")
+        torch.backends.cudnn.allow_tf32 = False
     if device.type == "cuda" and device.index is not None:
         torch.cuda.set_device(device)
     inputs = tuple(

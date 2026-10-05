@@ -185,11 +185,33 @@ def _validate_node_keys(model: Any) -> None:
             owners[output] = key
 
 
+def _graph_captures(graph: Any) -> set[str]:
+    """Find references that resolve outside this graph's lexical scope."""
+    local_names = {value.name for value in (*graph.input, *graph.initializer)}
+    local_names.update(value.values.name for value in graph.sparse_initializer)
+    local_names.update(name for node in graph.node for name in node.output)
+    references = {
+        name for node in graph.node for name in _node_inputs_with_captures(node)
+    }
+    references.update(output.name for output in graph.output)
+    return references - local_names - {""}
+
+
+def _node_inputs_with_captures(node: Any) -> list[str]:
+    inputs = list(node.input)
+    for attribute in node.attribute:
+        if attribute.HasField("g"):
+            inputs.extend(_graph_captures(attribute.g))
+        for graph in attribute.graphs:
+            inputs.extend(_graph_captures(graph))
+    return inputs
+
+
 def _tensor_consumers(model: Any) -> dict[str, _TensorConsumers]:
     _validate_node_keys(model)
     consumers: dict[str, _TensorConsumers] = {}
     for node in model.graph.node:
-        for name in node.input:
+        for name in _node_inputs_with_captures(node):
             consumers.setdefault(name, _TensorConsumers()).add(_node_key(node))
     for output in model.graph.output:
         consumers.setdefault(output.name, _TensorConsumers()).add(None)
@@ -374,7 +396,7 @@ def _replace_linear_subgraphs(
         name
         for node in model.graph.node
         if _node_key(node) not in removed_keys
-        for name in node.input
+        for name in _node_inputs_with_captures(node)
     }
     retained_inputs.update(output.name for output in model.graph.output)
     rewritten = []
@@ -1044,12 +1066,9 @@ def _replace_gelu_subgraphs(
         initializer.name: initializer for initializer in model.graph.initializer
     }
     ranks = _tensor_ranks(model)
-    consumers: dict[str, int] = {}
-    for node in model.graph.node:
-        for name in node.input:
-            consumers[name] = consumers.get(name, 0) + 1
-    for output in model.graph.output:
-        consumers[output.name] = consumers.get(output.name, 0) + 1
+    consumers = {
+        name: uses.occurrences for name, uses in _tensor_consumers(model).items()
+    }
     producer = {output: node for node in model.graph.node for output in node.output}
 
     def initializer_is(name: str, expected: np.float32) -> bool:

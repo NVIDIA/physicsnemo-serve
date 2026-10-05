@@ -168,6 +168,14 @@ class TensorRTRecipeProfileTests(unittest.TestCase):
                         worker._build_backend(*args)
 
     def exact_project(self):
+        # Asset and lock checks use the mocked Linux container on every host.
+        for patcher in (
+            mock.patch.object(sys, "platform", "linux"),
+            mock.patch("os.getuid", return_value=1000, create=True),
+            mock.patch("os.getgid", return_value=1000, create=True),
+        ):
+            patcher.start()
+            self.addCleanup(patcher.stop)
         fixture = self.fixture(test_authoring_container.AuthoringContainerTests)
         fixture.document["tensorrt_profile"] = EXACT
         for name in PLUGINS:

@@ -16,6 +16,7 @@
 #include <utility>
 #include <vector>
 
+#include "device_runner_count.hpp"
 #include "physicsnemo/inference/manifest.hpp"
 #include "physicsnemo/inference/prepared_state.hpp"
 #include "physicsnemo/inference/runtime.hpp"
@@ -37,17 +38,6 @@ void check_cuda(cudaError_t status, const std::string& operation) {
     throw std::runtime_error(operation + " failed: " +
                              cudaGetErrorString(status));
   }
-}
-
-std::size_t parse_count(const char* value, const std::string& name,
-                        bool allow_zero) {
-  const std::string text(value);
-  std::size_t parsed = 0;
-  const unsigned long long result = std::stoull(text, &parsed);
-  if (parsed != text.size() || (!allow_zero && result == 0)) {
-    throw std::invalid_argument(name + " must be a valid count");
-  }
-  return static_cast<std::size_t>(result);
 }
 
 std::filesystem::path tensor_file_path(const std::filesystem::path& directory,
@@ -186,9 +176,10 @@ int main(int argc, char** argv) {
     const std::string backend(argv[2]);
     const std::filesystem::path input_dir(argv[3]);
     const std::filesystem::path output_dir(argv[4]);
-    const std::size_t warmup = parse_count(argv[5], "warmup", true);
+    const std::size_t warmup =
+        device_runner::parse_count(argv[5], "warmup", true);
     const std::size_t iterations =
-        parse_count(argv[6], "iterations", false);
+        device_runner::parse_count(argv[6], "iterations", false);
     std::unordered_map<std::string, physicsnemo::inference::Shape> shape_overrides;
     for (int i = 7; i < argc; i += 2) {
       if (std::string(argv[i]) != "--shape" || i + 1 >= argc) {

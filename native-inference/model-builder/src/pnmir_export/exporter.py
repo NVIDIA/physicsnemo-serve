@@ -317,9 +317,11 @@ def export_package(
     target, work = _prepare_output_directory(Path(output_dir), force)
     previous_matmul_precision = torch.get_float32_matmul_precision()
     if device.type == "cuda":
-        # The package advertises FP32, so compile and validate with IEEE FP32
-        # matmuls instead of PyTorch's CUDA "high" (TF32-enabled) default.
+        # Match the frozen references and native runtime for both matmuls and
+        # cuDNN convolutions; cuDNN has an independent TF32 policy.
+        previous_cudnn_tf32 = torch.backends.cudnn.allow_tf32
         torch.set_float32_matmul_precision("highest")
+        torch.backends.cudnn.allow_tf32 = False
     try:
         artifact_path = work / "model.pt2"
 
@@ -350,6 +352,22 @@ def export_package(
             custom_operator_namespaces = _validate_exported_program(
                 exported, required_operators
             )
+            output_dynamic_dimensions = (None,) * len(eager_outputs)
+            if dynamic_shapes is not None:
+                # User outputs exclude mutation bookkeeping and retain the
+                # model's output order, including repeated tensor outputs.
+                graph_nodes = {node.name: node for node in exported.graph.nodes}
+                output_dynamic_dimensions = tuple(
+                    {
+                        dimension
+                        for dimension, size in enumerate(
+                            graph_nodes[name].meta["val"].shape
+                        )
+                        if isinstance(size, torch.SymInt) and size.node.is_symbolic()
+                    }
+                    for name in exported.graph_signature.user_outputs
+                )
+                del graph_nodes
             if exported_program_path is not None:
                 graph_path = Path(exported_program_path)
                 graph_path.parent.mkdir(parents=True, exist_ok=True)
@@ -451,8 +469,10 @@ def export_package(
                 )
             ],
             "outputs": [
-                _tensor_schema(name, tensor)
-                for name, tensor in zip(output_names, eager_outputs, strict=True)
+                _tensor_schema(name, tensor, dynamic_dimensions)
+                for name, tensor, dynamic_dimensions in zip(
+                    output_names, eager_outputs, output_dynamic_dimensions, strict=True
+                )
             ],
             "artifacts": [
                 {
@@ -486,4 +506,5 @@ def export_package(
         raise
     finally:
         if device.type == "cuda":
+            torch.backends.cudnn.allow_tf32 = previous_cudnn_tf32
             torch.set_float32_matmul_precision(previous_matmul_precision)

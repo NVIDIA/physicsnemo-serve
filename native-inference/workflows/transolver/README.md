@@ -216,6 +216,21 @@ without loading a model. The model-project tests live in
 Raw-workflow qualification compares prepared features and both output spaces
 against the preserved implementation on real surface and volume inputs.
 
+After building the surface package above, run the native CLI-to-viewer path
+regression in the same CUDA environment with Python VTK and NumPy installed:
+
+```bash
+python native-inference/workflows/transolver/tests/test_cli_output_paths.py \
+  --executable "$DEMO_ROOT/workflow-build/physicsnemo-transolver" \
+  --package "$DEMO_ROOT/model-build/model/backends/aoti" \
+  --mesh "$CASE_ROOT/boundary_1.vtp" --stl "$CASE_ROOT/drivaer_1.stl" \
+  --stats "$STATS"
+```
+
+This checks relative output paths with default and custom metadata locations,
+viewer consumption of both output files, and omitted optional outputs. Use
+`--point-count` for a package built with a different static point count.
+
 On 2026-09-17, the current SDK/example passed on H100 80GB, driver 570.195.03,
 CUDA 13.1, Torch `2.10.0a0+a36e1d39eb.nv26.01.42222806`, VTK 9.1.0 and
 Warp 1.15.0:

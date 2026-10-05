@@ -604,9 +604,13 @@ int main(int argc, char** argv) {
              {1, point_count, transolver_workflow::output_width(domain)}},
             {"output_dtype", "float32"},
             {"standardized_output",
-             standardized_output.empty() ? "" : standardized_output.string()},
+             standardized_output.empty()
+                 ? ""
+                 : std::filesystem::absolute(standardized_output).string()},
             {"physical_output",
-             physical_output.empty() ? "" : physical_output.string()},
+             physical_output.empty()
+                 ? ""
+                 : std::filesystem::absolute(physical_output).string()},
             {"vtk_version", vtkVersion::GetVTKVersion()},
             {"warp_version", PNMIR_WARP_VERSION},
             {"preparation_ms", preparation_ms},

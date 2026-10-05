@@ -18,6 +18,7 @@ class IsolatedPrecisionTests(unittest.TestCase):
         observed = {}
         framework = ModuleType("torch")
         framework.precision = "high"  # NGC's TF32-enabled fresh-process default.
+        framework.backends = SimpleNamespace(cudnn=SimpleNamespace(allow_tf32=True))
 
         class Tensor:
             def to(self, device):
@@ -34,9 +35,11 @@ class IsolatedPrecisionTests(unittest.TestCase):
 
         def load_package(path):
             observed["load_precision"] = framework.precision
+            observed["load_cudnn_tf32"] = framework.backends.cudnn.allow_tf32
 
             def infer(*inputs):
                 observed["inference_precision"] = framework.precision
+                observed["inference_cudnn_tf32"] = framework.backends.cudnn.allow_tf32
                 return Tensor()
 
             return infer
@@ -91,11 +94,15 @@ class IsolatedPrecisionTests(unittest.TestCase):
                 observed = self.run_child(target)
                 self.assertEqual(observed["load_precision"], "highest")
                 self.assertEqual(observed["inference_precision"], "highest")
+                self.assertFalse(observed["load_cudnn_tf32"])
+                self.assertFalse(observed["inference_cudnn_tf32"])
 
     def test_cpu_child_preserves_existing_precision_policy(self):
         observed = self.run_child("cpu")
         self.assertEqual(observed["load_precision"], "high")
         self.assertEqual(observed["inference_precision"], "high")
+        self.assertTrue(observed["load_cudnn_tf32"])
+        self.assertTrue(observed["inference_cudnn_tf32"])
 
 
 if __name__ == "__main__":

@@ -109,6 +109,9 @@ little-endian FP32 values: pressure, WSS-x, WSS-y, WSS-z. Each file is 1,200
 bytes. Outputs are restored to source-cell order. The JSON sidecar records
 shape, package paths, block plan, seed, library versions and timings. Add
 `--dump-input-dir "$DEMO_ROOT/results/inputs"` to diagnose prepared inputs.
+The standardized, physical, and metadata output paths must identify distinct
+files and must not contain dangling symlinks; the CLI checks these paths before
+preprocessing or writing outputs.
 
 Use matching normalization statistics and flow conditions for your checkpoint.
 Model/native numerical parity does not establish scientific CFD accuracy.
@@ -210,8 +213,8 @@ some polygon centers and normals on this case.
 ## Validation
 
 The C++ tests cover normalization channel order, physical decoding, model
-contracts, and bounded UInt32/UInt64 VTU decoding. The CLI test checks `--help`
-without loading a model. The model-project tests live in
+contracts, and bounded UInt32/UInt64 VTU decoding. The CLI tests check `--help`
+and output-path collisions without loading a model. The model-project tests live in
 [`tests/examples/transolver-surface`](../../tests/examples/transolver-surface).
 Raw-workflow qualification compares prepared features and both output spaces
 against the preserved implementation on real surface and volume inputs.

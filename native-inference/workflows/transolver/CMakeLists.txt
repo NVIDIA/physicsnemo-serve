@@ -72,4 +72,6 @@ if(BUILD_TESTING)
   find_package(Python3 REQUIRED COMPONENTS Interpreter)
   add_test(NAME transolver_cli_help COMMAND "${Python3_EXECUTABLE}"
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/cli_help.py" $<TARGET_FILE:physicsnemo-transolver>)
+  add_test(NAME transolver_cli_output_conflicts COMMAND "${Python3_EXECUTABLE}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/tests/cli_output_conflicts.py" $<TARGET_FILE:physicsnemo-transolver>)
 endif()

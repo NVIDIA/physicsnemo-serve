@@ -292,6 +292,50 @@ std::filesystem::path metadata_path(
   return base;
 }
 
+void validate_output_paths(
+    const std::filesystem::path& standardized_output,
+    const std::filesystem::path& physical_output,
+    const std::filesystem::path& metadata) {
+  std::vector<std::pair<std::string, std::filesystem::path>> outputs{
+      {"--standardized-output", standardized_output},
+      {"--physical-output", physical_output},
+      {"--metadata", metadata},
+  };
+  for (auto& [option, path] : outputs) {
+    if (!path.empty()) {
+      std::filesystem::path resolved;
+      for (const auto& component : std::filesystem::absolute(path)) {
+        resolved /= component;
+        if (std::filesystem::is_symlink(resolved) &&
+            !std::filesystem::exists(resolved)) {
+          throw std::invalid_argument(
+              "output path contains a dangling symlink: " + option);
+        }
+        resolved = std::filesystem::weakly_canonical(resolved);
+      }
+      path = std::move(resolved);
+    }
+  }
+  for (std::size_t first = 0; first < outputs.size(); ++first) {
+    if (outputs[first].second.empty()) {
+      continue;
+    }
+    for (std::size_t second = first + 1; second < outputs.size(); ++second) {
+      if (outputs[second].second.empty()) {
+        continue;
+      }
+      std::error_code error;
+      if (outputs[first].second == outputs[second].second ||
+          std::filesystem::equivalent(
+              outputs[first].second, outputs[second].second, error)) {
+        throw std::invalid_argument(
+            "output paths must be distinct: " + outputs[first].first +
+            " and " + outputs[second].first);
+      }
+    }
+  }
+}
+
 void write_metadata(const std::filesystem::path& path, const Json& payload) {
   const auto parent = path.parent_path();
   if (!parent.empty()) {
@@ -349,6 +393,9 @@ int main(int argc, char** argv) {
       throw std::invalid_argument(
           "at least one of --standardized-output or --physical-output is required");
     }
+    const auto metadata = metadata_path(
+        arguments, standardized_output, physical_output);
+    validate_output_paths(standardized_output, physical_output, metadata);
     const auto block_size = parse_integer(
         optional(arguments, "--block-size", "2048"), "--block-size", false);
     const auto point_limit = parse_integer(
@@ -561,8 +608,6 @@ int main(int argc, char** argv) {
         std::chrono::duration<double, std::milli>(
             inference_end - inference_start)
             .count();
-    const auto metadata = metadata_path(
-        arguments, standardized_output, physical_output);
     Json package_metadata = Json::array();
     for (const auto& path : package_paths) {
       package_metadata.push_back(std::filesystem::absolute(path).string());

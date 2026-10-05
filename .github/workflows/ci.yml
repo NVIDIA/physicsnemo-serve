@@ -162,6 +162,8 @@ jobs:
           set -euo pipefail
           "$RUNNER_TEMP/inference-graph-venv/bin/python" -m pytest \
             native-inference/model-builder/tests/test_tensorrt_exact_graphs.py \
+            native-inference/model-builder/tests/test_tensorrt_deslice_graphs.py \
+            native-inference/model-builder/tests/test_tensorrt_geotransolver_deslice_graphs.py \
             native-inference/model-builder/tests/test_tensorrt_domino_graphs.py \
             native-inference/model-builder/tests/test_tensorrt_weighted_blend.py \
             -v --junitxml="$RUNNER_TEMP/inference-cpu-evidence/exact-graph-tests.xml" \

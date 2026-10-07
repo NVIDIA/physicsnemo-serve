@@ -80,27 +80,26 @@ Use the same pattern for every plugin:
 2. `prefetch`
    - Rust stage
    - materializes `prefetch_plan`
-3. `fanout`
+3. `schedule`
    - Rust stage
-   - expands one parent run into many child runs from `fanout_items`
-4. `schedule`
-   - Rust stage
+   - expands a request carrying `fanout_items` into one child run per item
    - matches `resource_profile` to worker capabilities
-   - considers non-fanout requests for scheduler-owned batching
+   - batches compatible requests; fanout children only batch with siblings of the same parent
    - uses `batch_profile` as an optional override for grouping, size, wait, and memory scaling
-5. `execute`
+4. `execute`
    - Python worker
    - runs `execute(ctx)` for low-level hooks, or the typed SDK `run(inputs, ctx)` / `run_batch(items, ctx)` paths
    - older plugins may still provide `execute_batch(items, ctx)` directly
    - cacheable workflows may reuse one workflow instance per Python worker process
-6. `collect`
-   - Rust stage
-   - recombines child results for a parent run
-7. `postprocess`
+5. `collect`
+   - Rust role, not declared in manifests
+   - the scheduler routes fanout children here after `execute`
+   - recombines child results and continues the parent run
+6. `postprocess`
    - Rust stage
    - invokes Python `postprocess(ctx)` when present
    - applies built-in `result_ops`
-8. `results`
+7. `results`
    - Rust terminal persistence stage
 
 ## Model Warmup And Cache
@@ -139,9 +138,11 @@ The scheduler is responsible for:
 - matching `device_kind`
 - respecting `gpus_required`, memory, and tags
 - fairness and requeue behavior
-- `fanout_profile.max_in_flight` limits for child runs
-- scheduler-owned request batching for non-fanout requests, including single-GPU
-  capacity checks and per-GPU stream dispatch
+- expanding fanout parents into child runs
+- `fanout_profile.max_in_flight` limits: concurrent dispatches per parent, where
+  one dispatch may be a batch of sibling children
+- scheduler-owned request batching, including single-GPU capacity checks and
+  per-GPU stream dispatch
 
 FIFO is only a queue-ingestion default. The scheduler should avoid letting one parent run or one workload shape monopolize capacity.
 

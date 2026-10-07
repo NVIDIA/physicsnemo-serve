@@ -4,7 +4,6 @@
   "shared_dlq_stream": "dlq",
   "streams": [
     "prepare",
-    "fanout",
     "prefetch",
     "schedule",
     "release",
@@ -30,18 +29,6 @@
         "runner_path": "/app/scripts/plugin_hook_runner.py",
         "hook_timeout_secs": 600
       }
-    },
-    "fanout": {
-      "inputs": [
-        {
-          "stream": "fanout",
-          "max_dequeue_items": 4,
-          "poll_interval_ms": 100,
-          "block_ms": 1000,
-          "reclaim_idle_ms": 60000
-        }
-      ],
-      "outputs": []
     },
     "prefetch": {
       "inputs": [

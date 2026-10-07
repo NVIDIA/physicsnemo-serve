@@ -348,6 +348,28 @@ fn manifest_validation_rejects_unsupported_stage_handler() {
 }
 
 #[test]
+fn manifest_validation_rejects_fanout_and_collect_stages() {
+    for phase in ["fanout", "collect"] {
+        let yaml = minimal_manifest_yaml().replacen(
+            "phase: schedule\n      handler: schedule",
+            &format!("phase: {phase}\n      handler: {phase}"),
+            1,
+        );
+        let manifest = PluginManifest::from_yaml_str(&yaml).expect("manifest should parse");
+
+        let error = manifest
+            .validate()
+            .expect_err("scheduler-owned stages must not be declared in manifests");
+        assert!(
+            error.to_string().contains(&format!(
+                "unsupported phase/handler combination '{phase}/{phase}'"
+            )),
+            "{error:#}"
+        );
+    }
+}
+
+#[test]
 fn manifest_without_configuration_uses_null_and_omits_it_when_serialized() {
     let manifest = PluginManifest::from_yaml_str(minimal_manifest_yaml())
         .expect("manifest without configuration should parse");
@@ -1305,15 +1327,13 @@ fn build_pipeline_stages_supports_ensemble_parent_prefetch_with_postprocess() {
         vec![
             "prepare",
             "prefetch",
-            "fanout",
             "schedule",
             "execute",
-            "collect",
             "postprocess",
             "results",
         ]
     );
-    assert_eq!(stages[4]["queue"], "execute.python.test");
+    assert_eq!(stages[3]["queue"], "execute.python.test");
 }
 
 #[test]

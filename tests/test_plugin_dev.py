@@ -2674,12 +2674,12 @@ def test_inference_worker_handoffs_successful_execute_to_generic_next_stage_with
                     "id": "preprocess_execute",
                     "phase": "execute",
                     "queue": "execute.python.test",
-                    "next": "fanout",
+                    "next": "schedule",
                 },
                 {
-                    "id": "fanout",
-                    "phase": "fanout",
-                    "queue": "fanout",
+                    "id": "schedule",
+                    "phase": "schedule",
+                    "queue": "schedule",
                     "next": "results",
                 },
                 {
@@ -2710,8 +2710,8 @@ def test_inference_worker_handoffs_successful_execute_to_generic_next_stage_with
         },
     )
 
-    assert stream_name == "fanout"
-    assert stage == "fanout"
+    assert stream_name == "schedule"
+    assert stage == "schedule"
     assert forwarded["operation"] == "run"
     assert forwarded["parameters"] == {"value": 6}
     assert forwarded["batch_profile"] == {"enabled": True, "max_batch_size": 4}
@@ -2722,8 +2722,8 @@ def test_inference_worker_handoffs_successful_execute_to_generic_next_stage_with
         "status": "succeeded",
         "debug": "kept out of pipeline updates",
     }
-    assert forwarded["stage_context"]["current_stage_id"] == "fanout"
-    assert forwarded["stage_context"]["current_phase"] == "fanout"
+    assert forwarded["stage_context"]["current_stage_id"] == "schedule"
+    assert forwarded["stage_context"]["current_phase"] == "schedule"
 
 
 def test_inference_worker_handoffs_success_alias_to_publish_stage():
@@ -2901,12 +2901,12 @@ def test_inference_worker_process_job_does_not_persist_successful_intermediate_h
                             "id": "preprocess_execute",
                             "phase": "execute",
                             "queue": "execute.python.test",
-                            "next": "fanout",
+                            "next": "schedule",
                         },
                         {
-                            "id": "fanout",
-                            "phase": "fanout",
-                            "queue": "fanout",
+                            "id": "schedule",
+                            "phase": "schedule",
+                            "queue": "schedule",
                             "next": "results",
                         },
                         {
@@ -2926,6 +2926,120 @@ def test_inference_worker_process_job_does_not_persist_successful_intermediate_h
     assert result["status"] == "succeeded"
     assert redis_client.hset_calls == []
     assert redis_client.setex_calls == []
+
+
+def test_inference_worker_process_job_fails_fanout_items_without_schedule_next():
+    module = load_inference_worker_module()
+
+    class FakeExecutor:
+        redis_client = DummyRedis()
+
+        def execute(self, workflow_name, run_id, parameters, payload=None):
+            return {
+                "run_id": run_id,
+                "status": "succeeded",
+                "_pipeline_updates": {"fanout_items": [{"item_index": 0}]},
+            }
+
+    job = {
+        "run_id": "run-preprocess",
+        "payload": json.dumps(
+            {
+                "run_id": "run-preprocess",
+                "workflow_id": "demo-preprocess",
+                "parameters": {"value": 3},
+                "stage_context": {
+                    "current_stage_id": "preprocess_execute",
+                    "current_phase": "execute",
+                    "pipeline": [
+                        {
+                            "id": "preprocess_execute",
+                            "phase": "execute",
+                            "queue": "execute.python.test",
+                            "next": "results",
+                        },
+                        {
+                            "id": "results",
+                            "phase": "results",
+                            "queue": "results",
+                            "next": None,
+                        },
+                    ],
+                },
+            }
+        ),
+    }
+
+    result = module.process_job(FakeExecutor(), job)
+
+    assert result["status"] == "failed"
+    assert "fanout_items require a schedule stage next" in result["error"]
+
+
+def test_inference_worker_process_job_fails_batch_item_fanout_without_schedule_next():
+    module = load_inference_worker_module()
+    redis_client = DummyRedis()
+    redis_client.hset_calls = []
+    redis_client.hset = lambda *args, **kwargs: redis_client.hset_calls.append(args)
+
+    class FakeExecutor:
+        def __init__(self):
+            self.redis_client = redis_client
+
+        def execute(self, workflow_name, run_id, parameters, payload=None):
+            return {
+                "run_id": run_id,
+                "status": "succeeded",
+                "batch_results": [
+                    {
+                        "run_id": "run-a",
+                        "payload": {"run_id": "run-a", "workflow_id": "demo"},
+                        "result": {"status": "succeeded"},
+                    },
+                    {
+                        "run_id": "run-b",
+                        "payload": {"run_id": "run-b", "workflow_id": "demo"},
+                        "result": {
+                            "status": "succeeded",
+                            "_pipeline_updates": {"fanout_items": [{"item_index": 0}]},
+                        },
+                    },
+                ],
+            }
+
+    job = {
+        "run_id": "batch-1",
+        "payload": json.dumps(
+            {
+                "run_id": "batch-1",
+                "workflow_id": "demo",
+                "stage_context": {
+                    "current_stage_id": "execute",
+                    "current_phase": "execute",
+                    "pipeline": [
+                        {
+                            "id": "execute",
+                            "phase": "execute",
+                            "queue": "execute.python.test",
+                            "next": "results",
+                        },
+                        {
+                            "id": "results",
+                            "phase": "results",
+                            "queue": "results",
+                            "next": None,
+                        },
+                    ],
+                },
+            }
+        ),
+    }
+
+    result = module.process_job(FakeExecutor(), job)
+
+    assert result["status"] == "failed"
+    assert "fanout_items require a schedule stage next" in result["error"]
+    assert redis_client.hset_calls == []
 
 
 def test_inference_worker_process_job_does_not_persist_successful_postprocess_handoff():
@@ -3173,12 +3287,12 @@ def test_inference_worker_failed_execute_without_collect_next_stage_goes_to_resu
                     "id": "preprocess_execute",
                     "phase": "execute",
                     "queue": "execute.python.test",
-                    "next": "fanout",
+                    "next": "schedule",
                 },
                 {
-                    "id": "fanout",
-                    "phase": "fanout",
-                    "queue": "fanout",
+                    "id": "schedule",
+                    "phase": "schedule",
+                    "queue": "schedule",
                     "next": "results",
                 },
                 {
@@ -4744,7 +4858,7 @@ def test_plugin_dev_merge_prepare_output_preserves_next_stage_id():
             "parameters": {"value": 6},
             "fanout_profile": {"item_count": 1, "max_in_flight": 1},
             "fanout_items": [{"item_index": 0, "parameters": {"value": 6}}],
-            "next_stage_id": "fanout",
+            "next_stage_id": "schedule",
         },
     )
 
@@ -4753,7 +4867,7 @@ def test_plugin_dev_merge_prepare_output_preserves_next_stage_id():
         "parameters": {"value": 6},
         "fanout_profile": {"item_count": 1, "max_in_flight": 1},
         "fanout_items": [{"item_index": 0, "parameters": {"value": 6}}],
-        "next_stage_id": "fanout",
+        "next_stage_id": "schedule",
     }
 
 
@@ -6857,7 +6971,7 @@ def test_plugin_dev_run_local_dry_run_rewrites_cpu_compact_pipeline_without_sche
     ] == expected_phases
 
 
-def test_plugin_dev_run_local_dry_run_includes_fanout_and_collect_for_ensemble_pipeline(
+def test_plugin_dev_run_local_dry_run_includes_collect_with_scheduler(
     tmp_path: Path,
 ):
     plugin_root = create_class_based_json_plugin(tmp_path, plugin_id="demo-ensemble")
@@ -6871,13 +6985,6 @@ def test_plugin_dev_run_local_dry_run_includes_fanout_and_collect_for_ensemble_p
                 "phase": "prepare",
                 "handler": "plugin_phase",
                 "queue": "prepare",
-                "next": "fanout",
-            },
-            {
-                "id": "fanout",
-                "phase": "fanout",
-                "handler": "fanout",
-                "queue": "fanout",
                 "next": "schedule",
             },
             {
@@ -6892,13 +6999,6 @@ def test_plugin_dev_run_local_dry_run_includes_fanout_and_collect_for_ensemble_p
                 "phase": "execute",
                 "handler": "plugin_phase",
                 "queue": "execute.python.test",
-                "next": "collect",
-            },
-            {
-                "id": "collect",
-                "phase": "collect",
-                "handler": "collect",
-                "queue": "collect",
                 "next": "results",
             },
             {
@@ -6933,15 +7033,12 @@ def test_plugin_dev_run_local_dry_run_includes_fanout_and_collect_for_ensemble_p
     runtime_config = json.loads(
         Path(data["runtime_config_path"]).read_text(encoding="utf-8")
     )
-    assert "fanout" in runtime_config["roles"]
-    assert "collect" in runtime_config["roles"]
-    assert runtime_config["roles"]["fanout"]["inputs"][0]["stream"] == "fanout"
+    assert "fanout" not in runtime_config["roles"]
     assert runtime_config["roles"]["collect"]["inputs"][0]["stream"] == "collect"
-    assert "fanout" in runtime_config["streams"]
     assert "collect" in runtime_config["streams"]
 
     process_names = [process["name"] for process in data["processes"]]
-    assert "fanout" in process_names
+    assert "fanout" not in process_names
     assert "collect" in process_names
     assert "scheduler" in process_names
 

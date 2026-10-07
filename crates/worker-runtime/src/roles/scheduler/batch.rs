@@ -14,7 +14,7 @@ use uuid::Uuid;
 
 use super::{
     PendingSchedule, QueuedRequest, SchedulePayload, ScheduleResourceProfile, SchedulerQueueState,
-    SchedulerRole, decode_schedule_payload, fanout_gate, schedule_resource_profile_json,
+    SchedulerRole, decode_schedule_payload, schedule_resource_profile_json,
 };
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -110,33 +110,6 @@ fn default_scheduler_batch_key(payload: &SchedulePayload) -> String {
         .filter(|value| !value.is_empty())
         .unwrap_or("default")
         .to_string()
-}
-
-fn pipeline_contains_phase(payload: &SchedulePayload, phase: &str) -> bool {
-    payload
-        .raw_payload
-        .get("stage_context")
-        .and_then(|stage_context| stage_context.get("pipeline"))
-        .and_then(serde_json::Value::as_array)
-        .is_some_and(|pipeline| {
-            pipeline.iter().any(|stage| {
-                stage
-                    .get("phase")
-                    .and_then(serde_json::Value::as_str)
-                    .is_some_and(|candidate| candidate == phase)
-            })
-        })
-}
-
-fn scheduler_batch_excluded(payload: &SchedulePayload) -> bool {
-    fanout_gate(payload).is_some()
-        || payload
-            .parent_run_id
-            .as_deref()
-            .is_some_and(|value| !value.trim().is_empty())
-        || payload.fanout_profile.is_some()
-        || pipeline_contains_phase(payload, "fanout")
-        || pipeline_contains_phase(payload, "collect")
 }
 
 fn batch_memory_mb(candidates: &[BatchCandidate]) -> Result<u64> {
@@ -274,7 +247,7 @@ fn build_request_batch_payload(
         })
         .collect::<Vec<_>>();
 
-    let batch_payload_json = serde_json::json!({
+    let mut batch_payload_json = serde_json::json!({
         "run_id": batch_id,
         "batch_id": batch_id,
         "batch_info": {
@@ -302,6 +275,13 @@ fn build_request_batch_payload(
         "runtime": runtime,
         "stage_context": stage_context,
     });
+    // Batches only hold siblings (see `batch_key`), so the head's parent applies to
+    // every item and the whole batch shares one parent slot.
+    for field in ["parent_run_id", "fanout_profile"] {
+        if let Some(value) = head_payload.get(field) {
+            batch_payload_json[field] = value.clone();
+        }
+    }
     let encoded = serde_json::to_string(&batch_payload_json)
         .context("scheduler: failed to encode batch payload")?;
     decode_schedule_payload(&encoded, batch_id)
@@ -309,7 +289,7 @@ fn build_request_batch_payload(
 
 impl SchedulerRole {
     async fn batch_policy_for_payload(&self, payload: &SchedulePayload) -> Option<BatchPolicy> {
-        if !self.config.batching_enabled || scheduler_batch_excluded(payload) {
+        if !self.config.batching_enabled {
             return None;
         }
         if payload
@@ -379,7 +359,25 @@ impl SchedulerRole {
             .executor_class
             .as_deref()
             .unwrap_or("");
-        format!("{}::{}::{}", workflow, policy.batch_key, executor_class)
+        // A batch dispatches with the head's resource profile, so candidates must
+        // share routing tags.
+        let mut tags = policy
+            .base_resource_profile
+            .tags
+            .clone()
+            .unwrap_or_default();
+        tags.sort();
+        tags.dedup();
+        // Fanout children only batch with siblings of the same parent.
+        let parent_run_id = payload.parent_run_id.as_deref().unwrap_or("");
+        format!(
+            "{}::{}::{}::{}::{}",
+            workflow,
+            policy.batch_key,
+            executor_class,
+            tags.join(","),
+            parent_run_id
+        )
     }
 
     pub(super) async fn create_batch_request(

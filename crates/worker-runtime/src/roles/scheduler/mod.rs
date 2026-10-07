@@ -5,6 +5,7 @@
 
 mod batch;
 mod discovery;
+mod fanout;
 mod parent_slots;
 mod profile;
 mod reservation;
@@ -25,6 +26,7 @@ use tracing::{debug, info, warn};
 use crate::config::{SchedulerRoleConfig, parse_role_config};
 use crate::metrics::WorkerMetrics;
 use crate::retry_dlq::{LocalFailureTracker, RetryDlqPolicy};
+use crate::roles::collect::{CollectStore, DEFAULT_COLLECT_STORE_PREFIX, RedisCollectStore};
 use crate::roles::parent_run_state::{ParentRunStateStore, RedisParentRunStateStore};
 use crate::traits::{
     BackgroundTask, BoxFuture, MessageSink, RoleEnv, TaskCriticality, WorkerRole, message_deferred,
@@ -212,6 +214,8 @@ pub struct SchedulerRole {
     parent_slots: Arc<dyn ParentSlotStore>,
     /// Checks whether a parent run has already reached a terminal state.
     parent_state: Arc<dyn ParentRunStateStore>,
+    /// Collect groups registered when fan-out parents are expanded.
+    collect_store: Arc<dyn CollectStore>,
     /// In-memory FIFO queue plus dedupe index for pending schedule requests.
     scheduler_queue_state: Arc<Mutex<SchedulerQueueState>>,
     /// Local retry counter for queued requests handled by the background task.
@@ -311,6 +315,10 @@ impl SchedulerRole {
 
         let reservations =
             ResourceReservationTable::new(qm.clone(), config.memory_utilization_percent);
+        let collect_store = Arc::new(RedisCollectStore::new(
+            qm.clone(),
+            DEFAULT_COLLECT_STORE_PREFIX,
+        ));
 
         let interval = Duration::from_secs(config.gpu_discovery_interval_secs);
 
@@ -326,6 +334,7 @@ impl SchedulerRole {
             reservations,
             parent_slots,
             parent_state,
+            collect_store,
             scheduler_queue_state: Arc::new(Mutex::new(SchedulerQueueState::default())),
             request_failures: LocalFailureTracker::default(),
             metrics,
@@ -865,15 +874,29 @@ impl SchedulerRole {
                     }
                 };
 
-                match sink
-                    .handoff(
-                        &queued.msg,
-                        self.retry_dlq_policy.dlq_stream(),
-                        &dlq_payload,
-                        "dlq",
-                    )
-                    .await
-                {
+                // A failed fanout child is also reported to collect, atomically with
+                // the DLQ handoff, so its parent still finalizes.
+                let dlq_stream = self.retry_dlq_policy.dlq_stream();
+                let handoff =
+                    match fanout::failed_child_envelope(&queued.payload.raw_payload, &error_text) {
+                        Some(envelope) => {
+                            let run_id = queued.msg.run_id();
+                            let outputs = [
+                                Output::new(fanout::GATHER_QUEUE, envelope)
+                                    .with_run_id(run_id)
+                                    .with_stage("collect"),
+                                Output::new(dlq_stream, dlq_payload)
+                                    .with_run_id(run_id)
+                                    .with_stage("dlq"),
+                            ];
+                            sink.forward_many(&queued.msg, &outputs).await.map(drop)
+                        }
+                        None => sink
+                            .handoff(&queued.msg, dlq_stream, &dlq_payload, "dlq")
+                            .await
+                            .map(drop),
+                    };
+                match handoff {
                     Ok(_) => {
                         self.record_scheduler_queue_wait(outcome_label, queue_wait_seconds);
                         for failed_run_id in failed_run_ids(&queued) {
@@ -934,11 +957,27 @@ impl WorkerRole for SchedulerRole {
         &'a self,
         msg: &'a scicomp_rq::Message,
         stream: &'a str,
-        _sink: &'a dyn MessageSink,
+        sink: &'a dyn MessageSink,
     ) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
             if stream == self.schedule_stream.as_str() {
                 let schedule_payload = decode_schedule_payload(msg.payload(), msg.run_id())?;
+                if fanout::is_fanout_parent(&schedule_payload.raw_payload) {
+                    info!(
+                        msg_id = msg.id(),
+                        run_id = msg.run_id(),
+                        workflow = %schedule_payload.workflow,
+                        "expanding fanout parent into child schedule requests"
+                    );
+                    return fanout::expand_fanout_parent(
+                        msg,
+                        schedule_payload.raw_payload,
+                        self.schedule_stream.as_str(),
+                        self.collect_store.as_ref(),
+                        sink,
+                    )
+                    .await;
+                }
                 info!(
                     msg_id = msg.id(),
                     run_id = msg.run_id(),
@@ -2586,8 +2625,37 @@ mod tests {
         set_env_var("SCHEDULER_DISCOVERY_JSON", prev_discovery.as_deref());
     }
 
+    fn fanout_child_payload(parent_run_id: &str, index: usize, max_in_flight: usize) -> String {
+        let run_id = format!("{parent_run_id}:item:{index}");
+        let mut payload: JsonValue =
+            serde_json::from_str(&batchable_schedule_payload(&run_id, 1_000)).unwrap();
+        payload["parent_run_id"] = json!(parent_run_id);
+        payload["fanout_profile"] = json!({ "item_count": 3, "max_in_flight": max_in_flight });
+        payload["fanout_item"] = json!({ "item_index": index });
+        payload.to_string()
+    }
+
+    async fn queue_fanout_child(
+        role: &SchedulerRole,
+        sink: &RecordingSink,
+        msg_id: &str,
+        parent_run_id: &str,
+        index: usize,
+        max_in_flight: usize,
+    ) {
+        let run_id = format!("{parent_run_id}:item:{index}");
+        let payload = fanout_child_payload(parent_run_id, index, max_in_flight);
+        queue_schedule(
+            role,
+            &schedule_msg_with_id(msg_id, &run_id, &payload),
+            "schedule",
+            sink,
+        )
+        .await;
+    }
+
     #[tokio::test]
-    async fn scheduler_bypasses_batching_for_fanout_requests() {
+    async fn scheduler_batches_fanout_children_only_with_siblings() {
         let _guard = test_env::env_lock().lock().await;
         let prev_discovery = std::env::var("SCHEDULER_DISCOVERY_JSON").ok();
 
@@ -2614,13 +2682,70 @@ mod tests {
         let sink = RecordingSink::new();
         run_gpu_discovery(&tasks, &sink).await;
 
-        let mut payload: JsonValue =
-            serde_json::from_str(&batchable_schedule_payload("child-a", 1_000)).unwrap();
-        payload["parent_run_id"] = json!("parent-a");
-        payload["fanout_profile"] = json!({ "max_in_flight": 2 });
+        queue_fanout_child(&role, &sink, "1-0", "parent-a", 0, 2).await;
+        queue_fanout_child(&role, &sink, "1-1", "parent-b", 0, 2).await;
         queue_schedule(
             &role,
-            &schedule_msg_with_id("1-0", "child-a", &payload.to_string()),
+            &schedule_msg_with_id(
+                "1-2",
+                "run-plain",
+                &batchable_schedule_payload("run-plain", 1_000),
+            ),
+            "schedule",
+            &sink,
+        )
+        .await;
+        queue_fanout_child(&role, &sink, "1-3", "parent-a", 1, 2).await;
+        run_scheduler_task(&tasks, &sink).await;
+
+        let writes = sink.writes();
+        assert_eq!(writes.len(), 1);
+        let forwarded: JsonValue = serde_json::from_str(&writes[0].payload).unwrap();
+        assert_eq!(forwarded["items"][0]["run_id"], "parent-a:item:0");
+        assert_eq!(forwarded["items"][1]["run_id"], "parent-a:item:1");
+        assert_eq!(forwarded["parent_run_id"], "parent-a");
+        assert_eq!(forwarded["fanout_profile"]["max_in_flight"], 2);
+        assert_eq!(sink.acked_ids(), vec!["1-0".to_string(), "1-3".to_string()]);
+        assert_eq!(role.queued_request_count().await, 2);
+
+        set_env_var("SCHEDULER_DISCOVERY_JSON", prev_discovery.as_deref());
+    }
+
+    #[tokio::test]
+    async fn scheduler_does_not_batch_siblings_with_different_tags() {
+        let _guard = test_env::env_lock().lock().await;
+        let prev_discovery = std::env::var("SCHEDULER_DISCOVERY_JSON").ok();
+
+        set_env_var(
+            "SCHEDULER_DISCOVERY_JSON",
+            Some(
+                r#"[{"resource_id":0,"stream_name":"gpu:ns:pod:0","total_memory_mb":50000,"used_memory_mb":0,"device_kind":"gpu","executor_class":"python.gpu.demo","tags":["demo","large"]}]"#,
+            ),
+        );
+
+        let (_redis_server, role, tasks) = scheduler_with_test_queue_manager(
+            "scheduler-tests",
+            &scheduler_env_with_batching(
+                "test:",
+                json!({
+                    "memory_utilization_percent": 100,
+                    "batching_enabled": true,
+                    "max_batch_size": 2,
+                    "max_batch_wait_ms": 0
+                }),
+            ),
+        )
+        .await;
+        let sink = RecordingSink::new();
+        run_gpu_discovery(&tasks, &sink).await;
+
+        queue_fanout_child(&role, &sink, "1-0", "parent-a", 0, 2).await;
+        let mut tagged: JsonValue =
+            serde_json::from_str(&fanout_child_payload("parent-a", 1, 2)).unwrap();
+        tagged["resource_profile"]["tags"] = json!(["demo", "large"]);
+        queue_schedule(
+            &role,
+            &schedule_msg_with_id("1-1", "parent-a:item:1", &tagged.to_string()),
             "schedule",
             &sink,
         )
@@ -2629,10 +2754,169 @@ mod tests {
 
         let writes = sink.writes();
         assert_eq!(writes.len(), 1);
+        assert_eq!(writes[0].run_id, "parent-a:item:0");
         let forwarded: JsonValue = serde_json::from_str(&writes[0].payload).unwrap();
         assert!(forwarded.get("items").is_none());
-        assert_eq!(forwarded["run_id"], "child-a");
+        assert_eq!(role.queued_request_count().await, 1);
+
+        set_env_var("SCHEDULER_DISCOVERY_JSON", prev_discovery.as_deref());
+    }
+
+    #[tokio::test]
+    async fn scheduler_fanout_batch_holds_one_parent_slot_until_release() {
+        let _guard = test_env::env_lock().lock().await;
+        let prev_discovery = std::env::var("SCHEDULER_DISCOVERY_JSON").ok();
+
+        set_env_var(
+            "SCHEDULER_DISCOVERY_JSON",
+            Some(
+                r#"[{"resource_id":0,"stream_name":"gpu:ns:pod:0","total_memory_mb":50000,"used_memory_mb":0,"device_kind":"gpu","executor_class":"python.gpu.demo","tags":["demo"]}]"#,
+            ),
+        );
+
+        let (_redis_server, role, tasks) = scheduler_with_test_queue_manager(
+            "scheduler-tests",
+            &scheduler_env_with_batching(
+                "test:",
+                json!({
+                    "memory_utilization_percent": 100,
+                    "batching_enabled": true,
+                    "max_batch_size": 2,
+                    "max_batch_wait_ms": 0
+                }),
+            ),
+        )
+        .await;
+        let sink = RecordingSink::new();
+        run_gpu_discovery(&tasks, &sink).await;
+
+        for index in 0..3 {
+            queue_fanout_child(&role, &sink, &format!("1-{index}"), "parent-a", index, 1).await;
+        }
+        run_scheduler_task(&tasks, &sink).await;
+        assert_eq!(
+            sink.writes().len(),
+            1,
+            "first two siblings dispatch as one batch"
+        );
+
+        run_scheduler_task(&tasks, &sink).await;
+        assert_eq!(sink.writes().len(), 1, "batch holds the only parent slot");
+        assert_eq!(role.queued_request_count().await, 1);
+
+        role.handle(
+            &release_msg(
+                "batch",
+                r#"{"run_id":"batch","parent_run_id":"parent-a","resource_id":0,"memory_mb":2000,"status":"completed"}"#,
+            ),
+            "release",
+            &sink,
+        )
+        .await
+        .unwrap();
+        run_scheduler_task(&tasks, &sink).await;
+
+        let writes = sink.writes();
+        assert_eq!(writes.len(), 2);
+        assert_eq!(writes[1].run_id, "parent-a:item:2");
         assert_eq!(role.queued_request_count().await, 0);
+
+        set_env_var("SCHEDULER_DISCOVERY_JSON", prev_discovery.as_deref());
+    }
+
+    #[tokio::test]
+    async fn scheduler_expands_fanout_parent_into_child_requests() {
+        let _guard = test_env::env_lock().lock().await;
+        let (_redis_server, role, _tasks) =
+            scheduler_with_test_queue_manager("scheduler-tests", &scheduler_env("test:")).await;
+        let sink = RecordingSink::new();
+        let mut parent: JsonValue =
+            serde_json::from_str(&batchable_schedule_payload("parent-run", 1_000)).unwrap();
+        parent["fanout_items"] = json!([
+            {"parameters": {"seed": 1}},
+            {"parameters": {"seed": 2}}
+        ]);
+
+        role.handle(
+            &schedule_msg_with_id("7-0", "parent-run", &parent.to_string()),
+            "schedule",
+            &sink,
+        )
+        .await
+        .expect("fanout parents are expanded, not queued");
+
+        let writes = sink.writes();
+        assert_eq!(writes.len(), 2);
+        assert!(writes.iter().all(|write| write.stream_key == "schedule"));
+        assert_eq!(writes[1].run_id, "parent-run:item:1");
+        assert_eq!(sink.acked_ids(), vec!["7-0".to_string()]);
+        assert_eq!(role.queued_request_count().await, 0);
+        let group = role
+            .collect_store
+            .get_group("parent-run")
+            .await
+            .unwrap()
+            .expect("collect group should be registered");
+        assert_eq!(group.expected_count, 2);
+    }
+
+    #[tokio::test]
+    async fn scheduler_reports_dlq_fanout_child_to_collect() {
+        let _guard = test_env::env_lock().lock().await;
+        let prev_discovery = std::env::var("SCHEDULER_DISCOVERY_JSON").ok();
+
+        set_env_var(
+            "SCHEDULER_DISCOVERY_JSON",
+            Some(
+                r#"[{"resource_id":0,"stream_name":"gpu:ns:pod:0","total_memory_mb":50000,"used_memory_mb":0,"device_kind":"gpu","executor_class":"python.gpu.demo","tags":["demo"]}]"#,
+            ),
+        );
+        let (_redis_server, role, tasks) = scheduler_with_test_queue_manager_and_dependencies(
+            "scheduler-tests",
+            &scheduler_env("test:"),
+            Arc::new(InMemoryParentSlotStore::new()),
+            Arc::new(AlwaysFailingParentRunStateStore),
+            retry_dlq_policy(1),
+        )
+        .await;
+        let sink = RecordingSink::new();
+        run_gpu_discovery(&tasks, &sink).await;
+
+        let mut child: JsonValue =
+            serde_json::from_str(&fanout_child_payload("parent-a", 0, 1)).unwrap();
+        child["stage_context"]["pipeline"][2]["next"] = json!("_gather");
+        child["stage_context"]["pipeline"]
+            .as_array_mut()
+            .unwrap()
+            .push(
+                json!({"id": "_gather", "phase": "collect", "queue": "collect", "next": "results"}),
+            );
+        queue_schedule(
+            &role,
+            &schedule_msg_with_id("1-0", "parent-a:item:0", &child.to_string()),
+            "schedule",
+            &sink,
+        )
+        .await;
+
+        run_scheduler_task(&tasks, &sink).await;
+
+        // The collect report and the DLQ record leave in one atomic forward.
+        assert!(sink.handoffs().is_empty());
+        assert_eq!(sink.acked_ids(), vec!["1-0".to_string()]);
+        assert_eq!(sink.failed_run_ids(), vec!["parent-a:item:0".to_string()]);
+        assert_eq!(role.queued_request_count().await, 0);
+        let writes = sink.writes();
+        let streams: Vec<_> = writes
+            .iter()
+            .map(|write| write.stream_key.as_str())
+            .collect();
+        assert_eq!(streams, vec!["collect", "shared-dlq"]);
+        assert!(writes.iter().all(|write| write.run_id == "parent-a:item:0"));
+        let envelope: JsonValue = serde_json::from_str(&writes[0].payload).unwrap();
+        assert_eq!(envelope["result"]["status"], "failed");
+        assert_eq!(envelope["stage_context"]["current_stage_id"], "_gather");
+        assert!(writes[1].payload.contains("\"source_stream\":\"schedule\""));
 
         set_env_var("SCHEDULER_DISCOVERY_JSON", prev_discovery.as_deref());
     }

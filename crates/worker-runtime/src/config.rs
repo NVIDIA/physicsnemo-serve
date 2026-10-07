@@ -87,7 +87,7 @@ pub struct SchedulerRoleConfig {
     /// GPU discovery refresh interval in seconds (default: 60).
     #[serde(default = "default_resource_discovery_interval_secs")]
     pub gpu_discovery_interval_secs: u64,
-    /// When true, the scheduler considers non-fanout requests for batching.
+    /// When true, the scheduler batches compatible requests; fanout children batch only with siblings.
     #[serde(default = "default_scheduler_batching_enabled")]
     pub batching_enabled: bool,
     /// Maximum number of compatible requests to place in one scheduler batch.

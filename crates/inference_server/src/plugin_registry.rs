@@ -719,7 +719,7 @@ fn build_pipeline_stages(
                     )
                 }
             }
-            phases.extend(["fanout", "schedule", "execute", "collect"]);
+            phases.extend(["schedule", "execute"]);
             if postprocess_enabled {
                 phases.push("postprocess");
             }
@@ -766,13 +766,6 @@ fn stage_definition(
             "queue": "prefetch",
             "next": next
         }),
-        "fanout" => serde_json::json!({
-            "id": "fanout",
-            "phase": "fanout",
-            "handler": "fanout",
-            "queue": "fanout",
-            "next": next
-        }),
         "schedule" => serde_json::json!({
             "id": "schedule",
             "phase": "schedule",
@@ -785,13 +778,6 @@ fn stage_definition(
             "phase": "execute",
             "handler": "plugin_phase",
             "queue": execute_queue,
-            "next": next
-        }),
-        "collect" => serde_json::json!({
-            "id": "collect",
-            "phase": "collect",
-            "handler": "collect",
-            "queue": "collect",
             "next": next
         }),
         "postprocess" => serde_json::json!({
@@ -818,10 +804,8 @@ fn is_supported_stage_handler(phase: &str, handler: &str) -> bool {
         (phase, handler),
         ("prepare", "plugin_phase")
             | ("prefetch", "prefetch")
-            | ("fanout", "fanout")
             | ("schedule", "schedule")
             | ("execute", "plugin_phase")
-            | ("collect", "collect")
             | ("postprocess", "plugin_phase")
             | ("publish", "plugin_phase")
             | ("publish", "publish_outputs")

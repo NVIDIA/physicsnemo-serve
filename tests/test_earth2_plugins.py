@@ -1565,7 +1565,7 @@ def test_earth2_ensemble_fanout_prepare_cpu_materializes_and_skips_to_fanout(
     )
 
     assert prepared["operation"] == "run"
-    assert prepared["next_stage_id"] == "fanout"
+    assert prepared["next_stage_id"] == "schedule"
     assert "resource_profile" not in prepared
     assert prepared["fanout_profile"] == {"item_count": 3, "max_in_flight": 2}
     prepared_state_dir = (

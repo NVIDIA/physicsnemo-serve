@@ -1758,14 +1758,13 @@ mod tests {
                 "member_value": item_index
             },
             "stage_context": {
-                "current_stage_id": "collect",
+                "current_stage_id": "_gather",
                 "current_phase": "collect",
                 "pipeline": [
-                    {"id": "prepare", "phase": "prepare", "queue": "prepare", "next": "fanout"},
-                    {"id": "fanout", "phase": "fanout", "queue": "fanout", "next": "schedule"},
+                    {"id": "prepare", "phase": "prepare", "queue": "prepare", "next": "schedule"},
                     {"id": "schedule", "phase": "schedule", "queue": "schedule", "next": "execute"},
-                    {"id": "execute", "phase": "execute", "queue": "execute.python.gpu.demo", "next": "collect"},
-                    {"id": "collect", "phase": "collect", "queue": "collect", "next": "results"},
+                    {"id": "execute", "phase": "execute", "queue": "execute.python.gpu.demo", "next": "_gather"},
+                    {"id": "_gather", "phase": "collect", "queue": "collect", "next": "results"},
                     {"id": "results", "phase": "results", "queue": "results", "next": null}
                 ]
             }
@@ -1791,14 +1790,13 @@ mod tests {
                 "aggregation_mode": "all_members"
             },
             "stage_context": {
-                "current_stage_id": "collect",
+                "current_stage_id": "_gather",
                 "current_phase": "collect",
                 "pipeline": [
-                    {"id": "prepare", "phase": "prepare", "queue": "prepare", "next": "fanout"},
-                    {"id": "fanout", "phase": "fanout", "queue": "fanout", "next": "schedule"},
+                    {"id": "prepare", "phase": "prepare", "queue": "prepare", "next": "schedule"},
                     {"id": "schedule", "phase": "schedule", "queue": "schedule", "next": "execute"},
-                    {"id": "execute", "phase": "execute", "queue": "execute.python.gpu.demo", "next": "collect"},
-                    {"id": "collect", "phase": "collect", "queue": "collect", "next": "results"},
+                    {"id": "execute", "phase": "execute", "queue": "execute.python.gpu.demo", "next": "_gather"},
+                    {"id": "_gather", "phase": "collect", "queue": "collect", "next": "results"},
                     {"id": "results", "phase": "results", "queue": "results", "next": null}
                 ]
             }
@@ -1826,14 +1824,13 @@ mod tests {
                 }
             },
             "stage_context": {
-                "current_stage_id": "collect",
+                "current_stage_id": "_gather",
                 "current_phase": "collect",
                 "pipeline": [
-                    {"id": "prepare", "phase": "prepare", "queue": "prepare", "next": "fanout"},
-                    {"id": "fanout", "phase": "fanout", "queue": "fanout", "next": "schedule"},
+                    {"id": "prepare", "phase": "prepare", "queue": "prepare", "next": "schedule"},
                     {"id": "schedule", "phase": "schedule", "queue": "schedule", "next": "execute"},
-                    {"id": "execute", "phase": "execute", "queue": "execute.python.gpu.demo", "next": "collect"},
-                    {"id": "collect", "phase": "collect", "queue": "collect", "next": "publish"},
+                    {"id": "execute", "phase": "execute", "queue": "execute.python.gpu.demo", "next": "_gather"},
+                    {"id": "_gather", "phase": "collect", "queue": "collect", "next": "publish"},
                     {"id": "publish", "phase": "publish", "queue": "publish", "next": "results"},
                     {"id": "results", "phase": "results", "queue": "results", "next": null}
                 ]

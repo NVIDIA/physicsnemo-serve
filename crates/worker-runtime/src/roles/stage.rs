@@ -62,15 +62,6 @@ impl StageContext {
             .cloned()
             .ok_or_else(|| anyhow!("{role}: next stage '{next_id}' not found in pipeline"))
     }
-
-    /// Find the first stage that matches the given phase name.
-    pub(crate) fn find_phase(&self, phase: &str, role: &str) -> Result<StageDescriptor> {
-        self.pipeline
-            .iter()
-            .find(|stage| stage.phase == phase)
-            .cloned()
-            .ok_or_else(|| anyhow!("{role}: pipeline is missing required '{phase}' stage"))
-    }
 }
 
 /// Mutate the `stage_context` object inside a JSON payload map, advancing it
@@ -158,23 +149,6 @@ mod tests {
         let err = ctx.next_stage("test").unwrap_err();
         assert!(
             err.to_string().contains("has no next stage"),
-            "unexpected error: {err}"
-        );
-    }
-
-    #[test]
-    fn find_phase_returns_matching_stage() {
-        let ctx = two_stage_pipeline();
-        let stage = ctx.find_phase("execute", "test").unwrap();
-        assert_eq!(stage.id, "schedule");
-    }
-
-    #[test]
-    fn find_phase_errors_when_missing() {
-        let ctx = two_stage_pipeline();
-        let err = ctx.find_phase("nonexistent", "test").unwrap_err();
-        assert!(
-            err.to_string().contains("missing required"),
             "unexpected error: {err}"
         );
     }

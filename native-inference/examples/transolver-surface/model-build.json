@@ -1,0 +1,28 @@
+{
+  "format_version": 2,
+  "name": "transolver-surface",
+  "version": "0.501",
+  "adapter": "adapter.py",
+  "source": [],
+  "config": "weights/config.json",
+  "checkpoint": "weights/checkpoint.pt",
+  "input_names": ["fx", "embedding"],
+  "output_names": ["surface_fields_standardized"],
+  "backends": ["aoti", "tensorrt"],
+  "aoti_profile": "aten-boundary-exact-v2",
+  "tensorrt_profile": "layout-order-exact-v2",
+  "assets": {
+    "tensorrt_exact_linear_plugin": "assets/tensorrt/libpnmir_tensorrt_exact_linear_plugin.so",
+    "tensorrt_exact_gemm_plugin": "assets/tensorrt/libpnmir_tensorrt_exact_gemm_plugin.so",
+    "tensorrt_exact_token_sum_plugin": "assets/tensorrt/libpnmir_tensorrt_exact_token_sum_plugin.so",
+    "tensorrt_exact_slice_bmm_plugin": "assets/tensorrt/libpnmir_tensorrt_exact_slice_bmm_plugin.so",
+    "tensorrt_exact_layer_norm_plugin": "assets/tensorrt/libpnmir_tensorrt_exact_layer_norm_plugin.so",
+    "tensorrt_exact_softmax_plugin": "assets/tensorrt/libpnmir_tensorrt_exact_softmax_plugin.so",
+    "tensorrt_exact_attention_plugin": "assets/tensorrt/libpnmir_tensorrt_exact_attention_plugin.so",
+    "tensorrt_exact_gelu_plugin": "assets/tensorrt/libpnmir_tensorrt_exact_gelu_plugin.so",
+    "tensorrt_exact_deslice_bmm_plugin": "assets/tensorrt/libpnmir_tensorrt_exact_deslice_bmm_plugin.so"
+  },
+  "executor": "local",
+  "device": "cuda",
+  "output_root": "builds"
+}

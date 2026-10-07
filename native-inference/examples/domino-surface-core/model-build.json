@@ -1,0 +1,27 @@
+{
+  "format_version": 2,
+  "name": "domino-surface-core",
+  "version": "0.501",
+  "adapter": "adapter.py",
+  "source": [],
+  "config": "weights/config.json",
+  "checkpoint": "weights/checkpoint.pt",
+  "input_names": [
+    "local_neighbors_0", "local_neighbors_1", "centers", "relative_positions",
+    "neighbor_centers", "normals", "neighbor_normals", "areas", "neighbor_areas"
+  ],
+  "output_names": ["surface_fields_standardized"],
+  "backends": ["aoti", "tensorrt"],
+  "aoti_profile": "aten-boundary-exact-v3",
+  "tensorrt_profile": "domino-surface-exact",
+  "executor": "local",
+  "device": "cuda",
+  "output_root": "builds",
+  "assets": {
+    "domino_exact_ops": "assets/aoti/libpnmir_domino_exact_ops.so",
+    "tensorrt_exact_linear_plugin": "assets/tensorrt/libpnmir_tensorrt_exact_linear_plugin.so",
+    "tensorrt_exact_gelu_plugin": "assets/tensorrt/libpnmir_tensorrt_exact_gelu_plugin.so",
+    "tensorrt_exact_scalar_div_plugin": "assets/tensorrt/libpnmir_tensorrt_exact_scalar_div_plugin.so",
+    "tensorrt_exact_inverse_distance_blend_plugin": "assets/tensorrt/libpnmir_tensorrt_exact_inverse_distance_blend_plugin.so"
+  }
+}

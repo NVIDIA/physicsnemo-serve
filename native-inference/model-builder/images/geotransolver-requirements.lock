@@ -1,0 +1,30 @@
+# Qualified Linux x86_64 / CPython 3.12 Geo overlay for the pinned NGC base.
+# Install with --no-deps --require-hashes --no-build-isolation; the environment guard
+# verifies the full active closure, including dependencies supplied by the base.
+# antlr4 4.9.3 is source-only; its build uses the pinned base setuptools.
+aiobotocore==3.8.0 --hash=sha256:8bc605132cadfe844a3f334635a0a64fa5e360a4a206e915d99d53db5b6deeba
+aioitertools==0.13.0 --hash=sha256:0be0292b856f08dfac90e31f4739432f4cb6d7520ab9eb73e143f4f2fa5259be
+antlr4-python3-runtime==4.9.3 --hash=sha256:f224469b4168294902bb1efa80a8bf7855f24c99aef99cbefc1bcd3cce77881b
+botocore==1.43.46 --hash=sha256:cb673891e623ae6e6a1bf24d94ef169504f3eb02584adb5d5bee2f6aae819b60
+cftime==1.6.5 --hash=sha256:85ba8e7356d239cfe56ef7707ac30feaf67964642ac760a82e507ee3c5db4ac4
+cloudpickle==3.1.2 --hash=sha256:9acb47f6afd73f60dc1df93bb801b472f05ff42fa6c84167d25cb206be1fbf4a
+fsspec==2026.6.0 --hash=sha256:02e0b71817df9b2169dc30a16832045764def1191b43dcff5bb85bdee212d2a1
+gitdb==4.0.12 --hash=sha256:67073e15955400952c6565cc3e707c554a4eea2e428946f7a4c162fab9bd9bcf
+gitpython==3.1.54 --hash=sha256:b90d7b3d9bc0238681d24369130826f0dcdb0ceaa45db67cf1d4ffa4c302dedf
+h5py==3.16.0 --hash=sha256:dfc21898ff025f1e8e67e194965a95a8d4754f452f83454538f98f8a3fcb207e
+hydra-core==1.3.4 --hash=sha256:e58683692904a09f1fdfffa1a9b86bfd94e215b59f1ee17e7cd7d92738090d33
+jaxtyping==0.3.11 --hash=sha256:8a4bedc4e3f963fa82df41bd13c7ebc2bad925601eb48614c65798f21329d4e3
+jmespath==1.1.0 --hash=sha256:a5663118de4908c91729bea0acadca56526eb2698e83de10cd116ae0f4e97c64
+nvidia-physicsnemo==2.1.1 --hash=sha256:86479174f725dd8f569f76f7e688f64721afd2c16421e8516973f46f8febbefc
+omegaconf==2.3.1 --hash=sha256:3d701d14e9a8828f1edd28bb70b725908b34277cdd72cf7d6a83f94dadc6b6a0
+orjson==3.11.9 --hash=sha256:be4fa4f0af7fa18951f7ab3fc2148e223af211bf03f59e1c6034ec3f97f21d61
+pyvers==0.2.3 --hash=sha256:6f5b5612f2f4bd08caa49baa70fc5f875fc7da701a5385c13e244eea6b8114dd
+s3fs==2026.6.0 --hash=sha256:60576e31bb31193c1f643f32b4c6439548720ea6918ac702e21cd757c80b5db8
+smmap==5.0.3 --hash=sha256:c106e05d5a61449cf6ba9a1e650227ecfb141590d2a98412103ff35d89fc7b2f
+tensordict==0.11.0 --hash=sha256:7236c533d9076e8368952849c7bb9bf76a012324e22a133acd617ff8283fe59f
+termcolor==3.3.0 --hash=sha256:cf642efadaf0a8ebbbf4bc7a31cec2f9b5f21a9f726f4ccbb08192c9c26f43a5
+timm==1.0.22 --hash=sha256:888981753e65cbaacfc07494370138b1700a27b1f0af587f4f9b47bc024161d0
+treelib==1.8.0 --hash=sha256:5235d1ebf988c5026f26ce6e5e0cd470007f16d4978185f5c9b3eee8a25aef81
+urllib3==2.7.0 --hash=sha256:9fb4c81ebbb1ce9531cce37674bbc6f1360472bc18ca9a553ede278ef7276897
+wadler-lindig==0.1.7 --hash=sha256:e3ec83835570fd0a9509f969162aeb9c65618f998b1f42918cfc8d45122fe953
+warp-lang==1.15.0 --hash=sha256:95c169f28bd7d6c78ac4ad62e2df1e61a096033748f757157fa4551aed80d010

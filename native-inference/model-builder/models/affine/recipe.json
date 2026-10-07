@@ -1,0 +1,24 @@
+{
+  "format_version": 1,
+  "name": "affine",
+  "version": "0.1.0",
+  "description": "Small affine export and native parity fixture; not a CFD model.",
+  "adapter": "export.py",
+  "factory": "create_model",
+  "cases": "create_cases",
+  "input_names": [
+    "input"
+  ],
+  "output_names": [
+    "output"
+  ],
+  "supported_backends": [
+    "aoti",
+    "tensorrt"
+  ],
+  "default_backend": "aoti",
+  "dtype": "float32",
+  "shape": [
+    4
+  ]
+}

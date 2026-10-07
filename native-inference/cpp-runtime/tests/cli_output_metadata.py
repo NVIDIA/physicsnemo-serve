@@ -58,6 +58,7 @@ class OutputMetadataTests(unittest.TestCase):
                 "--output-metadata",
                 str(self.metadata),
             ],
+            cwd=self.root,
             capture_output=True,
             text=True,
         )
@@ -123,6 +124,24 @@ class OutputMetadataTests(unittest.TestCase):
             ],
         )
         self.assertEqual(output.read_bytes(), struct.pack("=3i", 7, -2, 19))
+
+    def test_relative_paths_use_fixture_directory(self):
+        self.fixture(shape=[3])
+        expected = struct.pack("=3f", 1.25, -2, 3.5)
+        source = self.root / "relative input.bin"
+        source.write_bytes(expected)
+        output, relative_output = self.aliased_destination(
+            self.root / "relative outputs", "relative", False
+        )
+        self.assertFalse(relative_output.is_absolute())
+        result = self.run_cli(
+            "--input-file",
+            f"input={source.name}",
+            "--output-file",
+            str(relative_output),
+        )
+        self.assert_success(result)
+        self.assertEqual(output.read_bytes(), expected)
 
     def test_legacy_and_backend_package_paths_preserve_bytes_and_metadata(self):
         self.fixture(shape=[-1, -1])
@@ -203,7 +222,8 @@ class OutputMetadataTests(unittest.TestCase):
         if kind == "direct":
             alias = destination
         elif kind == "relative":
-            alias = Path(os.path.relpath(destination))
+            # Use the CLI's cwd, independent of CTest's directory or drive.
+            alias = destination.relative_to(self.root)
         elif kind == "lexical":
             child = directory / "child"
             child.mkdir()

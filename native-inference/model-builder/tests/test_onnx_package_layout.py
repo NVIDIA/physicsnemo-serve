@@ -7,6 +7,7 @@ import shutil
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
@@ -19,7 +20,7 @@ class OnnxPackageLayoutTests(unittest.TestCase):
     def setUp(self):
         import numpy as np
         import onnx
-        from pnmir_export.onnx_importer import import_onnx_package
+        from model_builder.export.onnx_importer import import_onnx_package
 
         self.np = np
         self.onnx = onnx
@@ -157,7 +158,10 @@ class OnnxPackageLayoutTests(unittest.TestCase):
             for name in ("branch-bias.bin", "branch-offset.bin")
         }
         package = self.import_package(
-            source, self.root / "subgraph-package", model_name="branch", model_version="1"
+            source,
+            self.root / "subgraph-package",
+            model_name="branch",
+            model_version="1",
         )
         moved = self.root / "subgraph-deployed"
         package.rename(moved)
@@ -174,7 +178,7 @@ class OnnxPackageLayoutTests(unittest.TestCase):
         self.np.testing.assert_array_equal(actual[0], [15, 27, 39])
 
     def test_external_data_in_sparse_tensors_and_attribute_lists(self):
-        from pnmir_export.onnx_importer import _external_data_locations
+        from model_builder.export.onnx_importer import _external_data_locations
 
         onnx = self.onnx
         locations = []
@@ -248,6 +252,127 @@ class OnnxPackageLayoutTests(unittest.TestCase):
                     {p.name: p.read_bytes() for p in package.iterdir()}, original
                 )
                 self.assertEqual(list(self.root.glob(".existing-*")), [])
+
+    def test_destination_appearing_during_import_respects_force(self):
+        from model_builder.export import onnx_importer
+
+        source = self.source(self.root / "source", "weights/shard.bin")
+        publish = onnx_importer._publish_output_directory
+
+        def contents(path):
+            if path.is_file():
+                return path.read_bytes()
+            return {
+                p.relative_to(path).as_posix(): p.read_bytes()
+                for p in path.rglob("*")
+                if p.is_file()
+            }
+
+        for force in (False, True):
+            for kind in ("package", "directory", "empty-directory", "file"):
+                with self.subTest(force=force, kind=kind):
+                    package = self.root / f"package-{force}-{kind}"
+                    competing_contents = None
+
+                    def publish_competitor(target, work, *args, **kwargs):
+                        nonlocal competing_contents
+                        if kind == "package":
+                            with mock.patch.object(
+                                onnx_importer, "_publish_output_directory", publish
+                            ):
+                                self.import_package(
+                                    source,
+                                    target,
+                                    model_name="competitor",
+                                    model_version="1",
+                                )
+                        elif kind == "file":
+                            target.write_bytes(b"competing file")
+                        else:
+                            target.mkdir()
+                            if kind == "directory":
+                                (target / "payload.bin").write_bytes(
+                                    b"competing directory payload"
+                                )
+                        competing_contents = contents(target)
+                        return publish(target, work, *args, **kwargs)
+
+                    with mock.patch.object(
+                        onnx_importer,
+                        "_publish_output_directory",
+                        side_effect=publish_competitor,
+                    ):
+                        if force and kind == "package":
+                            self.import_package(
+                                source,
+                                package,
+                                model_name="first",
+                                model_version="1",
+                                force=force,
+                            )
+                            manifest = json.loads((package / "model.json").read_text())
+                            self.assertEqual(manifest["model"]["name"], "first")
+                        else:
+                            error = ValueError if force else FileExistsError
+                            message = (
+                                "unrecognized package" if force else "already exists"
+                            )
+                            with self.assertRaisesRegex(error, message):
+                                self.import_package(
+                                    source,
+                                    package,
+                                    model_name="first",
+                                    model_version="1",
+                                    force=force,
+                                )
+                            self.assertEqual(contents(package), competing_contents)
+                            self.assertEqual(package.is_file(), kind == "file")
+                    self.assertEqual(list(self.root.glob(f".{package.name}-*")), [])
+
+    def test_failed_publication_and_rollback_preserve_both_packages(self):
+        source = self.source(self.root / "source", "weights/shard.bin")
+        package = self.import_package(
+            source, self.root / "package", model_name="original", model_version="1"
+        )
+        competitor = self.import_package(
+            source, self.root / "competitor", model_name="competitor", model_version="1"
+        )
+
+        def contents(path):
+            return {
+                p.relative_to(path).as_posix(): p.read_bytes()
+                for p in path.rglob("*")
+                if p.is_file()
+            }
+
+        original_contents = contents(package)
+        competing_contents = contents(competitor)
+        replace = Path.replace
+
+        def publish_competitor(path, destination):
+            result = replace(path, destination)
+            if path == package:
+                # Publish into the gap after the original moves to its backup.
+                replace(competitor, package)
+            return result
+
+        with mock.patch.object(Path, "replace", publish_competitor):
+            with self.assertRaises(OSError) as failure:
+                self.import_package(
+                    source,
+                    package,
+                    model_name="replacement",
+                    model_version="1",
+                    force=True,
+                )
+        self.assertIsInstance(failure.exception.__context__, OSError)
+        self.assertEqual(contents(package), competing_contents)
+        backups = list(self.root.glob(".package-backup-*/package"))
+        self.assertEqual(
+            len(backups), 1, "the original package must remain recoverable"
+        )
+        self.assertEqual(contents(backups[0]), original_contents)
+        self.assertEqual(list(self.root.glob(".package-*")), [backups[0].parent])
 
 
 if __name__ == "__main__":

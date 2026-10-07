@@ -5,145 +5,19 @@ import hashlib
 import importlib.util
 import json
 from pathlib import Path
-import struct
 import shutil
 import subprocess
 import sys
-import tempfile
 import unittest
 from types import ModuleType, SimpleNamespace
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from pnmir_build import worker
+from model_builder.build import worker
+from worker_test_support import WorkerFixture
 
 
-RUNTIME = """#!{python}
-import json, struct, sys
-from pathlib import Path
-args=sys.argv[1:]
-def option(flag): return args[args.index(flag)+1]
-if {mode!r} == 'fail':
-    print('native intentionally failed', file=sys.stderr)
-    sys.exit(7)
-source=Path(option('--input-file').split('=',1)[1]).read_bytes()
-values=struct.unpack('<4f', source)
-out=[2*x+1 for x in values]
-if {mode!r} == 'nan': out[0]=float('nan')
-Path(option('--output-file').split('=',1)[1]).write_bytes(struct.pack('<4f', *out))
-metadata={{'schema_version':1,'completed':True,'backend':option('--backend'),
-'execution_device':{{'type':'cpu','index':0}},
-'outputs':[{{'name':'output','dtype':'float32','shape':[4],
-'device':{{'type':'cpu','index':0}},'byte_size':16}}]}}
-if {mode!r} == 'shape': metadata['outputs'][0]['shape']=[2,2]
-if {mode!r} == 'backend': metadata['backend']='wrong'
-if {mode!r} == 'device': metadata['execution_device']['type']='cuda'
-if {mode!r} == 'bytes': metadata['outputs'][0]['byte_size']=20
-Path(option('--output-metadata')).write_text(json.dumps(metadata))
-"""
-
-
-def tensor(name, values):
-    return {
-        "name": name,
-        "dtype": "float32",
-        "shape": [4],
-        "data": struct.pack("<4f", *values),
-    }
-
-
-class WorkerTest(unittest.TestCase):
-    def setUp(self):
-        self.temp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.temp.cleanup)
-        self.root = Path(self.temp.name)
-        self.recipe_path = self.root / "recipe.json"
-        self.recipe = {
-            "format_version": 1,
-            "name": "affine",
-            "version": "0.1.0",
-            "adapter": "export.py",
-            "factory": "create_model",
-            "cases": "create_cases",
-            "input_names": ["input"],
-            "output_names": ["output"],
-            "supported_backends": ["aoti", "tensorrt"],
-            "default_backend": "aoti",
-            "dtype": "float32",
-            "shape": [4],
-        }
-        self.recipe_path.write_text(json.dumps(self.recipe))
-        (self.root / "export.py").write_text("# frozen recipe adapter\n")
-        self.runtime = self.root / "physicsnemo-infer"
-        self.set_runtime("ok")
-        if sys.platform == "win32":
-            real_run = subprocess.run
-            runtime_path = str(self.runtime.resolve())
-
-            def run_script(command, *args, **kwargs):
-                if command[0] == runtime_path:
-                    command = [sys.executable, *command]
-                return real_run(command, *args, **kwargs)
-
-            launch = mock.patch.object(
-                worker,
-                "subprocess",
-                SimpleNamespace(run=run_script, STDOUT=subprocess.STDOUT),
-            )
-            launch.start()
-            self.addCleanup(launch.stop)
-        self.output = self.root / "build"
-        values = [[-2.0, 0.0, 1.0, 2.0], [0.25, 4.0, 10.0, -4.0]]
-        self.prepared = {
-            "model": object(),
-            "cases": [(object(),), (object(),)],
-            "inputs": [(tensor("input", v),) for v in values],
-            "references": [(tensor("output", [2 * x + 1 for x in v]),) for v in values],
-            "weights": {"kind": "embedded", "state_sha256": "0" * 64},
-            "environment": {"torch_version": "fake"},
-        }
-        self.calls = []
-
-    def set_runtime(self, mode):
-        self.runtime.write_text(RUNTIME.format(python=sys.executable, mode=mode))
-        self.runtime.chmod(0o755)
-
-    def backend(self, backend, prepared, recipe, device, package, exported):
-        self.calls.append(backend)
-        package.mkdir(parents=True)
-        exported.mkdir(parents=True)
-        artifact = "model.pt2" if backend == "aoti" else "model.plan"
-        (package / artifact).write_bytes(b"compiled " + backend.encode())
-        (package / "model.json").write_text(
-            json.dumps(
-                {
-                    "format_version": 1,
-                    "inputs": [{"name": "input", "dtype": "float32", "shape": [4]}],
-                    "outputs": [{"name": "output", "dtype": "float32", "shape": [4]}],
-                    "artifacts": [{"backend": backend, "path": artifact}],
-                }
-            )
-        )
-        (exported / ("program.pt2" if backend == "aoti" else "model.onnx")).write_bytes(
-            b"raw graph"
-        )
-        if backend == "tensorrt":
-            (exported / "model.onnx.data").write_bytes(b"external weights")
-        return {"format": "exported_program" if backend == "aoti" else "onnx"}
-
-    def run_build(self, backends=None):
-        with (
-            mock.patch.object(worker, "_prepare_model", return_value=self.prepared),
-            mock.patch.object(worker, "_build_backend", side_effect=self.backend),
-        ):
-            return worker.execute_build(
-                self.recipe_path,
-                self.output,
-                backends or ["aoti", "tensorrt"],
-                "cpu",
-                self.runtime,
-            )
-
+class WorkerTest(WorkerFixture, unittest.TestCase):
     def test_build_runs_native_for_every_case_and_requested_backend(self):
         report = self.run_build()
         self.assertEqual(report["status"], "complete")
@@ -297,6 +171,9 @@ class WorkerTest(unittest.TestCase):
             def contiguous(self):
                 return self
 
+            def clone(self):
+                return self
+
             def to(self, *args):
                 return self
 
@@ -337,7 +214,7 @@ class WorkerTest(unittest.TestCase):
         fake.export = SimpleNamespace(export=lambda *a, **kw: exported, save=save)
         fake._inductor = SimpleNamespace(aoti_compile_and_package=compile_program)
         fake.testing = SimpleNamespace(assert_close=lambda *a, **kw: None)
-        source = Path(worker.__file__).parents[1] / "pnmir_export" / "exporter.py"
+        source = Path(worker.__file__).parents[1] / "export" / "exporter.py"
         spec = importlib.util.spec_from_file_location("_retained_export_test", source)
         module = importlib.util.module_from_spec(spec)
         graph = self.root / "exported" / "program.pt2"
@@ -503,7 +380,7 @@ class WorkerTest(unittest.TestCase):
                 sys.executable,
                 "-S",
                 "-c",
-                'import sys; from pnmir_build import worker; assert "torch" not in sys.modules',
+                'import sys; from model_builder.build import worker; assert "torch" not in sys.modules',
             ],
             cwd=Path(__file__).resolve().parents[1] / "src",
             capture_output=True,

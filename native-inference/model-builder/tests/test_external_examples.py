@@ -9,7 +9,7 @@ import tempfile
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from pnmir_build import cli
+from model_builder.build import cli
 
 
 class ExternalExampleTests(unittest.TestCase):
@@ -38,7 +38,7 @@ class ExternalExampleTests(unittest.TestCase):
 
     def test_geo_name_uses_normal_unknown_recipe_handling(self):
         code, stdout, stderr = self.invoke(
-            "doctor", "geotransolver-surface-core", "--json"
+            "check", "--config-only", "geotransolver-surface-core", "--json"
         )
         self.assertEqual(code, 2, stdout + stderr)
         message = json.loads(stdout)["diagnostics"][0]["message"]
@@ -55,10 +55,11 @@ class ExternalExampleTests(unittest.TestCase):
             recipe["adapter"] = "adapter.py"
             (root / "recipe.json").write_text(json.dumps(recipe))
             (root / "adapter.py").write_text(
-                "raise AssertionError('doctor must not import model')\n"
+                "raise AssertionError('check --config-only must not import model')\n"
             )
             result = self.invoke(
-                "doctor",
+                "check",
+                "--config-only",
                 "--recipe",
                 str(root / "recipe.json"),
                 "--executor",

@@ -79,6 +79,10 @@ void write_bytes(const std::filesystem::path& path,
                      static_cast<std::streamsize>(storage.size())))) {
     throw std::runtime_error("cannot write tensor file: " + path.string());
   }
+  output.close();
+  if (!output) {
+    throw std::runtime_error("cannot write tensor file: " + path.string());
+  }
 }
 
 std::shared_ptr<void> allocate_cuda(std::size_t byte_size) {
@@ -145,7 +149,7 @@ physicsnemo::inference::Shape resolve_shape(
 
 std::size_t tensor_bytes(physicsnemo::inference::DType dtype,
                          const physicsnemo::inference::Shape& shape) {
-  return physicsnemo::inference::element_count(shape) * physicsnemo::inference::dtype_size(dtype);
+  return physicsnemo::inference::tensor_byte_size(shape, dtype);
 }
 
 double percentile(std::vector<double> values, std::size_t numerator) {

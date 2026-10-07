@@ -51,7 +51,7 @@ Build a Model Builder wheel using the
 then install it without replacing that environment's dependencies:
 
 ```bash
-python3 -m pip install --no-deps /path/to/physicsnemo_model_builder-0.1.0-py3-none-any.whl
+python3 -m pip install --no-deps /path/to/pnms_model_builder-0.1.0-py3-none-any.whl
 PYTHONPATH=native-inference/cpp-runtime/tests \
   python3 -m fixtures.physicsnemo_cfd_channel.prepare \
   --output /tmp/physicsnemo-channel-reproduced.pnmir
@@ -62,12 +62,13 @@ model whose nine-point diagnostic exceeds the same `0.01` error bound, then
 exports a static CPU ONNX Runtime package. Regeneration is separate from normal
 regression testing; it must not overwrite the frozen fixture by default.
 
-The optional diagnostic workflow composes a local data source, native runtime,
-and CSV output using Torch:
+The optional diagnostic mode in the same script composes a local data source,
+native runtime, and CSV output using Torch. This mode does not require
+PhysicsNeMo or Model Builder:
 
 ```bash
 PYTHONPATH=native-inference/cpp-runtime/tests \
-  python3 -m fixtures.physicsnemo_cfd_channel.workflow \
+  python3 -m fixtures.physicsnemo_cfd_channel.prepare --diagnostic \
   --pnmir out/inference/runtime-ort/physicsnemo-infer \
   --package native-inference/cpp-runtime/tests/fixtures/physicsnemo_cfd_channel/physicsnemo-channel-flow-v0.1.0-onnxruntime-cpu-fp32.pnmir \
   --output /tmp/physicsnemo-channel-flow.csv

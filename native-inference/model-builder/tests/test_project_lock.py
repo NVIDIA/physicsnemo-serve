@@ -12,7 +12,7 @@ from concurrent.futures import ThreadPoolExecutor
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from pnmir_build import project_lock
+from model_builder.build import project_lock
 
 
 class ProjectLockTests(unittest.TestCase):

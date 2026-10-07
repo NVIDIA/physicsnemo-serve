@@ -13,15 +13,16 @@ import unittest
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from pnmir_build import cli, worker
-import test_worker
+from model_builder.build import cli, worker
+import worker_test_support
 
 
 class ProjectCommandTests(unittest.TestCase):
     def setUp(self):
-        self.fixture = test_worker.WorkerTest()
-        self.fixture.setUp()
-        self.addCleanup(self.fixture.doCleanups)
+        self.fixture = worker_test_support.WorkerFixture()
+        self.fixture.addCleanup = self.addCleanup
+        if hasattr(self.fixture, "setUp"):
+            self.fixture.setUp()
         self.root = self.fixture.root.resolve()
         self.project = self.root / "customer-project"
         self.project.mkdir()
@@ -76,15 +77,18 @@ class ProjectCommandTests(unittest.TestCase):
         self.assertEqual(result["schema_version"], 1)
         return result
 
-    def test_doctor_resolves_project_from_other_cwd_without_ml_or_writes(self):
-        launcher = Path(__file__).resolve().parents[2] / "physicsnemo-model-builder"
+    def test_config_only_check_resolves_project_from_other_cwd_without_ml_or_writes(
+        self,
+    ):
+        launcher = Path(__file__).resolve().parents[2] / "pnms-model-builder"
         with tempfile.TemporaryDirectory() as unrelated:
             run = subprocess.run(
                 [
                     sys.executable,
                     "-S",
                     str(launcher),
-                    "doctor",
+                    "check",
+                    "--config-only",
                     str(self.project),
                     "--json",
                 ],
@@ -161,7 +165,14 @@ class ProjectCommandTests(unittest.TestCase):
         )
         self.write_config()
         result = self.result(
-            self.invoke("doctor", str(self.project), "--backend", "tensorrt", "--json")
+            self.invoke(
+                "check",
+                "--config-only",
+                str(self.project),
+                "--backend",
+                "tensorrt",
+                "--json",
+            )
         )
         self.assertEqual(result["effective_config"]["backends"], ["tensorrt"])
         self.assertEqual(result["profile"], "single")
@@ -202,7 +213,9 @@ class ProjectCommandTests(unittest.TestCase):
         (self.root / "config.json").write_text("{}")
         self.settings.update(checkpoint="weights.pt", backends=["aoti"])
         self.write_config()
-        result = self.result(self.invoke("doctor", str(self.project), "--json"))
+        result = self.result(
+            self.invoke("check", "--config-only", str(self.project), "--json")
+        )
         self.assertEqual(
             result["effective_config"]["checkpoint_sha256"],
             hashlib.sha256(checkpoint.read_bytes()).hexdigest(),
@@ -223,7 +236,9 @@ class ProjectCommandTests(unittest.TestCase):
         )
         self.settings["toolchain_lock"] = "toolchain.json"
         self.write_config()
-        result = self.result(self.invoke("doctor", str(self.project), "--json"))
+        result = self.result(
+            self.invoke("check", "--config-only", str(self.project), "--json")
+        )
         self.assertEqual(result["effective_config"].get("backends"), ["aoti"])
         self.assertEqual(
             result["effective_config"].get("runtime"),
@@ -237,7 +252,14 @@ class ProjectCommandTests(unittest.TestCase):
         }
         self.write_config()
         result = self.result(
-            self.invoke("doctor", str(self.project), "--profile", "default", "--json")
+            self.invoke(
+                "check",
+                "--config-only",
+                str(self.project),
+                "--profile",
+                "default",
+                "--json",
+            )
         )
         self.assertEqual(result["status"], "configuration-ok")
 
@@ -249,7 +271,8 @@ class ProjectCommandTests(unittest.TestCase):
 
         with (
             mock.patch(
-                "pnmir_build.targets.check_target", side_effect=change_after_lock
+                "model_builder.build.targets.check_target",
+                side_effect=change_after_lock,
             ),
             mock.patch.object(
                 worker, "_prepare_model", return_value=self.fixture.prepared
@@ -289,7 +312,9 @@ class ProjectCommandTests(unittest.TestCase):
             checkpoint_sha256=hashlib.sha256(archive.read_bytes()).hexdigest(),
         )
         self.write_config()
-        result = self.result(self.invoke("doctor", str(self.project), "--json"), 2)
+        result = self.result(
+            self.invoke("check", "--config-only", str(self.project), "--json"), 2
+        )
         self.assertEqual(result["diagnostics"][0]["code"], "INVALID_PROJECT")
         self.assertIn("symlink", result["diagnostics"][0]["message"])
 
@@ -306,7 +331,9 @@ class ProjectCommandTests(unittest.TestCase):
             "actual_gpu_arch": "sm90",
             "gpu_name": "test GPU",
         }
-        with mock.patch("pnmir_build.targets.check_target", return_value=checked):
+        with mock.patch(
+            "model_builder.build.targets.check_target", return_value=checked
+        ):
             result = self.result(self.build(), 1)
         self.assertEqual(
             self.fixture.calls, [], "a target mismatch must stop before compilation"

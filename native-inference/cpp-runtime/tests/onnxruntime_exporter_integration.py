@@ -7,7 +7,7 @@ from pathlib import Path
 import torch
 
 
-from pnmir_export import (
+from model_builder.export import (
     export_onnxruntime_package,
     validate_onnxruntime_package,
 )

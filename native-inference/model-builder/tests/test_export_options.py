@@ -11,7 +11,7 @@ import unittest
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from pnmir_build import worker
+from model_builder.build import worker
 
 
 @unittest.skipUnless(importlib.util.find_spec("torch"), "requires Torch")
@@ -51,8 +51,8 @@ def export_options(context):
 
     def test_backend_hook_is_optional_and_onnx_passes_cannot_leak_into_aoti(self):
         import torch
-        from pnmir_export import ExportOptions
-        from pnmir_export.compat import NormalizeClampBounds
+        from model_builder.export import ExportOptions
+        from model_builder.export.compat import NormalizeClampBounds
 
         recipe = dict(
             name="affine",
@@ -65,7 +65,7 @@ def export_options(context):
         prepared = dict(model=torch.nn.Identity(), cases=[(torch.ones(4),)])
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            with mock.patch("pnmir_export.exporter.export_package") as export:
+            with mock.patch("model_builder.export.exporter.export_package") as export:
                 worker._build_backend(
                     "aoti", prepared, recipe, "cpu", root / "pkg", root / "plain"
                 )
@@ -74,7 +74,7 @@ def export_options(context):
                 return_value=ExportOptions(onnx_passes=(NormalizeClampBounds(),))
             )
             prepared["export_options"] = hook
-            with mock.patch("pnmir_export.exporter.export_package") as export:
+            with mock.patch("model_builder.export.exporter.export_package") as export:
                 with self.assertRaisesRegex(ValueError, "ONNX graph passes require"):
                     worker._build_backend(
                         "aoti", prepared, recipe, "cpu", root / "pkg", root / "hook"
@@ -84,8 +84,8 @@ def export_options(context):
 
     def test_tensorrt_receives_hook_options_and_restores_cuda_device(self):
         import torch
-        from pnmir_export import ExportOptions
-        from pnmir_export.compat import NormalizeClampBounds
+        from model_builder.export import ExportOptions
+        from model_builder.export.compat import NormalizeClampBounds
 
         options = ExportOptions(onnx_passes=(NormalizeClampBounds(),))
         hook = mock.Mock(return_value=options)
@@ -101,10 +101,12 @@ def export_options(context):
                 mock.patch("torch.cuda.current_device", return_value=3),
                 mock.patch("torch.cuda.set_device") as set_device,
                 mock.patch(
-                    "pnmir_export.onnx_exporter.export_onnx_model",
+                    "model_builder.export.onnx_exporter.export_onnx_model",
                     return_value=root / "model.onnx",
                 ) as export,
-                mock.patch("pnmir_export.tensorrt_builder.build_tensorrt_package"),
+                mock.patch(
+                    "model_builder.export.tensorrt_builder.build_tensorrt_package"
+                ),
             ):
                 worker._build_backend(
                     "tensorrt", prepared, recipe, "cuda:1", root / "pkg", root / "graph"
@@ -117,10 +119,62 @@ def export_options(context):
 
 
 @unittest.skipUnless(importlib.util.find_spec("torch"), "requires Torch")
+class OnnxInputIsolationTest(unittest.TestCase):
+    def test_mutating_model_receives_pristine_inputs_without_changing_caller(self):
+        import torch
+        from model_builder.export import ExportOptions
+        from model_builder.export.graph_passes import prepare_onnx_program
+        from model_builder.export.onnx_exporter import export_onnx_model
+
+        class Increment(torch.nn.Module):
+            def forward(self, value):
+                return value.add_(1)
+
+        original = torch.arange(8, dtype=torch.float32).reshape(2, 4)
+        for dynamo, passes in ((False, ()), (True, ()), (True, (lambda graph: 0,))):
+            with self.subTest(dynamo=dynamo, passes=bool(passes)):
+                example = original.clone()
+                captured = []
+
+                def capture(model, inputs, *args):
+                    captured.append(inputs[0].clone())
+                    return prepare_onnx_program(model, inputs, *args)
+
+                def export(model, inputs, *args, **kwargs):
+                    captured.append(inputs[0].clone())
+                    if isinstance(model, torch.export.ExportedProgram):
+                        model = model.module()
+                    model(*inputs)
+                    return mock.Mock()
+
+                with (
+                    tempfile.TemporaryDirectory() as temporary,
+                    mock.patch(
+                        "model_builder.export.graph_passes.prepare_onnx_program",
+                        side_effect=capture,
+                    ),
+                    mock.patch("torch.onnx.export", side_effect=export),
+                ):
+                    export_onnx_model(
+                        Increment(),
+                        (example,),
+                        Path(temporary) / "model.onnx",
+                        input_names=("input",),
+                        output_names=("output",),
+                        device=torch.device("cpu"),
+                        dynamo=dynamo,
+                        options=ExportOptions(onnx_passes=passes),
+                    )
+                for value in captured:
+                    torch.testing.assert_close(value, original)
+                torch.testing.assert_close(example, original)
+
+
+@unittest.skipUnless(importlib.util.find_spec("torch"), "requires Torch")
 class ClampPassTest(unittest.TestCase):
     def test_scalar_float_and_integer_bounds_normalize_before_decomposition(self):
         import torch
-        from pnmir_export.compat import NormalizeClampBounds
+        from model_builder.export.compat import NormalizeClampBounds
 
         class Model(torch.nn.Module):
             def forward(self, value):
@@ -153,7 +207,7 @@ class ClampPassTest(unittest.TestCase):
 
     def test_broadcast_bounds_order_and_tensor_values_are_preserved(self):
         import torch
-        from pnmir_export.compat import NormalizeClampBounds
+        from model_builder.export.compat import NormalizeClampBounds
 
         value = torch.tensor([-2.0, 0.25, 1.0, 10.0])
         for scalar_lower in (True, False):
@@ -176,15 +230,15 @@ class ClampPassTest(unittest.TestCase):
 
     def test_unsupported_dtypes_fail_with_an_actionable_error(self):
         import torch
-        from pnmir_export.compat import NormalizeClampBounds
+        from model_builder.export.compat import NormalizeClampBounds
 
         with self.assertRaisesRegex(ValueError, "requires FP32"):
             NormalizeClampBounds()(self.graph(dtype=torch.float64))
 
     def test_passes_run_before_onnx_on_a_private_program_and_are_recorded(self):
         import torch
-        from pnmir_export import ExportOptions
-        from pnmir_export.onnx_exporter import export_onnx_model
+        from model_builder.export import ExportOptions
+        from model_builder.export.onnx_exporter import export_onnx_model
 
         model = torch.nn.Linear(4, 4).eval()
         original = model.weight.detach().clone()
@@ -227,8 +281,8 @@ class ClampPassTest(unittest.TestCase):
 
     def test_failed_pass_stops_onnx_conversion_and_records_failure(self):
         import torch
-        from pnmir_export import ExportOptions
-        from pnmir_export.onnx_exporter import export_onnx_model
+        from model_builder.export import ExportOptions
+        from model_builder.export.onnx_exporter import export_onnx_model
 
         def broken(module):
             raise ValueError("unsupported graph pattern")

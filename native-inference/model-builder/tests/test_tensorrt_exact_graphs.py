@@ -1,4 +1,5 @@
 """Characterization tests ported with the bounded exact TensorRT graph rewrites."""
+
 from __future__ import annotations
 
 import unittest
@@ -12,7 +13,12 @@ except ImportError as error:
     raise unittest.SkipTest(
         "exact graph characterization requires optional NumPy, ONNX and pytest"
     ) from error
-from pnmir_export.tensorrt_exact_graphs import (
+from graph_test_support import (
+    _with_rematerialized_nodes,
+    _reserve_value_name,
+    _check_model_with_tensorrt_plugins,
+)
+from model_builder.export.tensorrt_exact_graphs import (
     _replace_attention_subgraphs,
     _replace_constant_rhs_matmuls,
     _replace_gelu_subgraphs,
@@ -36,50 +42,6 @@ _GELU_HALF = np.float32(0.5)
 
 
 _VALUE_NAMESPACES = ("input", "output", "value_info", "initializer", "node_output")
-
-
-class _RematerializingNodes:
-    def __init__(self, nodes: object) -> None:
-        self._nodes = nodes
-
-    def __iter__(self):
-        return (
-            onnx.NodeProto.FromString(node.SerializeToString())
-            for node in self._nodes
-        )
-
-    def __delitem__(self, index: object) -> None:
-        del self._nodes[index]
-
-    def extend(self, nodes: object) -> None:
-        self._nodes.extend(nodes)
-
-
-class _RematerializingGraph:
-    def __init__(self, graph: onnx.GraphProto) -> None:
-        self._graph = graph
-
-    @property
-    def node(self) -> _RematerializingNodes:
-        return _RematerializingNodes(self._graph.node)
-
-    def __getattr__(self, name: str) -> object:
-        return getattr(self._graph, name)
-
-
-class _RematerializingModel:
-    def __init__(self, model: onnx.ModelProto) -> None:
-        self.graph = _RematerializingGraph(model.graph)
-
-
-def _with_rematerialized_nodes(
-    model: onnx.ModelProto,
-) -> _RematerializingModel:
-    rematerialized = _RematerializingModel(model)
-    first = list(rematerialized.graph.node)
-    second = list(rematerialized.graph.node)
-    assert {id(node) for node in first}.isdisjoint(id(node) for node in second)
-    return rematerialized
 
 
 def _with_non_fp32_cast_boundary(
@@ -148,43 +110,6 @@ def _shape_only_value_info(name: str, shape: tuple[int, ...]) -> onnx.ValueInfoP
     return value
 
 
-def _reserve_value_name(model: onnx.ModelProto, name: str, namespace: str) -> None:
-    source = model.graph.input[0]
-
-    def value_info() -> onnx.ValueInfoProto:
-        value = onnx.ValueInfoProto()
-        value.CopyFrom(source)
-        value.name = name
-        return value
-
-    if namespace == "input":
-        model.graph.input.append(value_info())
-    elif namespace == "output":
-        model.graph.input.append(value_info())
-        model.graph.output.append(value_info())
-    elif namespace == "value_info":
-        model.graph.node.append(helper.make_node("Identity", (source.name,), (name,)))
-        model.graph.value_info.append(value_info())
-    elif namespace == "initializer":
-        model.graph.initializer.append(
-            numpy_helper.from_array(np.array(0.0, dtype=np.float32), name=name)
-        )
-    elif namespace == "node_output":
-        model.graph.node.append(helper.make_node("Identity", (source.name,), (name,)))
-    else:
-        raise AssertionError(f"unsupported namespace: {namespace}")
-
-
-def _check_model_with_tensorrt_plugins(model: onnx.ModelProto) -> None:
-    checkable = onnx.ModelProto.FromString(model.SerializeToString())
-    plugin_domain = "pnmir.test"
-    for node in checkable.graph.node:
-        if node.op_type.startswith("PNMIRExact"):
-            node.domain = plugin_domain
-    checkable.opset_import.append(helper.make_opsetid(plugin_domain, 1))
-    onnx.checker.check_model(checkable, full_check=True)
-
-
 def _append_subgraph_capture(
     model: onnx.ModelProto,
     name: str,
@@ -206,8 +131,11 @@ def _append_subgraph_capture(
             [
                 helper.make_node("Identity", ("loop_condition",), ("next_condition",)),
                 helper.make_node(
-                    "If", ("loop_condition",), ("scan_value",),
-                    then_branch=branch, else_branch=branch,
+                    "If",
+                    ("loop_condition",),
+                    ("scan_value",),
+                    then_branch=branch,
+                    else_branch=branch,
                 ),
             ],
             "capture-loop-body",
@@ -224,14 +152,19 @@ def _append_subgraph_capture(
             numpy_helper.from_array(np.array(1, dtype=np.int64), name="trip_count")
         )
         model.graph.node.append(
-            helper.make_node("Loop", ("trip_count", "condition"), ("retained",), body=body)
+            helper.make_node(
+                "Loop", ("trip_count", "condition"), ("retained",), body=body
+            )
         )
         retained_shape = (None, *shape)
     else:
         model.graph.node.append(
             helper.make_node(
-                "If", ("condition",), ("retained",),
-                then_branch=branch, else_branch=branch,
+                "If",
+                ("condition",),
+                ("retained",),
+                then_branch=branch,
+                else_branch=branch,
             )
         )
         retained_shape = shape
@@ -245,22 +178,34 @@ def _linear_capture_model(*, transpose: bool = False) -> onnx.ModelProto:
     nodes = []
     if transpose:
         weight = weight.T.copy()
-        nodes.append(helper.make_node("Transpose", ("weight",), ("weight_t",), perm=(1, 0)))
-    nodes.extend([
-        helper.make_node("MatMul", ("input", "weight_t" if transpose else "weight"), ("projected",)),
-        helper.make_node("Add", ("projected", "bias"), ("output",)),
-    ])
-    return helper.make_model(helper.make_graph(
-        nodes,
-        "linear-with-subgraph-capture",
-        [helper.make_tensor_value_info("input", TensorProto.FLOAT, (2, 3))],
-        [helper.make_tensor_value_info("output", TensorProto.FLOAT, (2, 4))],
+        nodes.append(
+            helper.make_node("Transpose", ("weight",), ("weight_t",), perm=(1, 0))
+        )
+    nodes.extend(
         [
-            numpy_helper.from_array(weight, name="weight"),
-            numpy_helper.from_array(np.arange(4, dtype=np.float32), name="bias"),
-        ],
-        value_info=[helper.make_tensor_value_info("projected", TensorProto.FLOAT, (2, 4))],
-    ))
+            helper.make_node(
+                "MatMul",
+                ("input", "weight_t" if transpose else "weight"),
+                ("projected",),
+            ),
+            helper.make_node("Add", ("projected", "bias"), ("output",)),
+        ]
+    )
+    return helper.make_model(
+        helper.make_graph(
+            nodes,
+            "linear-with-subgraph-capture",
+            [helper.make_tensor_value_info("input", TensorProto.FLOAT, (2, 3))],
+            [helper.make_tensor_value_info("output", TensorProto.FLOAT, (2, 4))],
+            [
+                numpy_helper.from_array(weight, name="weight"),
+                numpy_helper.from_array(np.arange(4, dtype=np.float32), name="bias"),
+            ],
+            value_info=[
+                helper.make_tensor_value_info("projected", TensorProto.FLOAT, (2, 4))
+            ],
+        )
+    )
 
 
 @pytest.mark.parametrize("nested_loop", (False, True))
@@ -276,8 +221,12 @@ def test_linear_keeps_intermediate_captured_by_subgraph(nested_loop: bool) -> No
 
 
 @pytest.mark.parametrize("nested_loop", (False, True))
-@pytest.mark.parametrize("rewrite", (_replace_linear_subgraphs, _replace_constant_rhs_matmuls))
-def test_exact_projection_preserves_weight_captured_by_subgraph(rewrite, nested_loop: bool) -> None:
+@pytest.mark.parametrize(
+    "rewrite", (_replace_linear_subgraphs, _replace_constant_rhs_matmuls)
+)
+def test_exact_projection_preserves_weight_captured_by_subgraph(
+    rewrite, nested_loop: bool
+) -> None:
     model = _linear_capture_model()
     weight = numpy_helper.to_array(model.graph.initializer[0]).copy()
     _append_subgraph_capture(model, "weight", (3, 4), nested_loop=nested_loop)
@@ -285,7 +234,9 @@ def test_exact_projection_preserves_weight_captured_by_subgraph(rewrite, nested_
 
     assert rewrite(onnx, model) == 1
 
-    np.testing.assert_array_equal(numpy_helper.to_array(model.graph.initializer[0]), weight)
+    np.testing.assert_array_equal(
+        numpy_helper.to_array(model.graph.initializer[0]), weight
+    )
     assert model.graph.node[0].input[1] != "weight"
     _check_model_with_tensorrt_plugins(model)
 
@@ -304,7 +255,9 @@ def test_linear_preserves_transpose_captured_by_subgraph(nested_loop: bool) -> N
 
 @pytest.mark.parametrize("nested_loop", (False, True))
 @pytest.mark.parametrize("intermediate", ("divided", "erf", "plus_one", "scaled"))
-def test_gelu_keeps_intermediate_captured_by_subgraph(intermediate: str, nested_loop: bool) -> None:
+def test_gelu_keeps_intermediate_captured_by_subgraph(
+    intermediate: str, nested_loop: bool
+) -> None:
     model = _gelu_model()
     _append_subgraph_capture(model, intermediate, (2, 512), nested_loop=nested_loop)
     onnx.checker.check_model(model, full_check=True)
@@ -325,9 +278,7 @@ def test_replaces_static_fp32_matmul_with_transposed_plugin_weight() -> None:
         "exact-gemm",
         [helper.make_tensor_value_info("input", TensorProto.FLOAT, (2, 3))],
         [
-            helper.make_tensor_value_info(
-                "projected", TensorProto.FLOAT, (2, 4)
-            ),
+            helper.make_tensor_value_info("projected", TensorProto.FLOAT, (2, 4)),
             helper.make_tensor_value_info("retained", TensorProto.FLOAT, (3, 4)),
         ],
         [numpy_helper.from_array(weight, name="weight")],
@@ -358,9 +309,7 @@ def test_static_matmul_preserves_rhs_exposed_as_graph_output() -> None:
         "exact-gemm-with-exposed-weight",
         [helper.make_tensor_value_info("input", TensorProto.FLOAT, (2, 3))],
         [
-            helper.make_tensor_value_info(
-                "projected", TensorProto.FLOAT, (2, 4)
-            ),
+            helper.make_tensor_value_info("projected", TensorProto.FLOAT, (2, 4)),
             helper.make_tensor_value_info("weight", TensorProto.FLOAT, (3, 4)),
         ],
         [numpy_helper.from_array(weight, name="weight")],
@@ -546,20 +495,14 @@ def test_fuses_scoped_linear_with_shared_weight_transpose() -> None:
     other_bias = target_bias + np.float32(1.0)
     graph = helper.make_graph(
         [
-            helper.make_node(
-                "Transpose", ("weight",), ("weight_t",), perm=(1, 0)
-            ),
-            helper.make_node(
-                "MatMul", ("input", "weight_t"), ("target_projected",)
-            ),
+            helper.make_node("Transpose", ("weight",), ("weight_t",), perm=(1, 0)),
+            helper.make_node("MatMul", ("input", "weight_t"), ("target_projected",)),
             helper.make_node(
                 "Add",
                 ("target_projected", "target.layers.0.bias"),
                 ("target_output",),
             ),
-            helper.make_node(
-                "MatMul", ("input", "weight_t"), ("other_projected",)
-            ),
+            helper.make_node("MatMul", ("input", "weight_t"), ("other_projected",)),
             helper.make_node(
                 "Add", ("other_projected", "other.bias"), ("other_output",)
             ),
@@ -567,12 +510,8 @@ def test_fuses_scoped_linear_with_shared_weight_transpose() -> None:
         "scoped-shared-weight-linear",
         [helper.make_tensor_value_info("input", TensorProto.FLOAT, (2, 3))],
         [
-            helper.make_tensor_value_info(
-                "target_output", TensorProto.FLOAT, (2, 4)
-            ),
-            helper.make_tensor_value_info(
-                "other_output", TensorProto.FLOAT, (2, 4)
-            ),
+            helper.make_tensor_value_info("target_output", TensorProto.FLOAT, (2, 4)),
+            helper.make_tensor_value_info("other_output", TensorProto.FLOAT, (2, 4)),
         ],
         [
             numpy_helper.from_array(weight, name="weight"),
@@ -584,18 +523,14 @@ def test_fuses_scoped_linear_with_shared_weight_transpose() -> None:
             helper.make_tensor_value_info(
                 "target_projected", TensorProto.FLOAT, (2, 4)
             ),
-            helper.make_tensor_value_info(
-                "other_projected", TensorProto.FLOAT, (2, 4)
-            ),
+            helper.make_tensor_value_info("other_projected", TensorProto.FLOAT, (2, 4)),
         ],
     )
     model = helper.make_model(graph)
     onnx.checker.check_model(model, full_check=True)
 
     assert (
-        _replace_linear_subgraphs(
-            onnx, model, bias_name_prefixes=("target.layers.",)
-        )
+        _replace_linear_subgraphs(onnx, model, bias_name_prefixes=("target.layers.",))
         == 1
     )
 
@@ -613,9 +548,7 @@ def test_prunes_fully_replaced_shared_weight_transpose() -> None:
     bias = np.arange(4, dtype=np.float32)
     graph = helper.make_graph(
         [
-            helper.make_node(
-                "Transpose", ("weight",), ("weight_t",), perm=(1, 0)
-            ),
+            helper.make_node("Transpose", ("weight",), ("weight_t",), perm=(1, 0)),
             helper.make_node("MatMul", ("input", "weight_t"), ("projected",)),
             helper.make_node("Add", ("projected", "bias"), ("output",)),
         ],
@@ -628,9 +561,7 @@ def test_prunes_fully_replaced_shared_weight_transpose() -> None:
         ],
         value_info=[
             helper.make_tensor_value_info("weight_t", TensorProto.FLOAT, (3, 4)),
-            helper.make_tensor_value_info(
-                "projected", TensorProto.FLOAT, (2, 4)
-            ),
+            helper.make_tensor_value_info("projected", TensorProto.FLOAT, (2, 4)),
         ],
     )
     model = helper.make_model(graph)
@@ -766,9 +697,7 @@ def test_keeps_non_fp32_cast_boundary_linear_native(
             numpy_helper.from_array(np.arange(4, dtype=np.float32), name="bias"),
         ],
         value_info=[
-            helper.make_tensor_value_info(
-                "projected", TensorProto.FLOAT, (2, 4)
-            )
+            helper.make_tensor_value_info("projected", TensorProto.FLOAT, (2, 4))
         ],
     )
     model = _with_non_fp32_cast_boundary(
@@ -885,9 +814,7 @@ def test_keeps_linear_matmul_when_its_output_is_also_a_graph_output() -> None:
         [helper.make_tensor_value_info("input", TensorProto.FLOAT, (2, 3))],
         [
             helper.make_tensor_value_info("output", TensorProto.FLOAT, (2, 4)),
-            helper.make_tensor_value_info(
-                "projected", TensorProto.FLOAT, (2, 4)
-            ),
+            helper.make_tensor_value_info("projected", TensorProto.FLOAT, (2, 4)),
         ],
         [
             numpy_helper.from_array(weight, name="weight"),
@@ -915,9 +842,7 @@ def test_ignores_dynamic_and_non_fp32_matmuls() -> None:
         [
             helper.make_tensor_value_info("left", TensorProto.FLOAT, (2, 3)),
             helper.make_tensor_value_info("right", TensorProto.FLOAT, (3, 4)),
-            helper.make_tensor_value_info(
-                "integer_input", TensorProto.INT32, (2, 3)
-            ),
+            helper.make_tensor_value_info("integer_input", TensorProto.INT32, (2, 3)),
         ],
         [
             helper.make_tensor_value_info("dynamic", TensorProto.FLOAT, (2, 4)),
@@ -952,12 +877,8 @@ def test_replaces_supported_token_sum(
             )
         ],
         "exact-token-sum",
-        [
-            helper.make_tensor_value_info("input", TensorProto.FLOAT, input_shape)
-        ],
-        [
-            helper.make_tensor_value_info("output", TensorProto.FLOAT, output_shape)
-        ],
+        [helper.make_tensor_value_info("input", TensorProto.FLOAT, input_shape)],
+        [helper.make_tensor_value_info("output", TensorProto.FLOAT, output_shape)],
         [numpy_helper.from_array(np.array([1], dtype=np.int64), name="axes")],
     )
     model = helper.make_model(graph)
@@ -987,24 +908,12 @@ def test_keeps_non_fp32_cast_boundary_token_sum_native(dtype: int) -> None:
             ),
         ],
         "native-typed-token-sum",
-        [
-            helper.make_tensor_value_info(
-                "input", TensorProto.FLOAT, (1, 75, 8, 512)
-            )
-        ],
-        [
-            helper.make_tensor_value_info(
-                "output", TensorProto.FLOAT, (1, 8, 512)
-            )
-        ],
+        [helper.make_tensor_value_info("input", TensorProto.FLOAT, (1, 75, 8, 512))],
+        [helper.make_tensor_value_info("output", TensorProto.FLOAT, (1, 8, 512))],
         [numpy_helper.from_array(np.array([1], dtype=np.int64), name="axes")],
         value_info=[
-            helper.make_tensor_value_info(
-                "typed_input", dtype, (1, 75, 8, 512)
-            ),
-            helper.make_tensor_value_info(
-                "typed_output", dtype, (1, 8, 512)
-            ),
+            helper.make_tensor_value_info("typed_input", dtype, (1, 75, 8, 512)),
+            helper.make_tensor_value_info("typed_output", dtype, (1, 8, 512)),
         ],
     )
     model = helper.make_model(graph)
@@ -1038,16 +947,8 @@ def test_keeps_token_sum_with_unknown_plugin_tensor_dtypes_native() -> None:
             ),
         ],
         "unknown-typed-token-sum",
-        [
-            helper.make_tensor_value_info(
-                "input", TensorProto.FLOAT, (1, 75, 8, 512)
-            )
-        ],
-        [
-            helper.make_tensor_value_info(
-                "output", TensorProto.FLOAT, (1, 8, 512)
-            )
-        ],
+        [helper.make_tensor_value_info("input", TensorProto.FLOAT, (1, 75, 8, 512))],
+        [helper.make_tensor_value_info("output", TensorProto.FLOAT, (1, 8, 512))],
         [numpy_helper.from_array(np.array([1], dtype=np.int64), name="axes")],
         value_info=[
             _shape_only_value_info("typed_input", (1, 75, 8, 512)),
@@ -1097,16 +998,12 @@ def test_replaces_supported_strided_slice_bmm(
         ],
         "exact-slice-bmm",
         [
-            helper.make_tensor_value_info(
-                "weights", TensorProto.FLOAT, weights_shape
-            ),
+            helper.make_tensor_value_info("weights", TensorProto.FLOAT, weights_shape),
             helper.make_tensor_value_info(
                 "features", TensorProto.FLOAT, features_shape
             ),
         ],
-        [
-            helper.make_tensor_value_info("output", TensorProto.FLOAT, output_shape)
-        ],
+        [helper.make_tensor_value_info("output", TensorProto.FLOAT, output_shape)],
     )
     model = helper.make_model(graph)
 
@@ -1124,9 +1021,7 @@ def test_keeps_non_fp32_cast_boundary_slice_bmm_native(dtype: int) -> None:
     graph = helper.make_graph(
         [
             helper.make_node("Cast", ("weights",), ("typed_weights",), to=dtype),
-            helper.make_node(
-                "Cast", ("features",), ("typed_features",), to=dtype
-            ),
+            helper.make_node("Cast", ("features",), ("typed_features",), to=dtype),
             helper.make_node(
                 "Transpose",
                 ("typed_weights",),
@@ -1157,27 +1052,13 @@ def test_keeps_non_fp32_cast_boundary_slice_bmm_native(dtype: int) -> None:
                 "features", TensorProto.FLOAT, (1, 75, 8, 32)
             ),
         ],
-        [
-            helper.make_tensor_value_info(
-                "output", TensorProto.FLOAT, (1, 8, 512, 32)
-            )
-        ],
+        [helper.make_tensor_value_info("output", TensorProto.FLOAT, (1, 8, 512, 32))],
         value_info=[
-            helper.make_tensor_value_info(
-                "typed_weights", dtype, (1, 75, 8, 512)
-            ),
-            helper.make_tensor_value_info(
-                "typed_features", dtype, (1, 75, 8, 32)
-            ),
-            helper.make_tensor_value_info(
-                "weights_permuted", dtype, (1, 8, 512, 75)
-            ),
-            helper.make_tensor_value_info(
-                "features_permuted", dtype, (1, 8, 75, 32)
-            ),
-            helper.make_tensor_value_info(
-                "typed_output", dtype, (1, 8, 512, 32)
-            ),
+            helper.make_tensor_value_info("typed_weights", dtype, (1, 75, 8, 512)),
+            helper.make_tensor_value_info("typed_features", dtype, (1, 75, 8, 32)),
+            helper.make_tensor_value_info("weights_permuted", dtype, (1, 8, 512, 75)),
+            helper.make_tensor_value_info("features_permuted", dtype, (1, 8, 75, 32)),
+            helper.make_tensor_value_info("typed_output", dtype, (1, 8, 512, 32)),
         ],
     )
     model = helper.make_model(graph)
@@ -1235,11 +1116,7 @@ def test_keeps_slice_bmm_with_unknown_plugin_tensor_dtypes_native() -> None:
                 "features", TensorProto.FLOAT, (1, 75, 8, 32)
             ),
         ],
-        [
-            helper.make_tensor_value_info(
-                "output", TensorProto.FLOAT, (1, 8, 512, 32)
-            )
-        ],
+        [helper.make_tensor_value_info("output", TensorProto.FLOAT, (1, 8, 512, 32))],
         value_info=[
             _shape_only_value_info("typed_weights", (1, 75, 8, 512)),
             _shape_only_value_info("typed_features", (1, 75, 8, 32)),
@@ -1295,9 +1172,7 @@ def test_keeps_slice_bmm_when_transpose_output_is_a_graph_output(
             ),
         ],
         [
-            helper.make_tensor_value_info(
-                "output", TensorProto.FLOAT, (1, 8, 512, 32)
-            ),
+            helper.make_tensor_value_info("output", TensorProto.FLOAT, (1, 8, 512, 32)),
             helper.make_tensor_value_info(intermediate, TensorProto.FLOAT, shape),
         ],
     )
@@ -1534,19 +1409,11 @@ def _attention_model(
     graph = helper.make_graph(
         [
             helper.make_node("Reshape", ("key", "key_shape_1"), ("key_r1",)),
-            helper.make_node(
-                "Transpose", ("key_r1",), ("key_t",), perm=transpose_perm
-            ),
+            helper.make_node("Transpose", ("key_r1",), ("key_t",), perm=transpose_perm),
             helper.make_node("Reshape", ("key_t", "key_shape_2"), ("key_r2",)),
-            helper.make_node(
-                "Mul", ("query", "query_scale"), ("query_scaled",)
-            ),
-            helper.make_node(
-                "Mul", ("key_r2", "key_scale"), ("key_scaled",)
-            ),
-            helper.make_node(
-                "MatMul", ("query_scaled", "key_scaled"), ("scores",)
-            ),
+            helper.make_node("Mul", ("query", "query_scale"), ("query_scaled",)),
+            helper.make_node("Mul", ("key_r2", "key_scale"), ("key_scaled",)),
+            helper.make_node("MatMul", ("query_scaled", "key_scaled"), ("scores",)),
             helper.make_node("Softmax", ("scores",), ("probabilities",), axis=-1),
             helper.make_node(
                 "MatMul",
@@ -1577,15 +1444,9 @@ def _attention_model(
             numpy_helper.from_array(key_scale, name="key_scale"),
         ],
         value_info=[
-            helper.make_tensor_value_info(
-                "key_r1", TensorProto.FLOAT, key_shape_1
-            ),
-            helper.make_tensor_value_info(
-                "key_t", TensorProto.FLOAT, transposed_shape
-            ),
-            helper.make_tensor_value_info(
-                "key_r2", TensorProto.FLOAT, key_shape_2
-            ),
+            helper.make_tensor_value_info("key_r1", TensorProto.FLOAT, key_shape_1),
+            helper.make_tensor_value_info("key_t", TensorProto.FLOAT, transposed_shape),
+            helper.make_tensor_value_info("key_r2", TensorProto.FLOAT, key_shape_2),
         ],
     )
     model = helper.make_model(graph)
@@ -1596,10 +1457,7 @@ def _attention_model(
 def test_replaces_fixed_transolver_attention_decomposition() -> None:
     model = _attention_model()
 
-    assert (
-        _replace_attention_subgraphs(onnx, _with_rematerialized_nodes(model))
-        == 1
-    )
+    assert _replace_attention_subgraphs(onnx, _with_rematerialized_nodes(model)) == 1
 
     assert [node.op_type for node in model.graph.node] == [
         "PNMIRExactAttention",
@@ -1620,10 +1478,7 @@ def test_replaces_geotransolver_attention_decomposition() -> None:
         output_shape=(1, 8, 128, 56),
     )
 
-    assert (
-        _replace_attention_subgraphs(onnx, _with_rematerialized_nodes(model))
-        == 1
-    )
+    assert _replace_attention_subgraphs(onnx, _with_rematerialized_nodes(model)) == 1
     assert [node.op_type for node in model.graph.node] == [
         "PNMIRExactAttention",
         "Transpose",
@@ -1669,9 +1524,7 @@ def test_keeps_non_fp32_cast_boundary_attention_native(
     assert _replace_attention_subgraphs(onnx, model) == 0
 
     onnx.checker.check_model(model, full_check=True)
-    assert all(
-        node.op_type != "PNMIRExactAttention" for node in model.graph.node
-    )
+    assert all(node.op_type != "PNMIRExactAttention" for node in model.graph.node)
 
 
 def test_replaces_attention_with_inferred_leading_reshape_dimension() -> None:
@@ -1688,10 +1541,7 @@ def test_replaces_attention_with_inferred_leading_reshape_dimension() -> None:
     )
     onnx.checker.check_model(model)
 
-    assert (
-        _replace_attention_subgraphs(onnx, _with_rematerialized_nodes(model))
-        == 1
-    )
+    assert _replace_attention_subgraphs(onnx, _with_rematerialized_nodes(model)) == 1
 
     assert [node.op_type for node in model.graph.node] == [
         "PNMIRExactAttention",
@@ -1713,15 +1563,11 @@ def test_rejects_attention_with_ambiguous_inferred_reshape(
         if initializer.name == "key_shape_1"
     )
     key_shape.CopyFrom(
-        numpy_helper.from_array(
-            np.array(target, dtype=np.int64), name="key_shape_1"
-        )
+        numpy_helper.from_array(np.array(target, dtype=np.int64), name="key_shape_1")
     )
 
     assert _replace_attention_subgraphs(onnx, model) == 0
-    assert all(
-        node.op_type != "PNMIRExactAttention" for node in model.graph.node
-    )
+    assert all(node.op_type != "PNMIRExactAttention" for node in model.graph.node)
 
 
 @pytest.mark.parametrize(
@@ -1753,14 +1599,9 @@ def test_keeps_attention_with_externally_used_intermediate(
     )
     onnx.checker.check_model(model)
 
-    assert (
-        _replace_attention_subgraphs(onnx, _with_rematerialized_nodes(model))
-        == 0
-    )
+    assert _replace_attention_subgraphs(onnx, _with_rematerialized_nodes(model)) == 0
     onnx.checker.check_model(model)
-    assert all(
-        node.op_type != "PNMIRExactAttention" for node in model.graph.node
-    )
+    assert all(node.op_type != "PNMIRExactAttention" for node in model.graph.node)
 
 
 def test_rejects_attention_with_wrong_query_or_key_multiplier() -> None:
@@ -1771,9 +1612,7 @@ def test_rejects_attention_with_wrong_query_or_key_multiplier() -> None:
         model = _attention_model(query_scale, key_scale)
 
         assert _replace_attention_subgraphs(onnx, model) == 0
-        assert all(
-            node.op_type != "PNMIRExactAttention" for node in model.graph.node
-        )
+        assert all(node.op_type != "PNMIRExactAttention" for node in model.graph.node)
 
 
 def test_rejects_attention_with_identity_or_wrong_key_transpose() -> None:
@@ -1781,9 +1620,7 @@ def test_rejects_attention_with_identity_or_wrong_key_transpose() -> None:
         model = _attention_model(transpose_perm=transpose_perm)
 
         assert _replace_attention_subgraphs(onnx, model) == 0
-        assert all(
-            node.op_type != "PNMIRExactAttention" for node in model.graph.node
-        )
+        assert all(node.op_type != "PNMIRExactAttention" for node in model.graph.node)
 
 
 def test_rejects_attention_with_wrong_key_reshape_constants() -> None:
@@ -1797,9 +1634,7 @@ def test_rejects_attention_with_wrong_key_reshape_constants() -> None:
         model = _attention_model(**layout)
 
         assert _replace_attention_subgraphs(onnx, model) == 0
-        assert all(
-            node.op_type != "PNMIRExactAttention" for node in model.graph.node
-        )
+        assert all(node.op_type != "PNMIRExactAttention" for node in model.graph.node)
 
 
 def _gelu_model(
@@ -1821,9 +1656,7 @@ def _gelu_model(
         [helper.make_tensor_value_info("input", TensorProto.FLOAT, shape)],
         [helper.make_tensor_value_info("output", TensorProto.FLOAT, shape)],
         [
-            numpy_helper.from_array(
-                sqrt_two, name="sqrt_two"
-            ),
+            numpy_helper.from_array(sqrt_two, name="sqrt_two"),
             numpy_helper.from_array(one, name="one"),
             numpy_helper.from_array(half, name="half"),
         ],
@@ -1845,12 +1678,7 @@ def test_replaces_exact_gelu_expansion() -> None:
 def test_scoped_gelu_only_replaces_exact_linear_source() -> None:
     model = _gelu_model()
 
-    assert (
-        _replace_gelu_subgraphs(
-            onnx, model, exact_linear_sources_only=True
-        )
-        == 0
-    )
+    assert _replace_gelu_subgraphs(onnx, model, exact_linear_sources_only=True) == 0
 
     model = _gelu_model()
     model.graph.node.insert(
@@ -1863,27 +1691,16 @@ def test_scoped_gelu_only_replaces_exact_linear_source() -> None:
     )
     model.graph.input[0].name = "source"
     model.graph.value_info.append(
-        helper.make_tensor_value_info(
-            "input", TensorProto.FLOAT, (2, 512)
-        )
+        helper.make_tensor_value_info("input", TensorProto.FLOAT, (2, 512))
     )
     model.graph.initializer.extend(
         (
-            numpy_helper.from_array(
-                np.eye(512, dtype=np.float32), name="weight"
-            ),
-            numpy_helper.from_array(
-                np.zeros(512, dtype=np.float32), name="bias"
-            ),
+            numpy_helper.from_array(np.eye(512, dtype=np.float32), name="weight"),
+            numpy_helper.from_array(np.zeros(512, dtype=np.float32), name="bias"),
         )
     )
 
-    assert (
-        _replace_gelu_subgraphs(
-            onnx, model, exact_linear_sources_only=True
-        )
-        == 1
-    )
+    assert _replace_gelu_subgraphs(onnx, model, exact_linear_sources_only=True) == 1
     assert sum(node.op_type == "PNMIRExactGelu" for node in model.graph.node) == 1
 
 

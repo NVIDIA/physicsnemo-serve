@@ -6,7 +6,7 @@ from pathlib import Path
 
 import torch
 
-from pnmir_export import export_package
+from model_builder.export import export_package
 
 
 class AliasedOutputs(torch.nn.Module):
@@ -42,7 +42,13 @@ def main() -> int:
         model_name="aoti-owned-outputs",
         model_version="0.1.0",
         input_names=("input",),
-        output_names=("identity", "offset_view", "strided_view", "intermediate", "constant"),
+        output_names=(
+            "identity",
+            "offset_view",
+            "strided_view",
+            "intermediate",
+            "constant",
+        ),
         target=args.target,
         force=True,
     )

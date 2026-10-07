@@ -1,4 +1,5 @@
-#include "physicsnemo/inference/backends/tensorrt_exact_token_sum_plugin.hpp"
+#include "physicsnemo/inference/backends/tensorrt_exact.hpp"
+#include "exact_plugin_support.hpp"
 
 #include <NvInfer.h>
 #include <cuda_runtime_api.h>
@@ -260,15 +261,7 @@ class ExactTokenSumPlugin final : public nvinfer1::IPluginV3,
  public:
   nvinfer1::IPluginCapability* getCapabilityInterface(
       nvinfer1::PluginCapabilityType type) noexcept override {
-    switch (type) {
-      case nvinfer1::PluginCapabilityType::kCORE:
-        return static_cast<nvinfer1::IPluginV3OneCore*>(this);
-      case nvinfer1::PluginCapabilityType::kBUILD:
-        return static_cast<nvinfer1::IPluginV3OneBuild*>(this);
-      case nvinfer1::PluginCapabilityType::kRUNTIME:
-        return static_cast<nvinfer1::IPluginV3OneRuntime*>(this);
-    }
-    return nullptr;
+    return tensorrt_detail::capability_interface(this, type);
   }
 
   nvinfer1::IPluginV3* clone() noexcept override {
@@ -319,13 +312,8 @@ class ExactTokenSumPlugin final : public nvinfer1::IPluginV3,
   bool supportsFormatCombination(
       int32_t position, const nvinfer1::DynamicPluginTensorDesc* in_out,
       int32_t nb_inputs, int32_t nb_outputs) noexcept override {
-    if (in_out == nullptr || position < 0 || position >= 2 || nb_inputs != 1 ||
-        nb_outputs != 1) {
-      return false;
-    }
-    const auto& descriptor = in_out[position].desc;
-    return descriptor.type == nvinfer1::DataType::kFLOAT &&
-           descriptor.format == nvinfer1::TensorFormat::kLINEAR;
+    return tensorrt_detail::supports_fp32_linear(
+        position, in_out, nb_inputs, nb_outputs, 1);
   }
 
   int32_t getNbOutputs() const noexcept override { return 1; }

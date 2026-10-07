@@ -95,6 +95,12 @@ class InstallConsumerTests(unittest.TestCase):
         return options
 
     def test_relocated_prefix_is_a_standalone_cpp_dependency(self):
+        self.check_relocated_prefix("include")
+
+    def test_custom_include_directory_survives_relocation(self):
+        self.check_relocated_prefix("include/pnmir")
+
+    def check_relocated_prefix(self, include_dir):
         with tempfile.TemporaryDirectory(prefix="pnmir-install-") as temporary:
             root = Path(temporary)
             source = root / "source"
@@ -120,6 +126,7 @@ class InstallConsumerTests(unittest.TestCase):
                 "-DCMAKE_BUILD_TYPE=Release",
                 f"-DBUILD_SHARED_LIBS={'ON' if self.shared else 'OFF'}",
                 f"-DCMAKE_INSTALL_PREFIX={prefix}",
+                f"-DCMAKE_INSTALL_INCLUDEDIR={include_dir}",
                 f"-DPython3_EXECUTABLE={sys.executable}",
                 *backend_options,
                 *self.dependency_options(),

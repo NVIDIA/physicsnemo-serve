@@ -4,6 +4,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -195,6 +196,57 @@ void test_shape_validation() {
     rejected = true;
   }
   check(rejected, "rank mismatch was not rejected");
+}
+
+void test_tensor_byte_overflow_is_rejected_before_backend_execution() {
+  using namespace physicsnemo::inference;
+  std::string failures;
+  const auto expect_overflow = [&](auto operation, const std::string& label) {
+    try {
+      operation();
+      failures += label + " accepted overflowing storage; ";
+    } catch (const std::overflow_error&) {
+    } catch (const std::exception& error) {
+      failures += label + " reached a later check: " + error.what() + "; ";
+    }
+  };
+  for (const auto dtype : {DType::kFloat16, DType::kFloat32, DType::kInt64}) {
+    const auto width = dtype_size(dtype);
+    const auto limit = std::numeric_limits<std::size_t>::max() / width;
+    // The element count fits size_t, but converting it to bytes wraps to
+    // zero or a small nonzero allocation. No oversized allocation is needed.
+    for (const std::size_t extra : {0U, 1U}) {
+      const Shape shape{2, static_cast<std::int64_t>(limit / 2 + 1 + extra)};
+      auto storage = std::make_shared<std::vector<std::byte>>(2 * extra * width);
+      const std::string label = std::string(to_string(dtype)) +
+                                " extra=" + std::to_string(extra) + " ";
+      expect_overflow([&] {
+        static_cast<void>(OwnedTensor("input", dtype, {}, shape, *storage));
+      }, label + "OwnedTensor");
+      expect_overflow([&] {
+        static_cast<void>(SharedTensor("input", dtype, {}, shape,
+                                       storage->data(), storage->size(), storage));
+      }, label + "SharedTensor");
+
+      ModelManifest manifest;
+      manifest.inputs.push_back({"input", dtype, {-1, -1}});
+      manifest.outputs.push_back({"output", dtype, {-1, -1}});
+      InferenceSession session(manifest, std::make_unique<EmptySession>(), "probe");
+      const TensorView input{
+          "input", dtype, {}, shape, storage->data(), storage->size()};
+      expect_overflow([&] {
+        static_cast<void>(session.run({input}));
+      }, label + "input view");
+      OwnedTensor valid_input("input", dtype, {}, {2, 1},
+                              std::vector<std::byte>(2 * width));
+      const MutableTensorView output{
+          "output", dtype, {}, shape, storage->data(), storage->size()};
+      expect_overflow([&] {
+        session.run_into({valid_input.view()}, {output});
+      }, label + "output view");
+    }
+  }
+  check(failures.empty(), failures);
 }
 
 void test_caller_owned_output() {
@@ -455,6 +507,7 @@ int main() {
     test_identity_package();
     test_legacy_rtpkg_package_remains_loadable();
     test_shape_validation();
+    test_tensor_byte_overflow_is_rejected_before_backend_execution();
     test_caller_owned_output();
     test_backend_owned_output();
     test_caller_owned_output_validation();

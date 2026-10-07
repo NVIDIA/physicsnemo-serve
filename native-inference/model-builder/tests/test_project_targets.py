@@ -8,7 +8,7 @@ import unittest
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from pnmir_build import targets
+from model_builder.build import targets
 
 
 class CudaDevices:
@@ -91,7 +91,7 @@ def guarded_import(name, *args, **kwargs):
         raise AssertionError("framework-free target validation imported Torch")
     return original_import(name, *args, **kwargs)
 builtins.__import__ = guarded_import
-from pnmir_build.targets import validate_target, check_target
+from model_builder.build.targets import validate_target, check_target
 validate_target("cuda:7", "sm90")
 assert check_target("cpu", None) is None
 assert check_target("cuda:7", None) is None

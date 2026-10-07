@@ -1,116 +1,76 @@
 # PhysicsNeMo Model Builder and C++ Inference SDK
 
-Build a native model package from Python with **PhysicsNeMo Model Builder**,
-then execute its backend packages with the **PhysicsNeMo C++ Inference SDK**.
-Both live here in PhysicsNeMo Serve; integration with the Serve execute worker
-is still planned.
+Build a native package from your Python model and trained weights with
+**PhysicsNeMo Model Builder**, then run it through the **PhysicsNeMo C++
+Inference SDK**.
 
-## Build a model
+**Start with the [user guide](docs/user-guide.md).** It covers environment setup,
+project configuration, the two adapter functions, checking, building and using
+an exported model. You provide representative inputs; the builder compares
+compiled native outputs with your Python model before accepting the build.
 
-From the repository root, discover the bundled recipes:
-
-```bash
-./native-inference/physicsnemo-model-builder --help
-./native-inference/physicsnemo-model-builder list
-```
-
-The launcher needs Python 3.10 or newer. Discovery, project validation and
-container orchestration need no host Torch or PhysicsNeMo installation.
-
-For repeated builds, put the model, checkpoint and execution settings in a
-`model-build.json` file. The [project guide](docs/model-build-projects.md)
-describes both authoring projects and explicit recipes, including the external
-GeoTransolver example:
-
-```bash
-./native-inference/physicsnemo-model-builder doctor /path/to/model-project --json
-./native-inference/physicsnemo-model-builder build /path/to/model-project --json
-```
-
-For your own Python model and trained weights, start with
-[Add your model](docs/add-model.md). `init` creates a project configuration and
-an adapter with two functions to fill in; no checkpoint argument is required.
-For a PhysicsNeMo `.mdlus` archive, `import-checkpoint` generates a plain tensor
-checkpoint and constructor JSON, then prints the settings for you to copy into
-the project configuration. It reuses the project's configured environment.
-
-```bash
-./native-inference/physicsnemo-model-builder init /path/to/model-project
-# Set checkpoint/environment in model-build.json and connect build_adapter.py.
-./native-inference/physicsnemo-model-builder check /path/to/model-project --json
-./native-inference/physicsnemo-model-builder build /path/to/model-project --json
-```
-
-Format-2 authoring projects capture selected Python sources and infer the
-tensor contract from your cases. `check` executes the Python model without
-compilation; `build` repeats those checks and requires native parity.
-
-`doctor` checks configuration and input identities. `build` prepares the model,
-exports and compiles the selected backends, and runs the required native parity
-checks. Project profiles select execution settings; the generated lock detects
-changed inputs. The commands enforce these contracts without an agent.
-
-Docker is the default executor. There is no published default builder image
-yet: follow the [builder setup](model-builder/README.md#builder-environment) to build
-a development image once, create a local Python environment, or use an existing
-compatible environment and native runtime. Changing model weights does not
-rebuild the SDK.
-
-To create a fresh venv and build an already configured format-2 model project
-without Docker, run from the repository root:
-
-```bash
-./native-inference/physicsnemo-model-builder setup-env \
-  "$HOME/.venvs/physicsnemo-builder" \
-  --requirements /path/to/model-project/requirements.txt \
-  --build /path/to/model-project --json
-```
-
-This installs the builder and model dependencies, builds a matching C++ runtime
-once, then exports the model and runs native parity checks. Omit `--build` to
-prepare the environment first. Setup prints local executor/runtime settings for
-you to copy into `model-build.json`. It requires host compiler tools; CUDA and
-TensorRT builds also require their development toolkits. See
-[local setup and existing environments](model-builder/README.md#create-a-local-environment-and-build)
-for prerequisites and both-backend commands.
-
-## Choose a starting point
+## Choose a guide
 
 | Task | Guide |
 | --- | --- |
-| Set up native Windows 11 with AOTInductor and TensorRT | [Windows development and L4 checks](docs/windows.md) |
-| Configure a repeatable model build | [Projects, profiles and locks](docs/model-build-projects.md) |
-| Export a GeoTransolver checkpoint | [External GeoTransolver example](examples/README.md#geotransolver) |
-| Export a DoMINO surface core | [External DoMINO example](docs/domino-workflow.md) |
-| Supply a custom model and weights | [Initialize, check and build your model](docs/add-model.md) |
-| Start from a model example | [Two-file templates and preparation](examples/README.md) |
-| Run raw mesh → native model → physical fields from the CLI | [C++ Transolver E2E workflow](workflows/transolver/README.md) |
-| Maintain an explicit model recipe | [Recipe/input contract](docs/model-inputs.md) |
-| Exercise export and native verification | [Bundled affine recipe](model-builder/models/affine/README.md) |
-| Find or move a graph/package | [Package and evidence contract](docs/packages.md) |
-| Install the frontend or build its image | [Model Builder](model-builder/README.md) |
+| Bring your model and weights | [Model Builder user guide](docs/user-guide.md) |
+| Look up settings, profiles, recipes or package formats | [Technical reference](docs/reference.md) |
+| Start from a prepared model template | [Examples: affine, Transolver, GeoTransolver and DoMINO](examples/README.md) |
 | Build, install or embed the native runtime | [C++ Inference SDK](cpp-runtime/README.md) |
-| Package and verify the builder | [Packaging instructions](docs/releasing.md) |
+| Set up native Windows | [Windows setup](docs/user-guide.md#windows-setup) |
+| Run raw mesh → native model → physical fields | [Transolver C++ workflow](workflows/transolver/README.md) |
 
-## Run a package
+From the checkout root, the launcher is
+`./native-inference/pnms-model-builder`; the installed command is
+`pnms-model-builder`, where `pnms` stands for PhysicsNeMo Serve. The frontend
+requires Python 3.10+. Model execution and compilation require the selected
+framework and native environment; follow
+[Linux setup](docs/user-guide.md#linux-setup) or
+[Windows setup](docs/user-guide.md#windows-setup) before building.
 
-A successful build produces a deployable `model/` directory. The
-`physicsnemo-infer` CLI loads a backend package directly from
-`model/backends/<backend>/`; the SDK can also be embedded through its
-`physicsnemo::inference::v1` C++ API. Existing `.pnmir` packages remain loadable.
-Native execution does not load the Python model or original checkpoint. A server can run directly
-with the compatible native dependencies; Docker is optional for deployment.
+## What a build produces
 
-The current SDK supports optional AOTInductor, ONNX Runtime and TensorRT
-backends. Its core static/shared installations are tested for relocation;
-complete GPU dependency bundles and published compatibility matrices remain
-work for a release. See [package compatibility](docs/packages.md#deployment-and-compatibility).
+A successful build creates a deployable `model/` bundle. Each requested backend
+has a loadable package at `model/backends/<backend>/`, containing `model.json`
+and its compiled payload. The runtime loads that backend directory directly.
+See [using the compiled model](docs/user-guide.md#use-the-compiled-model).
 
-The builder supports generic static FP32 AOTI/TensorRT recipes. The external
-GeoTransolver and DoMINO examples build surface cores using imported weights and
-synthetic feature inputs.
-The [Transolver CLI example](workflows/transolver/README.md) runs raw surface
-and volume geometry through C++ preprocessing, SDK inference and physical-unit
-decoding. It includes a Model Builder project for a bounded surface case.
-Complete raw-mesh GeoTransolver/DoMINO flows, scientific model acceptance,
-remote build jobs and artifact publication remain planned.
+The native executable is `physicsnemo-infer`; applications can also use the
+`physicsnemo::inference::v1` C++ API. Runtime inference needs compatible native
+libraries and input tensors, but does not load your Python model or original
+checkpoint. Docker is optional for deployment.
+
+## Current scope
+
+Model Builder supports static FP32 authoring projects for AOTInductor and
+TensorRT. The SDK additionally supports ONNX Runtime packages. Existing
+`.pnmir` and `.pnm-model` packages remain loadable through their manifests.
+Model-specific exact profiles and their prerequisites are described in the
+[reference](docs/reference.md#tensorrt-profiles-and-assets).
+
+Published default builder images, complete prebuilt SDK bundles, artifact
+publication and integration with the Serve execute worker remain planned.
+GeoTransolver and DoMINO examples verify surface cores with synthetic feature
+inputs; complete geometry workflows and scientific CFD acceptance need separate
+qualification. The Transolver workflow includes bounded raw-geometry processing.
+See [deployment compatibility](docs/reference.md#package-compatibility).
+
+For contributors: [builder development](model-builder/README.md),
+[packaging and release checks](docs/releasing.md), and
+[native inference QA](../qa/native_inference/README.md).
+
+## Source layout
+
+| Area | Responsibility |
+| --- | --- |
+| `model-builder/src/model_builder/build/` | The public CLI, project configuration, captured inputs and build orchestration. |
+| `model-builder/src/model_builder/export/` | Python export APIs, compiler profiles and graph passes used by the builder. |
+| `cpp-runtime/` | C++ SDK, native CLI, backend plugins and their integration tests. |
+| `examples/`, `tools/examples/`, `tests/examples/` | Two-file customer projects, input preparation and one discoverable example test suite. |
+| `workflows/transolver/` | Optional native geometry workflow built as a consumer of the installed SDK. |
+| `docs/` | User manual, configuration reference, Windows SDK and release instructions. |
+| [`../qa/native_inference/`](../qa/native_inference/README.md) | Independent end-to-end qualification and artifact checks. |
+
+Builder tests stay beside the builder, native tests beside the SDK, and QA
+controller tests under the repository's `tests/`. Exact TensorRT operators keep
+separate shared libraries because packages record their individual identities.

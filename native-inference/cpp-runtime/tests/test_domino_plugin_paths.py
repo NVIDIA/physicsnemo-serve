@@ -18,12 +18,19 @@ class StopBeforeCudaBuild(Exception):
 class DominoPluginPathTests(unittest.TestCase):
     def test_loads_supplied_plugins_without_assuming_linux_names(self):
         for filenames in (
-            ("pnmir_tensorrt_exact_scalar_div_plugin.dll",
-             "pnmir_tensorrt_exact_inverse_distance_blend_plugin.dll"),
-            ("libpnmir_tensorrt_exact_scalar_div_plugin.so",
-             "libpnmir_tensorrt_exact_inverse_distance_blend_plugin.so"),
+            (
+                "pnmir_tensorrt_exact_scalar_div_plugin.dll",
+                "pnmir_tensorrt_exact_inverse_distance_blend_plugin.dll",
+            ),
+            (
+                "libpnmir_tensorrt_exact_scalar_div_plugin.so",
+                "libpnmir_tensorrt_exact_inverse_distance_blend_plugin.so",
+            ),
         ):
-            with self.subTest(filenames=filenames), tempfile.TemporaryDirectory() as temp:
+            with (
+                self.subTest(filenames=filenames),
+                tempfile.TemporaryDirectory() as temp,
+            ):
                 root = Path(temp) / "SDK with spaces"
                 root.mkdir()
                 paths = [root / filename for filename in filenames]
@@ -49,8 +56,10 @@ class DominoPluginPathTests(unittest.TestCase):
                     domino_exact_integration.check_tensorrt(args, None)
                 self.assertEqual(
                     load.call_args_list,
-                    [mock.call(str(path.resolve()), mode=ctypes.RTLD_GLOBAL)
-                     for path in paths],
+                    [
+                        mock.call(str(path.resolve()), mode=ctypes.RTLD_GLOBAL)
+                        for path in paths
+                    ],
                 )
 
 

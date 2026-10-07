@@ -11,34 +11,15 @@ import onnx
 from onnx import TensorProto, helper
 
 
-from pnmir_export import import_onnx_package
+from fixtures import write_affine_onnx
+from model_builder.export import import_onnx_package
 
 
 def _write_package(output: Path) -> None:
     shutil.rmtree(output, ignore_errors=True)
     source = output.parent / "onnxruntime-affine-source.onnx"
 
-    input_info = helper.make_tensor_value_info("input", TensorProto.FLOAT, [3])
-    output_info = helper.make_tensor_value_info("output", TensorProto.FLOAT, [3])
-    scale = helper.make_tensor("scale", TensorProto.FLOAT, [1], [2.0])
-    bias = helper.make_tensor("bias", TensorProto.FLOAT, [1], [1.0])
-    graph = helper.make_graph(
-        [
-            helper.make_node("Mul", ["input", "scale"], ["scaled"]),
-            helper.make_node("Add", ["scaled", "bias"], ["output"]),
-        ],
-        "pnm-ir-affine",
-        [input_info],
-        [output_info],
-        [scale, bias],
-    )
-    model = helper.make_model(
-        graph,
-        producer_name="pnm-ir-test",
-        opset_imports=[helper.make_opsetid("", 18)],
-    )
-    onnx.checker.check_model(model)
-    onnx.save(model, source)
+    write_affine_onnx(source, graph_name="pnm-ir-affine")
     import_onnx_package(
         source,
         output,

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from contextlib import contextmanager
 import importlib.util
 import json
 from pathlib import Path
@@ -11,7 +10,8 @@ import unittest
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from pnmir_export import aoti_profiles
+from model_builder.export import aoti_profiles
+from aoti_test_support import FakeConfig
 
 
 EXACT = "aten-boundary-exact-v2"
@@ -25,35 +25,12 @@ SETTINGS = {
 HAS_TORCH = importlib.util.find_spec("torch") is not None
 
 
-class FakeConfig:
-    """Observable compiler configuration, not a numerical compiler substitute."""
-
-    def __init__(self):
-        self.emulate_divison_rounding = False
-        self.fallback_by_default = False
-        self.selective_decompose = False
-        self.post_grad_custom_pre_pass = None
-        self.patch_calls = 0
-
-    @contextmanager
-    def patch(self, settings):
-        self.patch_calls += 1
-        previous = {key: getattr(self, key) for key in settings}
-        try:
-            for key, value in settings.items():
-                setattr(self, key, value)
-            yield
-        finally:
-            for key, value in previous.items():
-                setattr(self, key, value)
-
-
 class ProfileFrontendTest(unittest.TestCase):
     def test_baseline_and_validation_work_without_torch(self):
         code = """
 import sys
 sys.path.insert(0, sys.argv[1])
-from pnmir_export.aoti_profiles import compiler_profile, validate_aoti_profile
+from model_builder.export.aoti_profiles import compiler_profile, validate_aoti_profile
 assert validate_aoti_profile('baseline') == 'baseline'
 assert validate_aoti_profile('aten-boundary-exact-v2') == 'aten-boundary-exact-v2'
 with compiler_profile() as profile:
@@ -115,8 +92,8 @@ class CompilerProfileTest(unittest.TestCase):
         self.assertIsNone(self.config.post_grad_custom_pre_pass)
 
     def test_public_export_function_preserves_import_compatibility(self):
-        from pnmir_export import export_package
-        from pnmir_export.exporter import export_package as implementation
+        from model_builder.export import export_package
+        from model_builder.export.exporter import export_package as implementation
 
         self.assertIs(export_package, implementation)
 
@@ -231,7 +208,7 @@ class GraphPassTest(unittest.TestCase):
 class ExporterProfileTest(unittest.TestCase):
     def setUp(self):
         import torch
-        from pnmir_export import exporter
+        from model_builder.export import exporter
 
         self.torch = torch
         self.exporter = exporter

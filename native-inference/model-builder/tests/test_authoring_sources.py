@@ -14,7 +14,7 @@ import unittest
 
 SOURCE_ROOT = Path(__file__).resolve().parents[1] / "src"
 sys.path.insert(0, str(SOURCE_ROOT))
-from pnmir_build import authoring_sources  # noqa: E402
+from model_builder.build import authoring_sources  # noqa: E402
 
 
 class AuthoringSourcesTests(unittest.TestCase):
@@ -197,7 +197,7 @@ class AuthoringSourcesTests(unittest.TestCase):
         shutil.rmtree(self.project)
         self.run_python(f"""
             from pathlib import Path
-            from pnmir_build.authoring_sources import create_model, create_cases
+            from model_builder.build.authoring_sources import create_model, create_cases
             config = {config!r}
             assets = {assets!r}
             model = create_model(config, assets)
@@ -213,7 +213,7 @@ class AuthoringSourcesTests(unittest.TestCase):
         self.write(
             "build_adapter.py",
             """
-            from pnmir_export import ExportOptions
+            from model_builder.export import ExportOptions
             from export_fixes import prepare_graph
             def create_model(config, assets): return config['width']
             def export_options(context):
@@ -223,13 +223,31 @@ class AuthoringSourcesTests(unittest.TestCase):
         config, assets = self.retained()
         shutil.rmtree(self.project)
         self.run_python(f"""
-            from pnmir_build.authoring_sources import create_model, export_options
-            from pnmir_export import ExportContext
+            from model_builder.build.authoring_sources import create_model, export_options
+            from model_builder.export import ExportContext
             assert create_model({config!r}, {assets!r}) == 3
             options = export_options({config!r}, {assets!r}, ExportContext('tensorrt', 'cuda'))
             assert len(options.onnx_passes) == 1
             assert options.onnx_passes[0](None) == 0
             assert export_options({config!r}, {assets!r}, ExportContext('aoti', 'cuda')).onnx_passes == ()
+        """)
+
+    def test_retained_sources_support_aliased_temporary_directories(self):
+        self.write(
+            "build_adapter.py",
+            "def create_model(config, assets): return config['width']\n",
+        )
+        config, assets = self.retained()
+        temporary_root = self.root / "temporary"
+        temporary_root.mkdir()
+        alias = self.root / "temporary-alias"
+        alias.symlink_to(temporary_root, target_is_directory=True)
+        self.run_python(f"""
+            import tempfile
+            from model_builder.build import authoring_sources
+            tempfile.tempdir = {str(alias)!r}
+            assert authoring_sources.create_model({config!r}, {assets!r}) == 3
+            authoring_sources.verify_imports()
         """)
 
     def test_missing_export_hook_preserves_existing_adapter_behavior(self):
@@ -239,8 +257,8 @@ class AuthoringSourcesTests(unittest.TestCase):
         )
         config, assets = self.retained()
         self.run_python(f"""
-            from pnmir_build.authoring_sources import export_options
-            from pnmir_export import ExportContext
+            from model_builder.build.authoring_sources import export_options
+            from model_builder.export import ExportContext
             assert export_options({config!r}, {assets!r}, ExportContext('tensorrt', 'cuda')).onnx_passes == ()
         """)
 
@@ -253,7 +271,7 @@ class AuthoringSourcesTests(unittest.TestCase):
         config, assets = self.retained()
         self.run_python(f"""
             import sys, types
-            from pnmir_build.authoring_sources import create_model
+            from model_builder.build.authoring_sources import create_model
             previous = types.ModuleType('model')
             previous.VALUE = -1
             sys.modules['model'] = previous
@@ -270,13 +288,126 @@ class AuthoringSourcesTests(unittest.TestCase):
         self.write("fractions.py", "")
         config, assets = self.retained()
         self.run_python(f"""
-            from pnmir_build.authoring_sources import create_model
+            from model_builder.build.authoring_sources import create_model
             try:
                 create_model({config!r}, {assets!r})
             except ValueError as exc:
                 assert 'fractions' in str(exc) and 'conflict' in str(exc).lower()
             else:
                 raise AssertionError('captured standard library shadow must be rejected')
+        """)
+
+    def test_installed_packages_cannot_shadow_captured_namespaces(self):
+        for package in ("customer_model", "customer_model.nested"):
+            for lazy in (False, True):
+                with self.subTest(package=package, lazy=lazy):
+                    relative = package.replace(".", "/")
+                    self.write(f"{relative}/model.py", "VALUE = 2\n")
+                    environment = self.root / "environment"
+                    installed = environment / relative
+                    installed.mkdir(parents=True, exist_ok=True)
+                    (installed / "__init__.py").write_text("")
+                    (installed / "model.py").write_text("VALUE = 99\n")
+                    self.write(
+                        "build_adapter.py",
+                        f"def create_model(config, assets):\n"
+                        f"    from {package}.model import VALUE\n"
+                        f"    return VALUE\n"
+                        if not lazy
+                        else (
+                            "def create_model(config, assets):\n"
+                            "    def model():\n"
+                            f"        from {package}.model import VALUE\n"
+                            "        return VALUE\n"
+                            "    return model\n"
+                        ),
+                    )
+                    config, assets = self.retained()
+                    self.run_python(f"""
+                        import sys, tempfile
+                        from pathlib import Path
+                        from model_builder.build import authoring_sources
+                        tempfile.tempdir = {str(self.root)!r}
+                        sys.path.append({str(environment)!r})
+                        previous_path = list(sys.path)
+                        assert 'customer_model' not in sys.modules
+                        try:
+                            authoring_sources.create_model({config!r}, {assets!r})
+                        except ValueError as exc:
+                            assert {package!r} in str(exc) and 'conflict' in str(exc).lower()
+                        else:
+                            raise AssertionError('installed package must not shadow captured namespace')
+                        assert sys.path == previous_path, 'failed load must restore import paths'
+                        assert not authoring_sources._TREES
+                        assert not authoring_sources._IMPORT_ROOTS
+                        assert 'build_adapter' not in sys.modules
+                        assert not any(name == 'customer_model' or name.startswith('customer_model.') for name in sys.modules)
+                        assert not list(Path({str(self.root)!r}).glob('physicsnemo-model-source-*'))
+                    """)
+                    shutil.rmtree(environment)
+                    shutil.rmtree(self.project / "customer_model")
+
+    def test_namespace_sources_preserve_lazy_and_installed_external_imports(self):
+        self.write("customer_model/nested/model.py", "VALUE = 2\n")
+        self.write(
+            "build_adapter.py",
+            """
+            def create_model(config, assets):
+                def model():
+                    from customer_model.nested.model import VALUE
+                    from customer_model.external import EXTRA
+                    from installed_dependency import OFFSET
+                    return VALUE + EXTRA + OFFSET
+                return model
+        """,
+        )
+        environment = self.root / "environment"
+        (environment / "customer_model").mkdir(parents=True)
+        (environment / "customer_model/external.py").write_text("EXTRA = 3\n")
+        (environment / "installed_dependency.py").write_text("OFFSET = 5\n")
+        config, assets = self.retained()
+        shutil.rmtree(self.project)
+        self.run_python(f"""
+            import sys
+            from model_builder.build import authoring_sources
+            sys.path.append({str(environment)!r})
+            model = authoring_sources.create_model({config!r}, {assets!r})
+            authoring_sources.verify_imports()
+            assert 'customer_model' not in sys.modules, 'validation must preserve lazy imports'
+            assert 'installed_dependency' not in sys.modules
+            assert model() == 10
+            authoring_sources.verify_imports()
+        """)
+
+    def test_verification_rejects_lazy_namespace_import_from_installed_source(self):
+        self.write("customer_model/model.py", "VALUE = 2\n")
+        self.write(
+            "build_adapter.py",
+            """
+            def create_model(config, assets):
+                def model():
+                    from customer_model.model import VALUE
+                    return VALUE
+                return model
+        """,
+        )
+        environment = self.root / "environment"
+        (environment / "customer_model").mkdir(parents=True)
+        (environment / "customer_model/__init__.py").write_text("")
+        (environment / "customer_model/model.py").write_text("VALUE = 99\n")
+        config, assets = self.retained()
+        self.run_python(f"""
+            import sys
+            from model_builder.build import authoring_sources
+            model = authoring_sources.create_model({config!r}, {assets!r})
+            sys.path.append({str(environment)!r})
+            assert model() == 99, 'probe must exercise the installed namespace shadow'
+            try:
+                authoring_sources.verify_imports()
+            except ValueError as exc:
+                assert 'customer_model' in str(exc) and 'conflict' in str(exc).lower()
+            else:
+                raise AssertionError('source verification must reject an installed namespace shadow')
         """)
 
     def test_identical_sources_reuse_imports_across_two_staging_directories(self):
@@ -299,7 +430,7 @@ class AuthoringSourcesTests(unittest.TestCase):
         }
         second_config = {**config, "_model_config": {"width": 5}}
         self.run_python(f"""
-            from pnmir_build.authoring_sources import create_model, create_cases
+            from model_builder.build.authoring_sources import create_model, create_cases
             first = create_model({config!r}, {assets!r})
             second = create_model({second_config!r}, {second_assets!r})
             assert type(first) is type(second)
@@ -316,7 +447,7 @@ class AuthoringSourcesTests(unittest.TestCase):
         model_asset = assets[config["_source_files"]["model.py"]]
         self.run_python(f"""
             from pathlib import Path
-            from pnmir_build.authoring_sources import create_model
+            from model_builder.build.authoring_sources import create_model
             assert create_model({config!r}, {assets!r}) == 1
             Path({model_asset!r}).write_text('VALUE = 2\\n')
             try:
@@ -336,7 +467,7 @@ class AuthoringSourcesTests(unittest.TestCase):
         )
         config, assets = self.retained()
         self.run_python(f"""
-            from pnmir_build.authoring_sources import create_model
+            from model_builder.build.authoring_sources import create_model
             try:
                 create_model({config!r}, {assets!r})
             except ValueError as exc:
@@ -373,7 +504,7 @@ class AuthoringSourcesTests(unittest.TestCase):
         lazy_asset = second_assets[second_files["lazy_model.py"]]
         Path(lazy_asset).write_text("VALUE = 2\n")
         self.run_python(f"""
-            from pnmir_build.authoring_sources import create_model
+            from model_builder.build.authoring_sources import create_model
             first = create_model({config!r}, {assets!r})
             try:
                 create_model({second_config!r}, {second_assets!r})
@@ -417,7 +548,7 @@ class AuthoringSourcesTests(unittest.TestCase):
                     source_asset = assets[config["_source_files"][target]]
                     self.run_python(f"""
                         from pathlib import Path
-                        from pnmir_build import authoring_sources
+                        from model_builder.build import authoring_sources
                         before = Path({source_asset!r}).read_bytes()
                         try:
                             authoring_sources.{callback}({config!r}, {assets!r})
@@ -444,7 +575,7 @@ class AuthoringSourcesTests(unittest.TestCase):
         config, assets = self.retained()
         self.run_python(f"""
             from pathlib import Path
-            from pnmir_build import authoring_sources
+            from model_builder.build import authoring_sources
             model_source = authoring_sources.create_model({config!r}, {assets!r})
             model_source.write_text('VALUE = 2\\n')
             try:
@@ -476,7 +607,7 @@ class AuthoringSourcesTests(unittest.TestCase):
         ):
             with self.subTest(mutation=mutation):
                 self.run_python(f"""
-                    from pnmir_build import authoring_sources
+                    from model_builder.build import authoring_sources
                     directory = authoring_sources.create_model({config!r}, {assets!r})
                     authoring_sources.verify_imports()
                     {mutation}

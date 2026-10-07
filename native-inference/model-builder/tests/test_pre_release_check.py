@@ -4,15 +4,16 @@ import json
 import unittest
 from unittest import mock
 
-import test_worker as worker_tests
-from pnmir_build import worker
+import worker_test_support as worker_tests
+from model_builder.build import worker
 
 
 class PreReleaseCheckTest(unittest.TestCase):
     def setUp(self):
-        self.fixture = worker_tests.WorkerTest()
-        self.fixture.setUp()
-        self.addCleanup(self.fixture.doCleanups)
+        self.fixture = worker_tests.WorkerFixture()
+        self.fixture.addCleanup = self.addCleanup
+        if hasattr(self.fixture, "setUp"):
+            self.fixture.setUp()
 
     def build(self, check):
         f = self.fixture

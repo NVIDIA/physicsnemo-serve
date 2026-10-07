@@ -13,11 +13,15 @@ import unittest
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from pnmir_build import cli, scaffold
+from model_builder.build import cli, scaffold
+from authoring_test_support import linux_container
 
 
 class CheckpointImportCommandTests(unittest.TestCase):
     def setUp(self):
+        container = linux_container()
+        container.__enter__()
+        self.addCleanup(container.__exit__, None, None, None)
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name).resolve()
@@ -25,6 +29,7 @@ class CheckpointImportCommandTests(unittest.TestCase):
         scaffold.initialize(self.project)
         self.project_file = self.project / "model-build.json"
         document = json.loads(self.project_file.read_text())
+        document["executor"] = "container"
         self.image = "sha256:" + "a" * 64
         document["builder_image"] = self.image
         self.project_file.write_text(json.dumps(document))
@@ -130,6 +135,64 @@ class CheckpointImportCommandTests(unittest.TestCase):
         self.assertEqual(code, 0, result)
         self.assertEqual(run.call_args.args[0][0], sys.executable)
         self.assertNotIn("--runtime", run.call_args.args[0])
+
+    def test_project_toolchain_image_and_explicit_overrides(self):
+        lock_image = "sha256:" + "b" * 64
+        cli_image = "sha256:" + "c" * 64
+        lock = self.project / "environment" / "toolchain.json"
+        lock.parent.mkdir()
+        lock.write_text(json.dumps({"format_version": 1, "builder_image": lock_image}))
+        for name, project_image, options, expected in (
+            ("lock", None, (), lock_image),
+            ("profile-lock", None, (), lock_image),
+            ("project", self.image, (), self.image),
+            ("cli", self.image, ("--builder-image", cli_image), cli_image),
+        ):
+            with self.subTest(selection=name):
+                document = json.loads(self.original_project)
+                document.update(
+                    builder_image=project_image,
+                    toolchain_lock="environment/toolchain.json",
+                )
+                if name == "profile-lock":
+                    document.update(
+                        toolchain_lock="unselected.json",
+                        default_profile="selected",
+                        profiles={
+                            "selected": {"toolchain_lock": "environment/toolchain.json"}
+                        },
+                    )
+                self.project_file.write_text(json.dumps(document))
+                original = self.project_file.read_bytes()
+                self.output = self.project / "imports" / name
+                code, result, _, run = self.invoke(*options)
+                self.assertEqual(code, 0, result)
+                self.assertEqual(result["status"], "imported")
+                self.assertIn(expected, run.call_args.args[0])
+                self.assertEqual(self.project_file.read_bytes(), original)
+                self.assertFalse((self.project / "model-build.lock.json").exists())
+
+    def test_invalid_selected_toolchain_is_rejected_before_execution(self):
+        lock = self.project / "toolchain.json"
+        document = json.loads(self.original_project)
+        document.update(builder_image=None, toolchain_lock=lock.name)
+        self.project_file.write_text(json.dumps(document))
+        for contents, message in (
+            (None, "Cannot read toolchain lock"),
+            ("{", "Cannot read toolchain lock"),
+            (
+                json.dumps({"format_version": 1, "builder_image": "builder:latest"}),
+                "mutable tags are not accepted",
+            ),
+        ):
+            with self.subTest(contents=contents):
+                if contents is not None:
+                    lock.write_text(contents)
+                code, result, _, run = self.invoke()
+                self.assertEqual(code, 2, result)
+                self.assertIn(message, result["diagnostics"][0]["message"])
+                run.assert_not_called()
+                self.assertFalse(self.output.exists())
 
     def test_existing_output_preserves_customer_files_without_execution(self):
         self.output.mkdir(parents=True)

@@ -6,7 +6,7 @@ from pathlib import Path
 
 import torch
 
-from pnmir_export import export_package
+from model_builder.export import export_package
 
 
 class WeightedAffine(torch.nn.Module):

@@ -21,7 +21,7 @@ except ImportError:
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 try:
-    from pnmir_build import checkpoint_import_worker as worker
+    from model_builder.build import checkpoint_import_worker as worker
 except ImportError:
     worker = None
 

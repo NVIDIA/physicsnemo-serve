@@ -5,14 +5,14 @@ export, compilation, packaging and C++ inference. It is a deterministic pipeline
 fixture, not a CFD surrogate or a scientific qualification suite.
 
 The model is version `0.1.0`. Its default backend is `aoti`; `tensorrt` is also
-supported with a compatible GPU builder. See [builder setup](../../README.md)
+supported with a compatible GPU builder. See [builder setup](../../../docs/reference.md#environment-setup)
 for the image and native runtime prerequisites.
 
 From the repository root, with a compatible local producer environment and
 installed native runtime:
 
 ```bash
-./native-inference/physicsnemo-model-builder build affine \
+./native-inference/pnms-model-builder build affine \
   --backend aoti --backend tensorrt \
   --executor local --device cuda \
   --runtime /path/to/sdk/bin/physicsnemo-infer \
@@ -22,7 +22,7 @@ installed native runtime:
 Choose a fresh output directory. TensorRT requires CUDA; AOTI can also target
 CPU when the supplied runtime and producer support it. Container execution is
 the default when `--executor` is omitted; select an immutable builder image.
-To store these choices in a file, use a [model project](../../../docs/model-build-projects.md)
+To store these choices in a file, use a [model project](../../../docs/reference.md#project-settings)
 with `"model": "affine"`.
 
 ## Recipe contract
@@ -45,7 +45,7 @@ output named `output`. Its input is statically shaped `[4]` with dtype float32.
 This model has no learned parameters or checkpoint; its constants live in the
 adapter, so an empty model-state digest is expected. It uses the legacy
 shared-shape tensor shorthand. Custom recipes can declare independent input and
-output shapes through the [explicit tensor contract](../../../docs/model-inputs.md#tensors-with-different-shapes).
+output shapes through the [explicit tensor contract](../../../docs/reference.md#explicit-recipes).
 Model outputs must match the recipe's ordered output names.
 
 ## Verification and packages
@@ -57,9 +57,10 @@ For each selected backend, the worker compiles using the first case and runs
 all three cases through the C++ runtime. It validates actual tensor metadata,
 completion, device/backend and finite numerical outputs against independent
 Python eager references. A requested backend failure fails the whole build and
-preserves available diagnostics. See the [package and evidence contract](../../../docs/packages.md)
-for numerical gates, output locations, compiled/graph distinctions and deployment
-compatibility.
+preserves available diagnostics. See [verification and failures](../../../docs/reference.md#verification-and-failures)
+for numerical gates, [build output](../../../docs/reference.md#build-output) for
+artifact locations and compiled/graph distinctions, and
+[package compatibility](../../../docs/reference.md#package-compatibility).
 
 ## Author a model with weights
 
@@ -72,5 +73,5 @@ The declared Python adapter remains a single retained file. Imports from
 libraries installed in the producer environment are supported; arbitrary
 sibling Python helper modules or undeclared assets are not captured automatically.
 The adapter is not imported as a package. Follow the
-[custom input contract](../../../docs/model-inputs.md) for callbacks, file
+[explicit recipe contract](../../../docs/reference.md#explicit-recipes) for callbacks, file
 selection, checkpoint formats and replay.

@@ -6,44 +6,27 @@ import json
 from pathlib import Path
 import subprocess
 import sys
-import tempfile
 import unittest
 
 
-LAUNCHER = Path(__file__).resolve().parents[2] / "physicsnemo-model-builder"
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+from authoring_test_support import AuthoringConfigFixture
+
+LAUNCHER = Path(__file__).resolve().parents[2] / "pnms-model-builder"
 
 
-class AuthoringConfigurationTests(unittest.TestCase):
-    def setUp(self):
-        self.temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(self.temporary.cleanup)
-        self.root = Path(self.temporary.name).resolve()
-        self.path = self.root / "model-build.json"
-
-    def write(self, **changes):
-        document = {
-            "format_version": 2,
-            "name": "my-model",
-            "version": "0.1.0",
-            "adapter": "build_adapter.py",
-            "source": [],
-            "checkpoint": None,
-            "config": {},
-            "assets": {},
-            "backends": ["aoti"],
-            "executor": "container",
-            "builder_image": None,
-            "device": "cuda",
-            **changes,
-        }
-        self.path.write_text(json.dumps(document))
-        return document
-
+class AuthoringConfigurationTests(AuthoringConfigFixture, unittest.TestCase):
     def test_cli_reports_actionable_incomplete_authoring_project(self):
         self.write()
         result = subprocess.run(
-            [sys.executable, str(LAUNCHER), "doctor", str(self.root), "--json"],
+            [
+                sys.executable,
+                str(LAUNCHER),
+                "check",
+                "--config-only",
+                str(self.root),
+                "--json",
+            ],
             capture_output=True,
             text=True,
         )
@@ -53,7 +36,7 @@ class AuthoringConfigurationTests(unittest.TestCase):
         self.assertNotIn("format_version must be integer 1", messages)
 
     def test_incomplete_configuration_is_loadable_without_creating_files(self):
-        from pnmir_build.authoring_config import load, missing
+        from model_builder.build.authoring_config import load, missing
 
         document = self.write()
         before = list(self.root.iterdir())
@@ -77,7 +60,7 @@ class AuthoringConfigurationTests(unittest.TestCase):
     def test_profile_and_cli_override_paths_without_mutating_arguments_or_document(
         self,
     ):
-        from pnmir_build.authoring_config import load
+        from model_builder.build.authoring_config import load
 
         document = self.write(
             checkpoint="weights.pt",
@@ -115,7 +98,7 @@ class AuthoringConfigurationTests(unittest.TestCase):
         self.assertEqual(vars(args), original)
 
     def test_invalid_schema_source_and_profiles_are_rejected(self):
-        from pnmir_build.authoring_config import load
+        from model_builder.build.authoring_config import load
 
         for changes, message in (
             ({"checkpoint": 3}, "checkpoint"),
@@ -140,7 +123,7 @@ class AuthoringConfigurationTests(unittest.TestCase):
                     load(self.path)
 
     def test_duplicate_and_nonfinite_json_are_rejected(self):
-        from pnmir_build.authoring_config import load
+        from model_builder.build.authoring_config import load
 
         for source, message in (
             ('{"name":"a","name":"b"}', "duplicate"),
@@ -152,8 +135,10 @@ class AuthoringConfigurationTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, message):
                     load(self.path)
 
-    def test_aoti_profile_selects_existing_policy_without_changing_omitted_default(self):
-        from pnmir_build.authoring_config import load
+    def test_aoti_profile_selects_existing_policy_without_changing_omitted_default(
+        self,
+    ):
+        from model_builder.build.authoring_config import load
 
         self.write()
         self.assertNotIn("aoti_profile", load(self.path)["effective"])
@@ -163,7 +148,7 @@ class AuthoringConfigurationTests(unittest.TestCase):
                 self.assertEqual(load(self.path)["effective"]["aoti_profile"], profile)
 
     def test_invalid_aoti_profile_is_rejected_before_execution(self):
-        from pnmir_build.authoring_config import load
+        from model_builder.build.authoring_config import load
 
         for profile in ("unknown", "", None, [], {}, 1):
             with self.subTest(profile=profile):
@@ -172,7 +157,7 @@ class AuthoringConfigurationTests(unittest.TestCase):
                     load(self.path)
 
     def test_explicit_root_source_capture_is_allowed_but_not_an_adapter_directory(self):
-        from pnmir_build.authoring_config import load
+        from model_builder.build.authoring_config import load
 
         self.write(source=["."])
         try:
@@ -185,7 +170,7 @@ class AuthoringConfigurationTests(unittest.TestCase):
             load(self.path)
 
     def test_source_symlink_parent_is_rejected(self):
-        from pnmir_build.authoring_config import load
+        from model_builder.build.authoring_config import load
 
         (self.root / "linked").symlink_to(self.root / "somewhere")
         self.write(source=["linked/model.py"])
@@ -195,7 +180,7 @@ class AuthoringConfigurationTests(unittest.TestCase):
     def test_local_check_does_not_require_runtime_and_toolchain_can_supply_environment(
         self,
     ):
-        from pnmir_build.authoring_config import load, missing
+        from model_builder.build.authoring_config import load, missing
 
         self.write(executor="local")
         effective = load(self.path)["effective"]
@@ -214,7 +199,7 @@ class AuthoringConfigurationTests(unittest.TestCase):
         self.assertNotIn("MISSING_BUILDER_IMAGE", codes)
 
     def test_missing_checks_config_json_and_adapter_without_importing_them(self):
-        from pnmir_build.authoring_config import load, missing
+        from model_builder.build.authoring_config import load, missing
 
         (self.root / "weights.pt").write_bytes(b"weights are not loaded")
         (self.root / "config.json").write_text("[]")

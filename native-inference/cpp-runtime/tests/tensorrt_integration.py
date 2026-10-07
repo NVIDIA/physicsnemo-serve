@@ -9,35 +9,17 @@ from collections.abc import Callable
 from pathlib import Path
 
 import onnx
+import tensorrt as trt
 import torch
 from onnx import TensorProto, helper
 
 
-from pnmir_export import build_tensorrt_package
+from fixtures import write_affine_onnx
+from model_builder.export import build_tensorrt_package
 
 
 def _write_affine_onnx(path: Path) -> None:
-    input_info = helper.make_tensor_value_info("input", TensorProto.FLOAT, [3])
-    output_info = helper.make_tensor_value_info("output", TensorProto.FLOAT, [3])
-    scale = helper.make_tensor("scale", TensorProto.FLOAT, [1], [2.0])
-    bias = helper.make_tensor("bias", TensorProto.FLOAT, [1], [1.0])
-    graph = helper.make_graph(
-        [
-            helper.make_node("Mul", ["input", "scale"], ["scaled"]),
-            helper.make_node("Add", ["scaled", "bias"], ["output"]),
-        ],
-        "pnm-ir-tensorrt-affine",
-        [input_info],
-        [output_info],
-        [scale, bias],
-    )
-    model = helper.make_model(
-        graph,
-        producer_name="pnm-ir-test",
-        opset_imports=[helper.make_opsetid("", 18)],
-    )
-    onnx.checker.check_model(model)
-    onnx.save(model, path)
+    write_affine_onnx(path, graph_name="pnm-ir-tensorrt-affine")
 
 
 def _write_gather_onnx(path: Path) -> None:
@@ -102,6 +84,77 @@ def _assert_failure(pnmir: Path, package: Path, expected_error: str) -> None:
     result = _run(pnmir, package, "--values", "1,2,3")
     assert result.returncode != 0, result.stdout
     assert expected_error in result.stderr, result.stderr
+
+
+def _check_binding_format(
+    pnmir: Path, directory: Path, packed_kind: str | None
+) -> None:
+    package = directory / f"tensorrt-format-{packed_kind or 'linear'}.pnmir"
+    package.mkdir(parents=True, exist_ok=True)
+    logger = trt.Logger(trt.Logger.WARNING)
+    builder = trt.Builder(logger)
+    network = builder.create_network(
+        1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED)
+    )
+    config = builder.create_builder_config()
+    shape = [1, 4, 2, 2]
+    input_tensor = network.add_input("input", trt.float16, shape)
+    output_tensor = network.add_identity(input_tensor).get_output(0)
+    output_tensor.name = "output"
+    network.mark_output(output_tensor)
+    formats = {}
+    for kind, tensor in (("input", input_tensor), ("output", output_tensor)):
+        formats[kind] = (
+            trt.TensorFormat.CHW4 if kind == packed_kind else trt.TensorFormat.LINEAR
+        )
+        tensor.allowed_formats = 1 << int(formats[kind])
+    serialized = builder.build_serialized_network(network, config)
+    assert serialized is not None, "TensorRT format fixture build failed"
+    runtime = trt.Runtime(logger)
+    engine = runtime.deserialize_cuda_engine(serialized)
+    assert engine is not None, "TensorRT format fixture deserialization failed"
+    for kind, expected_format in formats.items():
+        assert engine.get_tensor_format(kind) == expected_format
+        assert engine.get_tensor_dtype(kind) == trt.float16
+    (package / "model.plan").write_bytes(bytes(serialized))
+    manifest = {
+        "format_version": 1,
+        "model": {"name": "tensorrt-format", "version": "0.1.0"},
+        "inputs": [{"name": "input", "dtype": "float16", "shape": shape}],
+        "outputs": [{"name": "output", "dtype": "float16", "shape": shape}],
+        "artifacts": [
+            {
+                "backend": "tensorrt",
+                "target": "cuda",
+                "precision": "fp16",
+                "path": "model.plan",
+            }
+        ],
+    }
+    (package / "model.json").write_text(json.dumps(manifest), encoding="utf-8")
+    values = struct.pack("=16e", *range(16))
+    input_file = package / "input.f16"
+    output_file = package / "output.f16"
+    input_file.write_bytes(values)
+    output_file.unlink(missing_ok=True)
+    result = _run(
+        pnmir,
+        package,
+        "--input-file",
+        f"input={input_file}",
+        "--output-file",
+        str(output_file),
+    )
+    if packed_kind is None:
+        _assert_success(result, "TensorRT LINEAR float16 identity inference")
+        assert output_file.read_bytes() == values
+    else:
+        assert result.returncode != 0, (
+            f"TensorRT accepted CHW4 {packed_kind}: {result.stdout}"
+        )
+        expected_error = f"TensorRT {packed_kind} must use LINEAR format: {packed_kind}"
+        assert expected_error in result.stderr, result.stderr
+        assert not output_file.exists(), "rejected binding must not write output"
 
 
 def main() -> int:
@@ -252,6 +305,9 @@ def main() -> int:
         corrupt_package,
         "TensorRT could not deserialize engine",
     )
+
+    for packed_kind in (None, "input", "output"):
+        _check_binding_format(args.pnmir, args.output.parent, packed_kind)
 
     print(result.stdout.strip())
     print(file_result.stdout.strip())

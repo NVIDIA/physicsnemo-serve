@@ -151,6 +151,11 @@ jobs:
           set -euo pipefail
           python3 -S -m unittest discover -s native-inference/model-builder/tests -p 'test_*.py' -v \
             2>&1 | tee "$RUNNER_TEMP/inference-cpu-evidence/builder-tests.log"
+      - name: Test workflow output writers without CUDA
+        run: |
+          set -euo pipefail
+          python3 -S -m unittest discover -s native-inference/workflows/transolver/tests -p 'test_cli_output_paths.py' -v \
+            2>&1 | tee "$RUNNER_TEMP/inference-cpu-evidence/workflow-output-tests.log"
       - name: Prepare isolated exact graph test environment
         run: |
           python3 -m venv "$RUNNER_TEMP/inference-graph-venv"
@@ -163,7 +168,6 @@ jobs:
           "$RUNNER_TEMP/inference-graph-venv/bin/python" -m pytest \
             native-inference/model-builder/tests/test_tensorrt_exact_graphs.py \
             native-inference/model-builder/tests/test_tensorrt_deslice_graphs.py \
-            native-inference/model-builder/tests/test_tensorrt_geotransolver_deslice_graphs.py \
             native-inference/model-builder/tests/test_tensorrt_domino_graphs.py \
             native-inference/model-builder/tests/test_tensorrt_weighted_blend.py \
             -v --junitxml="$RUNNER_TEMP/inference-cpu-evidence/exact-graph-tests.xml" \
@@ -252,7 +256,7 @@ jobs:
         run: |
           python -S -m unittest test_cli test_project_targets test_tensor_contracts `
             test_windows_frontend test_setup_env_cli test_init_scaffold test_cuda_environment `
-            test_json_output test_windows_paths -v 2>&1 |
+            test_json_output -v 2>&1 |
             Tee-Object "$env:RUNNER_TEMP/inference-windows-evidence/builder-tests.log"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Build and test the core C++ SDK with MSVC
@@ -308,6 +312,11 @@ jobs:
           $torchLib = python -c 'from pathlib import Path; import torch; print(Path(torch.__file__).resolve().parent / "lib")'
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $torchLib | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+      - name: Test native inference examples on CPU
+        run: |
+          python -m unittest discover -s native-inference/tests/examples -p 'test_*.py' -v 2>&1 |
+            Tee-Object "$env:RUNNER_TEMP/inference-windows-aoti-evidence/example-tests.log"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Build and qualify CPU AOTI with MSVC
         run: |
           cmake -S native-inference/cpp-runtime -B "$env:RUNNER_TEMP/inference-windows-aoti-build" `
@@ -326,7 +335,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Build and verify an affine package through the public builder
         run: |
-          python native-inference/physicsnemo-model-builder build affine `
+          python native-inference/pnms-model-builder build affine `
             --executor local --device cpu --backend aoti `
             --runtime "$env:RUNNER_TEMP/inference-windows-aoti-build/physicsnemo-infer.exe" `
             --output "$env:RUNNER_TEMP/inference-windows-affine" --json 2>&1 |

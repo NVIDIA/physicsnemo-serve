@@ -25,7 +25,7 @@ void validate_tensor(const TensorView& tensor, const TensorSpec& spec) {
       throw std::invalid_argument("shape mismatch for tensor: " + spec.name);
     }
   }
-  const std::size_t expected = element_count(tensor.shape) * dtype_size(tensor.dtype);
+  const std::size_t expected = tensor_byte_size(tensor.shape, tensor.dtype);
   if (tensor.byte_size != expected || (expected != 0 && tensor.data == nullptr)) {
     throw std::invalid_argument("storage mismatch for tensor: " + spec.name);
   }

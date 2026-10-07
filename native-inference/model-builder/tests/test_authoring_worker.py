@@ -17,8 +17,8 @@ except ImportError:
     torch = None
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from pnmir_build import worker
-from pnmir_build.inputs import resolve_inputs
+from model_builder.build import worker
+from model_builder.build.inputs import resolve_inputs
 
 
 ADAPTER = """import torch

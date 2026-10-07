@@ -9,7 +9,7 @@ import tempfile
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from pnmir_build.projects import apply_project
+from model_builder.build.projects import apply_project
 
 
 class ProjectConfigurationTests(unittest.TestCase):

@@ -9,7 +9,8 @@ import unittest
 from unittest import mock
 
 RUNNER = (
-    Path(__file__).resolve().parents[1] / "src/pnmir_export/_isolated_aoti_runner.py"
+    Path(__file__).resolve().parents[1]
+    / "src/model_builder/export/_isolated_aoti_runner.py"
 )
 
 

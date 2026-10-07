@@ -17,8 +17,8 @@ except ImportError:
     torch = None
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from pnmir_build import worker
-from pnmir_build.inputs import resolve_inputs
+from model_builder.build import worker
+from model_builder.build.inputs import resolve_inputs
 
 
 ADAPTER = """import torch
@@ -149,7 +149,7 @@ class TensorWorkerTests(unittest.TestCase):
                 self.assertFalse((output / "model/model-release.json").exists())
 
     def test_export_uses_declared_input_and_output_names(self):
-        from pnmir_export import exporter
+        from model_builder.export import exporter
 
         prepared = {
             "model": torch.nn.Identity(),

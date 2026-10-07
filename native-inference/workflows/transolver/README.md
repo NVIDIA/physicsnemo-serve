@@ -25,7 +25,10 @@ Use Linux with CUDA, a matching CUDA-enabled Torch development installation,
 VTK development libraries, CMake, a C++20 compiler, and Warp **1.15.0**. The
 exporter, SDK and workflow must use the same Torch/CUDA installation and ABI.
 The real-checkpoint example also needs PhysicsNeMo 2.1.1 and Model Builder's
-dependencies in that environment. See [builder setup](../../model-builder/README.md).
+dependencies in that environment. See [builder setup](../../docs/reference.md#environment-setup).
+The exact TensorRT attention plugin requires matching PyTorch source, CUTLASS
+and generated headers. The paths below use the pinned NGC environment; see
+[exact SDK dependencies](../../cpp-runtime/README.md) for other installations.
 Keep generated files outside the checkout. Run from the repository root:
 
 ```bash
@@ -36,6 +39,10 @@ WARP_ROOT="$(python -c 'import pathlib, warp; print(pathlib.Path(warp.__file__).
 
 cmake -S native-inference/cpp-runtime -B "$DEMO_ROOT/sdk-build" \
   -DPNMIR_ENABLE_AOTI=ON -DPNMIR_BUILD_TESTS=OFF \
+  -DPNMIR_ENABLE_TENSORRT=ON -DPNMIR_ENABLE_TENSORRT_EXACT=ON \
+  -DPNMIR_PYTORCH_SOURCE_ROOT=/opt/pytorch/pytorch \
+  -DPNMIR_CUTLASS_INCLUDE_DIR=/opt/pytorch/pytorch/third_party/cutlass/include \
+  -DPNMIR_TORCH_INCLUDE_DIR="$TORCH_ROOT/include" \
   -DPython3_EXECUTABLE="$(command -v python)" \
   -DCMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc \
   -DCMAKE_CUDA_ARCHITECTURES=90 -DCMAKE_BUILD_TYPE=Release \
@@ -44,6 +51,7 @@ cmake --build "$DEMO_ROOT/sdk-build" --parallel 4
 cmake --install "$DEMO_ROOT/sdk-build"
 
 cmake -S native-inference/workflows/transolver -B "$DEMO_ROOT/workflow-build" \
+  -DPNMIR_ENABLE_AOTI=ON -DPNMIR_ENABLE_TENSORRT=ON \
   -DCMAKE_PREFIX_PATH="$SDK_ROOT;$TORCH_ROOT" \
   -DPNMIR_WARP_ROOT="$WARP_ROOT" \
   -DCMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc \
@@ -56,7 +64,8 @@ ctest --test-dir "$DEMO_ROOT/workflow-build" --output-on-failure
 
 `90` targets the H100; select the architecture of your build/deployment GPU.
 The example is a standalone CMake consumer of
-`PhysicsNeMoInference::runtime` and `PhysicsNeMoInference::aoti`.
+`PhysicsNeMoInference::runtime`, `PhysicsNeMoInference::aoti` and
+`PhysicsNeMoInference::tensorrt`.
 
 ## Import and build a surface checkpoint
 
@@ -74,19 +83,26 @@ CASE_ROOT=/data/drivaerml/run_1
 DEMO_PROJECT="$DEMO_ROOT/model-project"
 
 cp -R native-inference/examples/transolver-surface "$DEMO_PROJECT"
-./native-inference/physicsnemo-model-builder import-checkpoint "$CHECKPOINT" \
+mkdir -p "$DEMO_PROJECT/assets/tensorrt"
+for plugin in linear gemm token_sum slice_bmm layer_norm softmax attention gelu deslice_bmm; do
+  cp "$SDK_ROOT/lib/libpnmir_tensorrt_exact_${plugin}_plugin.so" "$DEMO_PROJECT/assets/tensorrt/"
+done
+./native-inference/pnms-model-builder import-checkpoint "$CHECKPOINT" \
   --project "$DEMO_PROJECT" --output "$DEMO_PROJECT/weights" --json
-./native-inference/physicsnemo-model-builder check "$DEMO_PROJECT" --json
-./native-inference/physicsnemo-model-builder build "$DEMO_PROJECT" \
+./native-inference/pnms-model-builder check "$DEMO_PROJECT" --json
+./native-inference/pnms-model-builder build "$DEMO_PROJECT" \
   --runtime "$SDK_ROOT/bin/physicsnemo-infer" \
   --output "$DEMO_ROOT/model-build" --json
 ```
 
 The template exports the complete learned surface model with static inputs
 `fx [1,75,2]` and `embedding [1,75,6]`, and output `[1,75,4]`. It uses the
-`aten-boundary-exact-v2` AOTI profile and three deterministic parity cases.
-The model package goes under `model-build/model/backends/aoti/`; the original
-checkpoint is not needed by the C++ executable. Keep `global_stats.json` with
+`aten-boundary-exact-v2` AOTI profile, `layout-order-exact-v2` TensorRT profile
+and three deterministic parity cases. TensorRT publication requires byte-identical
+native/Python results. The nine copied plugin libraries are declared, hashed
+build dependencies. The packages go under `model-build/model/backends/aoti/`
+and `model-build/model/backends/tensorrt/`; the original checkpoint is not
+needed by the C++ executable. Keep `global_stats.json` with
 your deployment inputs because physical-unit decoding needs it.
 
 ## Run the complete workflow
@@ -115,64 +131,9 @@ preprocessing or writing outputs.
 
 Use matching normalization statistics and flow conditions for your checkpoint.
 Model/native numerical parity does not establish scientific CFD accuracy.
-
-## Show the result in a GUI
-
-The customer demo can finish with this native workflow and an interactive
-browser view. From the Mac checkout:
-
-```bash
-# Full walkthrough: 23 existing steps, then native workflow and browser results.
-bash reports/customer-demo-20260916/run-demo.sh --split --e2e
-
-# Rehearse just the final native run and GUI.
-bash reports/customer-demo-20260916/run-e2e-demo.sh
-```
-
-The launcher stages fresh scripts on the prepared H100, runs all 65,536 cells
-of a coarsened full-car surface in 2,048-cell batches, exports the GUI, retrieves
-the results, and opens the HTML locally. The demonstration mesh is prepared
-from the complete `run_1` vehicle STL before the live run; it is separate from
-the original full-resolution CFD boundary mesh. `--point-limit 0` selects every
-cell of this coarsened VTP. The static model package and viewer dependencies
-are also prepared in advance. In split mode, press Enter to close the panes after step 25;
-the browser then opens. The finale uses a separately qualified 2,048-point build of the raw-workflow
-model above. The earlier tensor-only demo has a different input contract.
-
-The viewer shows pressure or wall-shear stress across the full car: every
-displayed surface triangle has its own native prediction, with no field
-interpolation. It includes a neutral original-geometry overview, per-cell
-values, a field chart, timings and CSV download. Its coverage label identifies
-the coarsened demonstration mesh, and run details record the mesh processing
-method and hash. This is numerical agreement with the Python model on a
-coarsened mesh, not full-resolution CFD validation. The viewer requires no web
-server or network access after export. Existing prefix results keep their
-patch view and sample-location marker; cells outside their selected prefix
-have no displayed predictions.
-
-To export another existing surface run on a machine with NumPy, Python VTK,
-and Plotly 6.3.1:
-
-```bash
-python native-inference/workflows/transolver/demo/export_viewer.py \
-  --metadata "$DEMO_ROOT/results/metadata.json" \
-  --output "$DEMO_ROOT/results/result.html"
-```
-
-For a prepared demonstration mesh, add
-`--mesh-provenance "$DEMO_ROOT/mesh-provenance.json"`. This optional JSON records
-`label`, `method`, `source_cell_count`, `output_cell_count` and `mesh_sha256`.
-The exporter verifies the VTP hash and its cell count before displaying the
-provenance. The full-car launcher supplies this file automatically.
-
-Both standardized and physical output files must be present. To show a
-reference-comparison badge, also supply `--reference-report` pointing to a
-compatible saved eager-Python parity report, and produce input dumps with
-`--dump-input-dir "$DEMO_ROOT/results/inputs"` when running the CLI. The
-exporter compares all four current tensor hashes and the case settings against
-that report; a mismatch fails export. Without a report the GUI says
-"Not compared". Python is used only for result presentation after the C++
-workflow completes.
+Run the same command with `--backend tensorrt` and
+`--package "$DEMO_ROOT/model-build/model/backends/tensorrt"` to execute the
+TensorRT package. Use separate result paths to preserve both sets of outputs.
 
 ## Other shapes, volume, and backends
 
@@ -192,35 +153,38 @@ velocity-x/y/z, pressure, turbulent viscosity. The bundled builder template
 is for the surface checkpoint. The native volume path is retained for
 existing compatible volume packages.
 
-For TensorRT packages, build the SDK with the needed TensorRT plugins and
-configure this example with `-DPNMIR_ENABLE_TENSORRT=ON`, then pass
-`--backend tensorrt`. Both full and tail shapes must have matching packages.
-The example template and the validation described here use AOTI. TensorRT
-routing does not imply that every historical package's operators are present
-in the current SDK.
+The template builds both AOTI and TensorRT packages. Select one backend per
+workflow invocation with `--backend aoti` or `--backend tensorrt`, and pass
+the corresponding backend package paths for both full and tail shapes.
+TensorRT uses the exact-enabled SDK built above; historical packages may
+require other operators not present in that SDK.
 
 The retained reader accepts the DrivAerML little-endian, uncompressed,
-inline-base64 Float32 VTU point format. A volume `--point-limit N` bounds
-coordinate decoding/allocation; the surface VTP reader still loads the mesh
-before selecting cells. `--point-limit 0` selects all locations and can
+inline-base64 Float32 VTU point format with exactly one `Piece`. Multipiece
+files are rejected before inference. The reader scans the grid's XML in
+fixed-size blocks to validate this restriction, including when a point limit
+is set. A volume `--point-limit N` bounds coordinate decoding/allocation;
+the surface VTP reader still loads the mesh before selecting cells.
+`--point-limit 0` selects all locations and can
 require substantial memory. Every inference block must contain at least two
 points. Keep batch size and permutation seed fixed when comparing results:
 Transolver attention depends on which points share a batch. Raw-geometry Python
 reference checks must also use the same VTK version as the C++ build. The large
-demo was qualified with VTK 9.1.0 and Python PyVista 0.43.10; VTK 9.6.2 changes
+surface cases were qualified with VTK 9.1.0 and Python PyVista 0.43.10; VTK 9.6.2 changes
 some polygon centers and normals on this case.
 
 ## Validation
 
 The C++ tests cover normalization channel order, physical decoding, model
-contracts, and bounded UInt32/UInt64 VTU decoding. The CLI tests check `--help`
+contracts, bounded UInt32/UInt64 VTU decoding, and multipiece rejection.
+The CLI tests check `--help`
 and output-path collisions without loading a model. The model-project tests live in
-[`tests/examples/transolver-surface`](../../tests/examples/transolver-surface).
+[`test_transolver.py`](../../tests/examples/test_transolver.py).
 Raw-workflow qualification compares prepared features and both output spaces
 against the preserved implementation on real surface and volume inputs.
 
-After building the surface package above, run the native CLI-to-viewer path
-regression in the same CUDA environment with Python VTK and NumPy installed:
+After building the surface package above, run the native output-path
+regression in the same CUDA environment:
 
 ```bash
 python native-inference/workflows/transolver/tests/test_cli_output_paths.py \
@@ -231,7 +195,7 @@ python native-inference/workflows/transolver/tests/test_cli_output_paths.py \
 ```
 
 This checks relative output paths with default and custom metadata locations,
-viewer consumption of both output files, and omitted optional outputs. Use
+output shapes and file sizes, and omitted optional outputs. Use
 `--point-count` for a package built with a different static point count.
 
 On 2026-09-17, the current SDK/example passed on H100 80GB, driver 570.195.03,
@@ -245,7 +209,7 @@ Warp 1.15.0:
 | Migrated vs original CLI, real surface and volume, 75 locations in 32/32/11 blocks | All eight tensor comparisons byte-identical |
 | Larger 2,048-point package | Three model cases passed native parity |
 | Real `run_1`, 65,536 and 131,072 cells in 2,048-cell blocks | Both cases: inputs, standardized and physical outputs byte-identical to eager Python with matching VTK 9.1.0 |
-| Complete `run_1` car coarsened from STL to 65,536 triangles; all cells in 2,048-cell blocks | Prepared inputs, standardized and physical outputs byte-identical to eager Python; interactive GUI ready in 42.5 seconds in the measured finale run |
+| Complete `run_1` car coarsened from STL to 65,536 triangles; all cells in 2,048-cell blocks | Prepared inputs, standardized and physical outputs byte-identical to eager Python |
 | Workflow CTest | 2/2 passed |
 
 These are bounded real-data and coarsened-geometry checks. Original

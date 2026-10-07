@@ -16,7 +16,7 @@ SharedTensor::SharedTensor(std::string name, DType dtype, Device device,
       data_(data),
       byte_size_(byte_size),
       owner_(std::move(owner)) {
-  const std::size_t expected = element_count(shape_) * dtype_size(dtype_);
+  const std::size_t expected = tensor_byte_size(shape_, dtype_);
   if (byte_size_ != expected || (expected != 0 && data_ == nullptr)) {
     throw std::invalid_argument(
         "shared tensor storage does not match shape");

@@ -18,8 +18,8 @@ for name in ('float32', 'float16', 'bfloat16', 'int32', 'int64', 'uint8'):
 sys.modules['torch'] = torch
 sys.modules['onnx'] = None
 sys.modules['tensorrt'] = None
-from pnmir_export.onnx_importer import _onnx_module
-from pnmir_export.tensorrt_builder import _tensorrt_module
+from model_builder.export.onnx_importer import _onnx_module
+from model_builder.export.tensorrt_builder import _tensorrt_module
 for get_module in (_onnx_module, _tensorrt_module):
     try:
         get_module()
@@ -45,7 +45,7 @@ for get_module in (_onnx_module, _tensorrt_module):
         self.assertEqual(len(messages), 2)
         for message, install in zip(
             messages,
-            ("python -m pip install onnx", "physicsnemo-model-builder[tensorrt]"),
+            ("python -m pip install onnx", "pnms-model-builder[tensorrt]"),
             strict=True,
         ):
             with self.subTest(install=install):

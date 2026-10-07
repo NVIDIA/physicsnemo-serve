@@ -82,6 +82,15 @@ std::size_t element_count(const Shape& shape) {
   return count;
 }
 
+std::size_t tensor_byte_size(const Shape& shape, DType dtype) {
+  const auto count = element_count(shape);
+  const auto width = dtype_size(dtype);
+  if (count > std::numeric_limits<std::size_t>::max() / width) {
+    throw std::overflow_error("tensor byte size overflow");
+  }
+  return count * width;
+}
+
 OwnedTensor::OwnedTensor(std::string name, DType dtype, Device device,
                          Shape shape, std::vector<std::byte> storage)
     : name_(std::move(name)),
@@ -89,7 +98,7 @@ OwnedTensor::OwnedTensor(std::string name, DType dtype, Device device,
       device_(device),
       shape_(std::move(shape)),
       storage_(std::move(storage)) {
-  const std::size_t expected = element_count(shape_) * dtype_size(dtype_);
+  const std::size_t expected = tensor_byte_size(shape_, dtype_);
   if (storage_.size() != expected) {
     throw std::invalid_argument("owned tensor storage size does not match shape");
   }

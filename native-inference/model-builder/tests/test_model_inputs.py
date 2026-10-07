@@ -7,7 +7,7 @@ import tempfile
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from pnmir_build.inputs import (
+from model_builder.build.inputs import (
     effective_recipe,
     input_identities,
     resolve_inputs,

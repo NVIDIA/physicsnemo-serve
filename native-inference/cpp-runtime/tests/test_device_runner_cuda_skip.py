@@ -62,7 +62,7 @@ class DeviceRunnerCudaSkipTests(unittest.TestCase):
     def test_ctest_reports_unavailable_cuda_as_skipped(self):
         # Execute the SDK's real test registration and skip properties in a tiny
         # CMake project, without configuring or building any GPU dependencies.
-        cmake = (SDK_SOURCE / "CMakeLists.txt").read_text(encoding="utf-8")
+        cmake = (SDK_SOURCE / "cmake" / "Tests.cmake").read_text(encoding="utf-8")
         commands = re.findall(r"\b(?:add_test|set_tests_properties)\s*\([^)]*\)", cmake)
         registration = "\n".join(
             command for command in commands if TEST_NAME in command.split()

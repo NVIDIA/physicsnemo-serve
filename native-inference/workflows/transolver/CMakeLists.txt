@@ -71,7 +71,7 @@ if(BUILD_TESTING)
   add_test(NAME transolver_workflow_tests COMMAND transolver_workflow_tests)
   find_package(Python3 REQUIRED COMPONENTS Interpreter)
   add_test(NAME transolver_cli_help COMMAND "${Python3_EXECUTABLE}"
-    "${CMAKE_CURRENT_SOURCE_DIR}/tests/cli_help.py" $<TARGET_FILE:physicsnemo-transolver>)
+    "${CMAKE_CURRENT_SOURCE_DIR}/tests/cli_validation.py" $<TARGET_FILE:physicsnemo-transolver> --case help)
   add_test(NAME transolver_cli_output_conflicts COMMAND "${Python3_EXECUTABLE}"
-    "${CMAKE_CURRENT_SOURCE_DIR}/tests/cli_output_conflicts.py" $<TARGET_FILE:physicsnemo-transolver>)
+    "${CMAKE_CURRENT_SOURCE_DIR}/tests/cli_validation.py" $<TARGET_FILE:physicsnemo-transolver> --case output-conflicts)
 endif()

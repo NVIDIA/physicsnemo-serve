@@ -1,45 +1,27 @@
 """Explicit TensorRT plugins are captured inputs, never implicit environment paths."""
 
-from contextlib import nullcontext
 import json
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
-from types import ModuleType, SimpleNamespace
 import unittest
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from pnmir_build import authoring_config, cli, inputs, project_lock, worker
-import test_authoring_config
-import test_authoring_container
-import test_model_input_cli
-import test_worker
+from tensorrt_test_support import TensorRTRecipeFixture, PLUGINS
+from model_builder.build import authoring_config, cli, inputs, project_lock, worker
+import authoring_test_support
+import model_input_test_support
+import worker_test_support
 
 
 EXACT = "layout-order-exact"
-PLUGINS = (
-    "exact_linear",
-    "exact_gemm",
-    "exact_token_sum",
-    "exact_slice_bmm",
-    "exact_layer_norm",
-    "exact_softmax",
-    "exact_attention",
-    "exact_gelu",
-)
 
 
-class TensorRTRecipeProfileTests(unittest.TestCase):
-    def fixture(self, fixture_type):
-        fixture = fixture_type(methodName="runTest")
-        fixture.setUp()
-        self.addCleanup(fixture.doCleanups)
-        return fixture
-
+class TensorRTRecipeProfileTests(TensorRTRecipeFixture, unittest.TestCase):
     def test_project_accepts_profile_and_keeps_omitted_default(self):
-        fixture = self.fixture(test_authoring_config.AuthoringConfigurationTests)
+        fixture = self.fixture(authoring_test_support.AuthoringConfigFixture)
         fixture.write()
         self.assertNotIn(
             "tensorrt_profile", authoring_config.load(fixture.path)["effective"]
@@ -52,8 +34,8 @@ class TensorRTRecipeProfileTests(unittest.TestCase):
             )
 
     def test_invalid_profile_rejected_by_project_frontend_and_worker(self):
-        project = self.fixture(test_authoring_config.AuthoringConfigurationTests)
-        recipe = self.fixture(test_model_input_cli.ModelInputCliTests)
+        project = self.fixture(authoring_test_support.AuthoringConfigFixture)
+        recipe = self.fixture(model_input_test_support.ModelInputFixture)
         recipe.recipe.update(dtype="float32", shape=[4])
         for profile in ("unknown", "", None, {}, [], 2):
             project.write(tensorrt_profile=profile)
@@ -69,7 +51,7 @@ class TensorRTRecipeProfileTests(unittest.TestCase):
                         reader()
 
     def test_profile_preflight_imports_no_framework(self):
-        fixture = self.fixture(test_model_input_cli.ModelInputCliTests)
+        fixture = self.fixture(model_input_test_support.ModelInputFixture)
         fixture.recipe.update(dtype="float32", shape=[4], tensorrt_profile=EXACT)
         fixture.recipe_path.write_text(json.dumps(fixture.recipe))
         result = subprocess.run(
@@ -78,7 +60,7 @@ class TensorRTRecipeProfileTests(unittest.TestCase):
                 "-S",
                 "-c",
                 "import sys; from pathlib import Path; sys.path.insert(0, sys.argv[1]); "
-                "from pnmir_build import cli, worker; p = Path(sys.argv[2]); "
+                "from model_builder.build import cli, worker; p = Path(sys.argv[2]); "
                 "assert cli.read_recipe(p)['tensorrt_profile'] == sys.argv[3]; "
                 "assert worker._read_recipe(p, ['aoti'])[0]['tensorrt_profile'] == sys.argv[3]; "
                 "assert not {'torch', 'onnx', 'tensorrt'} & sys.modules.keys()",
@@ -92,29 +74,8 @@ class TensorRTRecipeProfileTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr)
 
-    def backend_modules(self):
-        modules = {"torch": ModuleType("torch")}
-        modules["torch"].cuda = SimpleNamespace(
-            current_device=lambda: 0, set_device=mock.Mock()
-        )
-        modules["torch"].device = lambda device: device
-        for module_name, symbol in (
-            ("exporter", "export_package"),
-            ("onnx_exporter", "export_onnx_model"),
-            ("tensorrt_builder", "build_tensorrt_package"),
-            ("tensorrt_exporter", "tensorrt_ieee_fp32"),
-        ):
-            name = f"pnmir_export.{module_name}"
-            modules[name] = ModuleType(name)
-            setattr(modules[name], symbol, mock.Mock())
-        modules["pnmir_export.onnx_exporter"].export_onnx_model.return_value = Path(
-            "model.onnx"
-        )
-        modules["pnmir_export.tensorrt_exporter"].tensorrt_ieee_fp32 = nullcontext
-        return modules
-
     def test_worker_forwards_only_exact_profile_with_all_captured_assets(self):
-        fixture = self.fixture(test_model_input_cli.ModelInputCliTests)
+        fixture = self.fixture(model_input_test_support.ModelInputFixture)
         fixture.recipe.update(dtype="float32", shape=[4])
         libraries = {name: fixture.root / (name + ".so") for name in PLUGINS}
         assets = {
@@ -123,7 +84,9 @@ class TensorRTRecipeProfileTests(unittest.TestCase):
         for profile in (EXACT, "baseline"):
             with self.subTest(profile=profile), tempfile.TemporaryDirectory() as temp:
                 modules = self.backend_modules()
-                build = modules["pnmir_export.tensorrt_builder"].build_tensorrt_package
+                build = modules[
+                    "model_builder.export.tensorrt_builder"
+                ].build_tensorrt_package
                 with mock.patch.dict(sys.modules, modules):
                     worker._build_backend(
                         "tensorrt",
@@ -143,12 +106,12 @@ class TensorRTRecipeProfileTests(unittest.TestCase):
                     self.assertNotIn("plugin_libraries", build.call_args.kwargs)
 
     def test_missing_plugin_fails_before_export_but_does_not_affect_aoti(self):
-        fixture = self.fixture(test_model_input_cli.ModelInputCliTests)
+        fixture = self.fixture(model_input_test_support.ModelInputFixture)
         fixture.recipe.update(dtype="float32", shape=[4], tensorrt_profile=EXACT)
         for backend in ("tensorrt", "aoti"):
             with self.subTest(backend=backend), tempfile.TemporaryDirectory() as temp:
                 modules = self.backend_modules()
-                export = modules["pnmir_export.onnx_exporter"].export_onnx_model
+                export = modules["model_builder.export.onnx_exporter"].export_onnx_model
                 with mock.patch.dict(sys.modules, modules):
                     args = (
                         backend,
@@ -166,25 +129,6 @@ class TensorRTRecipeProfileTests(unittest.TestCase):
                         export.assert_not_called()
                     else:
                         worker._build_backend(*args)
-
-    def exact_project(self):
-        # Asset and lock checks use the mocked Linux container on every host.
-        for patcher in (
-            mock.patch.object(sys, "platform", "linux"),
-            mock.patch("os.getuid", return_value=1000, create=True),
-            mock.patch("os.getgid", return_value=1000, create=True),
-        ):
-            patcher.start()
-            self.addCleanup(patcher.stop)
-        fixture = self.fixture(test_authoring_container.AuthoringContainerTests)
-        fixture.document["tensorrt_profile"] = EXACT
-        for name in PLUGINS:
-            asset = "tensorrt_" + name + "_plugin"
-            path = fixture.project / (name + ".so")
-            path.write_bytes((name + " test plugin input").encode())
-            fixture.document["assets"][asset] = path.name
-        fixture.write_project()
-        return fixture
 
     def test_profile_and_plugin_bytes_are_retained_and_bound_to_lock(self):
         for change in ("profile", "plugin"):
@@ -247,9 +191,8 @@ class TensorRTRecipeProfileTests(unittest.TestCase):
         self.assertIn("tensorrt_profile", result["diagnostics"][0]["message"])
 
     def test_completion_rejects_missing_or_wrong_artifact_profile(self):
-        fixture = self.fixture(test_worker.WorkerTest)
+        fixture = self.fixture(worker_test_support.WorkerFixture)
         build = fixture.run_build(["tensorrt"])
-        build_path = fixture.output / "build.json"
         release_path = fixture.output / "model" / "model-release.json"
         release = json.loads(release_path.read_text())
         variant = build["variants"]["tensorrt"]
@@ -270,12 +213,9 @@ class TensorRTRecipeProfileTests(unittest.TestCase):
             if profile is not None:
                 artifact["correctness_profile"] = {"name": profile, "version": 1}
             manifest_path.write_text(json.dumps(manifest))
-            files = worker._inventory(package, fixture.output / "model")
-            variant["files"] = files
-            release["variants"]["tensorrt"]["files"] = files
-            release_path.write_text(json.dumps(release))
-            build["release"] = worker._file_identity(release_path, fixture.output)
-            build_path.write_text(json.dumps(build))
+            worker_test_support.publish_build_receipts(
+                fixture.output, build, release, "tensorrt"
+            )
 
         for profile in (None, "baseline", "unknown"):
             publish(profile)

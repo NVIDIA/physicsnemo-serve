@@ -8,8 +8,10 @@ customer workflows are described in the [inference guide](../README.md).
 
 ## Build and install
 
-For native Windows x64, see the [Windows guide](../docs/windows.md). It covers
-MSVC, Release builds, external DLL paths, and AOTInductor/TensorRT validation.
+For native Windows x64, start with the user manual's
+[Windows setup chapter](../docs/user-guide.md#windows-setup). The
+[Windows SDK reference](../docs/windows.md) covers Release builds, SDK tests and
+exact TensorRT plugins.
 Windows environment setup builds the baseline backends. Exact TensorRT plugins
 require the [manual SDK configuration](../docs/windows.md#exact-tensorrt-profiles),
 matching PyTorch/CUTLASS headers, and target-GPU model qualification.
@@ -137,6 +139,11 @@ with the source implementation from `gpu_programming` commit
 `87b78bf6cec3030cfbaea10f14e4c64cbc836407`; only public C++ include paths and
 namespaces were adapted in the eight plugin implementations.
 
+The operator IDs, ABI constants and C registration declarations for all twelve
+plugins are available in `<physicsnemo/inference/backends/tensorrt_exact.hpp>`.
+Use this consolidated header in place of the former per-plugin headers, including
+when registering operators with `v1::Engine::register_operator`.
+
 GeoTransolver's WeightedBlend plugin is ported from the same source commit and
 preserves its `pnmir.tensorrt-exact-weighted-blend` operator ID, ABI `1`, plugin
 name and registration symbol. It evaluates two FP32 scalar-weighted tensors
@@ -218,7 +225,8 @@ The runtime follows the manifest's relative artifact path; it does not require
 an `artifacts/` directory. The runtime does not load `model-release.json` as a
 workflow. Automated consumers should use its selected package path instead of
 hardcoding a layout;
-see [package compatibility and migration](../docs/packages.md).
+see [package compatibility](../docs/reference.md#package-compatibility) and
+[package layout](../docs/reference.md#build-output).
 
 ## Runtime tests and fixtures
 
@@ -282,7 +290,10 @@ metadata and raw sizes with its independent reference. A previous run's report
 is not evidence after a failed invocation. Metadata is an execution record,
 not a package digest or scientific qualification report.
 
-See [MIGRATION.md](MIGRATION.md) for public naming changes, source provenance,
-and validation scope. Existing `.pnmir` packages continue loading; manifest
+Existing `.pnmir` packages continue loading; manifest
 and payload formats remain unchanged. New builder outputs use the
-[flat backend layout](../docs/packages.md#generic-build-output).
+[flat backend layout](../docs/reference.md#build-output).
+
+The runtime was imported from `physicsnemo-inference-runtime` commit
+`f6bf26090d7cd0484781ed4e1af5a47ea5469413`. Its [Apache-2.0 license](LICENSE)
+is retained and installed with the SDK.

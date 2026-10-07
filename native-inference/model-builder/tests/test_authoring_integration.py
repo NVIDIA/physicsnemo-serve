@@ -19,7 +19,7 @@ except ImportError:
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from pnmir_build import (
+from model_builder.build import (
     authoring,
     authoring_config,
     authoring_sources,
@@ -27,7 +27,7 @@ from pnmir_build import (
     inputs,
 )
 
-BUILDER = Path(__file__).resolve().parents[2] / "physicsnemo-model-builder"
+BUILDER = Path(__file__).resolve().parents[2] / "pnms-model-builder"
 
 MODEL = """import torch
 
@@ -89,17 +89,23 @@ class AuthoringIntegrationTests(unittest.TestCase):
     def write_config(self):
         (self.project / "model-build.json").write_text(json.dumps(self.document))
 
-    def invoke(self, operation, output=None):
+    def invoke(self, operation, output=None, *, cwd=None, pythonpath=None):
         command = [sys.executable, str(BUILDER), operation, str(self.project), "--json"]
         if output is not None:
             command += ["--output", str(output)]
         environment = dict(os.environ)
         environment.pop("PYTHONPATH", None)
+        if pythonpath is not None:
+            environment["PYTHONPATH"] = pythonpath
         environment["PATH"] = os.pathsep.join(
             (str(Path(sys.executable).parent), "/usr/bin", "/bin")
         )
         completed = subprocess.run(
-            command, cwd=self.root, env=environment, text=True, capture_output=True
+            command,
+            cwd=self.root if cwd is None else cwd,
+            env=environment,
+            text=True,
+            capture_output=True,
         )
         try:
             value = json.loads(completed.stdout)
@@ -158,6 +164,90 @@ class AuthoringIntegrationTests(unittest.TestCase):
         self.assertEqual(completed.returncode, 1, result)
         self.assertIn("helper", result["diagnostics"][0]["message"])
         self.assertIn("ModuleNotFoundError", completed.stderr)
+
+    def test_check_rejects_installed_package_shadowing_captured_namespace(self):
+        package = self.project / "customer_namespace"
+        package.mkdir()
+        model = (
+            "import torch\nVALUE = {value}\n"
+            "class Model(torch.nn.Module):\n"
+            "    def forward(self, x): return x * VALUE\n"
+        )
+        (package / "model.py").write_text(model.format(value=2))
+        environment = self.root / "environment"
+        installed = environment / "customer_namespace"
+        installed.mkdir(parents=True)
+        (installed / "__init__.py").write_text("")
+        (installed / "model.py").write_text(model.format(value=99))
+        (self.project / "build_adapter.py").write_text(
+            "import torch\nfrom customer_namespace.model import Model\n"
+            "def create_model(config, assets): return Model()\n"
+            "def create_cases(config, assets): return [(torch.ones(1),)]\n"
+        )
+        torch.save({}, self.project / "weights.pt")
+        self.document.update(source=["customer_namespace"], config={})
+        self.write_config()
+        snapshot = self.snapshot()
+        output = self.root / "namespace-shadow-check"
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "import sys; from model_builder.build import authoring_worker; "
+                f"sys.path.append({str(environment)!r}); "
+                f"authoring_worker.execute({str(snapshot)!r}, {str(output)!r}, 'check', 'cpu')",
+            ],
+            cwd=self.root,
+            env=dict(os.environ, PYTHONPATH=str(BUILDER.parent / "model-builder/src")),
+            text=True,
+            capture_output=True,
+        )
+        report = json.loads((output / "check.json").read_text())
+        self.assertNotEqual(completed.returncode, 0, report)
+        self.assertEqual(report["status"], "failed")
+        self.assertIn("import conflict", report["error"]["message"])
+        self.assertIn("customer_namespace", report["error"]["message"])
+        self.assertFalse((output / "model").exists())
+        self.assertFalse((self.project / "model-build.lock.json").exists())
+
+    def caller_import_paths(self):
+        return (
+            ("project-cwd", self.project, None),
+            ("relative-pythonpath", self.root, self.project.name),
+            ("absolute-pythonpath", self.root, str(self.project)),
+        )
+
+    def test_check_rejects_uncaptured_lazy_import_from_caller_paths(self):
+        self.document["source"] = ["model.py"]
+        self.write_config()
+        for label, cwd, pythonpath in self.caller_import_paths():
+            with self.subTest(caller_path=label):
+                output = self.root / label
+                completed, result = self.invoke(
+                    "check", output, cwd=cwd, pythonpath=pythonpath
+                )
+                self.assertEqual(completed.returncode, 1, result)
+                self.assertEqual(result["status"], "failed")
+                self.assertIn("helper", result["diagnostics"][0]["message"])
+                self.assertIn("ModuleNotFoundError", completed.stderr)
+                report = json.loads((output / "check.json").read_text())
+                self.assertEqual(report["status"], "failed")
+                self.assertNotIn("helper.py", report["input_identity"]["source"])
+
+    def test_check_loads_captured_lazy_import_with_caller_paths(self):
+        for label, cwd, pythonpath in self.caller_import_paths():
+            with self.subTest(caller_path=label):
+                output = self.root / label
+                completed, result = self.invoke(
+                    "check", output, cwd=cwd, pythonpath=pythonpath
+                )
+                self.assertEqual(
+                    completed.returncode, 0, f"{result}\n{completed.stderr}"
+                )
+                self.assertEqual(result["status"], "checked")
+                self.assertEqual(result["case_count"], 2)
+                report = json.loads((output / "check.json").read_text())
+                self.assertIn("helper.py", report["input_identity"]["source"])
 
     def test_build_requires_sdk_even_though_check_does_not(self):
         completed, result = self.invoke("build", self.root / "no-sdk")

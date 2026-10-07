@@ -21,7 +21,9 @@ def create_model(config, assets):
         or config.get("time_input") is not False
         or config.get("plus") is not False
     ):
-        raise ValueError("This example requires the FP32 Transolver surface checkpoint.")
+        raise ValueError(
+            "This example requires the FP32 Transolver surface checkpoint."
+        )
 
     # Preserve the upstream graph and state keys; Builder loads the weights.
     return Transolver(**config)
@@ -34,15 +36,28 @@ def create_cases(config, assets):
     generator = torch.Generator().manual_seed(42)
     cases = []
     for index in range(3):
-        positions = torch.randn(
-            1, POINT_COUNT, 3, generator=generator, dtype=torch.float32
-        ) * 0.1
+        positions = (
+            torch.randn(1, POINT_COUNT, 3, generator=generator, dtype=torch.float32)
+            * 0.1
+        )
         normals = torch.nn.functional.normalize(
             torch.randn(1, POINT_COUNT, 3, generator=generator, dtype=torch.float32),
             dim=-1,
         )
         embedding = torch.cat((positions, normals), dim=-1).contiguous()
         # Global density (kg/m^3) and speed (m/s), repeated at every surface cell.
-        fx = torch.tensor([1.205 + index * 0.01, 30.0 + index * 5.0], dtype=torch.float32)
+        fx = torch.tensor(
+            [1.205 + index * 0.01, 30.0 + index * 5.0], dtype=torch.float32
+        )
         cases.append((fx.repeat(1, POINT_COUNT, 1), embedding))
     return cases
+
+
+def export_options(context):
+    """Normalize temperature clamp bounds only in the captured ONNX graph."""
+    from model_builder.export import ExportOptions
+    from model_builder.export.compat import NormalizeClampBounds
+
+    return ExportOptions(
+        onnx_passes=(NormalizeClampBounds(),) if context.backend == "tensorrt" else ()
+    )

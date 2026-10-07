@@ -15,7 +15,7 @@ wheel_workdir="$(mktemp -d)"
 cp -R native-inference/model-builder "$wheel_workdir/source"
 python3 -m pip wheel --no-deps --no-build-isolation \
   --wheel-dir out/inference/wheels "$wheel_workdir/source"
-PNMIR_TEST_WHEEL="$PWD/out/inference/wheels/physicsnemo_model_builder-0.1.0-py3-none-any.whl" \
+PNMIR_TEST_WHEEL="$PWD/out/inference/wheels/pnms_model_builder-0.1.0-py3-none-any.whl" \
   python3 -m unittest discover \
     -s native-inference/model-builder/tests/installation -p 'test_installed*.py' -v
 ```
@@ -39,7 +39,7 @@ There is no separate `native-inference/VERSION` authority.
 
 ## Build and qualify the development image
 
-Follow the [builder image commands](../model-builder/README.md#builder-environment).
+Follow the [builder image commands](user-guide.md#use-docker).
 The [Dockerfile](../model-builder/images/Dockerfile.builder) installs the native SDK
 once and the wheel from the same source. Its default native prefix is
 `/opt/physicsnemo-inference`, with `bin/physicsnemo-infer` used by the harness.
@@ -65,7 +65,7 @@ The public native interface uses `physicsnemo::inference`, headers under
 migrating an older native integration must update their source/build scripts
 and rebuild. The manifest/artifact format and existing `.pnmir` loading
 contract are unchanged; see [SDK build and usage](../cpp-runtime/README.md). New model
-builds use the [flat backend package layout](packages.md#generic-build-output).
+builds use the [flat backend package layout](reference.md#build-output).
 
 ## Model candidates today
 
@@ -73,10 +73,11 @@ Each build retains graphs, source/input identities, native checks, environment
 and diagnostics. `model-release.json` inventories deployable files relative to
 `model/`; its name does not imply registry publication or a production release.
 The native CLI directly loads a `backends/<backend>/` package. See the
-[package contract](packages.md) for artifact locations, failure behavior and
-compatibility limits.
+[build output reference](reference.md#build-output) for artifact locations,
+[verification and failures](reference.md#verification-and-failures), and
+[package compatibility](reference.md#package-compatibility).
 
-The external [GeoTransolver example](geotransolver-workflow.md) uses generic
+The external [GeoTransolver example](../examples/README.md#geotransolver) uses generic
 checkpoint import and core/native checks on synthetic feature inputs. These
 checks do not establish full-model/core agreement, full geometry processing,
 scientific CFD acceptance or compatibility with another deployment stack.

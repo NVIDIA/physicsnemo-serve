@@ -10,7 +10,7 @@ import unittest
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from pnmir_build import cli
+from model_builder.build import cli
 
 
 class InstalledAssetDiscoveryTests(unittest.TestCase):
@@ -22,26 +22,24 @@ class InstalledAssetDiscoveryTests(unittest.TestCase):
         self.install_prefix = self.root / "package-install-prefix"
         self.site_packages = self.install_prefix / "lib/python3.12/dist-packages"
         self.site_packages.mkdir(parents=True)
-        self.resources = self.install_prefix / "share/physicsnemo-model-builder"
+        self.resources = self.install_prefix / "share/pnms-model-builder"
         (self.resources / "models/affine").mkdir(parents=True)
         (self.resources / "toolchain.lock.json").write_text('{"format_version":1}')
         (self.resources / "models/affine/recipe.json").write_text(
             json.dumps({"name": "affine", "adapter": "export.py"})
         )
         (self.resources / "models/affine/export.py").write_text("# canonical adapter\n")
-        self.dist_info = (
-            self.site_packages / "physicsnemo_model_builder-0.1.0.dist-info"
-        )
+        self.dist_info = self.site_packages / "pnms_model_builder-0.1.0.dist-info"
         self.dist_info.mkdir()
         (self.dist_info / "METADATA").write_text(
-            "Metadata-Version: 2.4\nName: physicsnemo-model-builder\nVersion: 0.1.0\n"
+            "Metadata-Version: 2.4\nName: pnms-model-builder\nVersion: 0.1.0\n"
         )
         relative_lock = os.path.relpath(
             self.resources / "toolchain.lock.json", self.site_packages
         )
         (self.dist_info / "RECORD").write_text(f"{relative_lock},,\n")
         self.distribution = metadata.PathDistribution(self.dist_info)
-        self.module_path = self.site_packages / "pnmir_build/cli.py"
+        self.module_path = self.site_packages / "model_builder/build/cli.py"
 
     def resolved_assets(self):
         with (
@@ -65,7 +63,7 @@ class InstalledAssetDiscoveryTests(unittest.TestCase):
         )
 
     def test_installed_record_wins_over_an_unrelated_prefix_resource_directory(self):
-        decoy = self.python_prefix / "share/physicsnemo-model-builder"
+        decoy = self.python_prefix / "share/pnms-model-builder"
         (decoy / "models").mkdir(parents=True)
         (decoy / "toolchain.lock.json").write_text('{"unrelated":true}')
         self.assertEqual(

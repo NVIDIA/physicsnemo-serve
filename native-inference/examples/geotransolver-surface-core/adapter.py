@@ -65,8 +65,8 @@ def create_cases(config, assets):
 
 
 def export_options(context):
-    from pnmir_export import ExportOptions
-    from pnmir_export.compat import NormalizeClampBounds
+    from model_builder.export import ExportOptions
+    from model_builder.export.compat import NormalizeClampBounds
 
     return ExportOptions(
         onnx_passes=(NormalizeClampBounds(),) if context.backend == "tensorrt" else ()

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 import struct
 import subprocess
@@ -111,7 +112,7 @@ class DeviceRunnerTests(unittest.TestCase):
             raise RuntimeError("could not build TensorRT affine fixture")
         path.write_bytes(bytes(engine))
 
-    def run_runner(self, fixture, *arguments):
+    def run_runner(self, fixture, *arguments, preexec_fn=None):
         package, inputs, outputs = fixture
         return subprocess.run(
             [
@@ -127,6 +128,7 @@ class DeviceRunnerTests(unittest.TestCase):
             capture_output=True,
             text=True,
             timeout=120,
+            preexec_fn=preexec_fn,
         )
 
     def assert_success(self, result, outputs):
@@ -138,6 +140,23 @@ class DeviceRunnerTests(unittest.TestCase):
         fixture = self.fixture(self.root)
         (fixture[1] / "input.bin").write_bytes(self.input_bytes)
         self.assert_success(self.run_runner(fixture), fixture[2])
+
+    @unittest.skipUnless(os.name == "posix", "requires POSIX file-size limits")
+    def test_buffered_output_write_failure(self):
+        import resource
+        import signal
+
+        def reject_file_writes():
+            signal.signal(signal.SIGXFSZ, signal.SIG_IGN)
+            resource.setrlimit(resource.RLIMIT_FSIZE, (0, 0))
+
+        fixture = self.fixture(self.root)
+        (fixture[1] / "input.bin").write_bytes(self.input_bytes)
+        result = self.run_runner(fixture, preexec_fn=reject_file_writes)
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("cannot write tensor file:", result.stderr)
+        self.assertNotIn("benchmark:", result.stdout)
+        self.assertEqual((fixture[2] / "output.bin").stat().st_size, 0)
 
     def test_dynamic_output_uses_resolved_shape(self):
         if self.backend != "onnxruntime":

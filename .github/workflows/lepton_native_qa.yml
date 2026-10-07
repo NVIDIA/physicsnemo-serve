@@ -1,0 +1,91 @@
+name: Native Inference Lepton QA
+
+on:
+  workflow_dispatch:
+    inputs:
+      image:
+        description: "Published native QA image, registry/repository@sha256:<digest>"
+        required: true
+        type: string
+      source_sha:
+        description: "Full Git SHA baked into the QA image"
+        required: true
+        type: string
+      profile:
+        description: "Smoke, or smoke plus real Transolver on both AOTI and TensorRT"
+        type: choice
+        options: [smoke, full]
+        default: smoke
+      resource_shape:
+        description: "Available Lepton GPU resource shape matching the image architecture"
+        required: true
+        type: string
+        default: gpu.h100-sxm
+      assets:
+        description: "Optional existing manifest under /outputs; full profile downloads pinned assets when empty"
+        required: false
+        type: string
+      job_timeout:
+        description: "Maximum remote job duration in seconds"
+        required: true
+        type: number
+        default: 3600
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-inference-qa-${{ github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  qualify:
+    name: Native Inference QA (${{ inputs.profile }})
+    runs-on: linux-amd64-cpu4
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_sha }}
+      - uses: astral-sh/setup-uv@v3
+      - name: Install Lepton CLI
+        run: |
+          uv tool install leptonai
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: Run native inference QA
+        env:
+          NATIVE_QA_IMAGE: ${{ inputs.image }}
+          NATIVE_QA_SOURCE_SHA: ${{ inputs.source_sha }}
+          NATIVE_QA_PROFILE: ${{ inputs.profile }}
+          NATIVE_QA_RESOURCE_SHAPE: ${{ inputs.resource_shape }}
+          NATIVE_QA_ASSETS: ${{ inputs.assets }}
+          NATIVE_QA_TIMEOUT: ${{ inputs.job_timeout }}
+          NATIVE_QA_RUN_ID: native-${{ github.run_id }}-${{ github.run_attempt }}
+          LEPTON_WORKSPACE_TOKEN: ${{ secrets.LEPTON_WORKSPACE_TOKEN }}
+          LEPTON_WORKSPACE_ID: ${{ secrets.LEPTON_WORKSPACE_ID }}
+          LEPTON_NODE_GROUP: ${{ secrets.LEPTON_NODE_GROUP }}
+          LEPTON_PULL_SECRET: ${{ secrets.PULL_SECRET }}
+          NFS_MOUNT_BASE: ${{ vars.NFS_MOUNT_BASE }}
+          QA_LUSTRE_DIR: ${{ vars.QA_LUSTRE_DIR || 'qa' }}
+        run: |
+          set -euo pipefail
+          args=(
+            --image "$NATIVE_QA_IMAGE"
+            --expected-source-sha "$NATIVE_QA_SOURCE_SHA"
+            --profile "$NATIVE_QA_PROFILE"
+            --resource-shape "$NATIVE_QA_RESOURCE_SHAPE"
+            --job-timeout "$NATIVE_QA_TIMEOUT"
+            --run-id "$NATIVE_QA_RUN_ID"
+            --artifact-dir qa/artifacts/native-inference
+          )
+          if [[ -n "$NATIVE_QA_ASSETS" ]]; then
+            args+=(--assets "$NATIVE_QA_ASSETS")
+          fi
+          uv run python qa/scripts/run_lepton_native_inference_qa.py "${args[@]}"
+      - name: Preserve QA evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-inference-${{ inputs.profile }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: qa/artifacts/native-inference/
+          if-no-files-found: warn

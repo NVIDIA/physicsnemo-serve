@@ -14,11 +14,14 @@ try:
     import pytest
     from onnx import TensorProto, helper, numpy_helper
 except ImportError as error:
-    raise unittest.SkipTest("DoMINO graph tests require optional NumPy, ONNX and pytest") from error
-from pnmir_export.tensorrt_exact_graphs import (
-    _replace_scalar_divs, _replace_inverse_distance_blends,
+    raise unittest.SkipTest(
+        "DoMINO graph tests require optional NumPy, ONNX and pytest"
+    ) from error
+from model_builder.export.tensorrt_exact_graphs import (
+    _replace_scalar_divs,
+    _replace_inverse_distance_blends,
 )
-from test_tensorrt_exact_graphs import _check_model_with_tensorrt_plugins
+from graph_test_support import _check_model_with_tensorrt_plugins
 
 
 def _scalar_div_model(
@@ -74,7 +77,9 @@ def _inverse_distance_blend_model(
             inverse_sum = reciprocal
         else:
             next_sum = f"inverse_sum_{sample}"
-            nodes.append(helper.make_node("Add", (inverse_sum, reciprocal), (next_sum,)))
+            nodes.append(
+                helper.make_node("Add", (inverse_sum, reciprocal), (next_sum,))
+            )
             value_info.append(
                 helper.make_tensor_value_info(next_sum, TensorProto.FLOAT, shape)
             )
@@ -90,9 +95,7 @@ def _inverse_distance_blend_model(
             inputs.append(
                 helper.make_tensor_value_info(prediction, TensorProto.FLOAT, shape)
             )
-            nodes.append(
-                helper.make_node("Mul", (prediction, reciprocal), (weighted,))
-            )
+            nodes.append(helper.make_node("Mul", (prediction, reciprocal), (weighted,)))
             value_info.append(
                 helper.make_tensor_value_info(weighted, TensorProto.FLOAT, shape)
             )
@@ -115,9 +118,7 @@ def _inverse_distance_blend_model(
             (
                 helper.make_node("Mul", (center, "half"), (center_half,)),
                 helper.make_node("Mul", (neighbor_sum, "half"), (neighbor_half,)),
-                helper.make_node(
-                    "Div", (neighbor_half, inverse_sum), (normalized,)
-                ),
+                helper.make_node("Div", (neighbor_half, inverse_sum), (normalized,)),
                 helper.make_node("Add", (center_half, normalized), (output,)),
             )
         )
@@ -125,9 +126,7 @@ def _inverse_distance_blend_model(
             helper.make_tensor_value_info(name, TensorProto.FLOAT, shape)
             for name in (center_half, neighbor_half, normalized)
         )
-        outputs.append(
-            helper.make_tensor_value_info(output, TensorProto.FLOAT, shape)
-        )
+        outputs.append(helper.make_tensor_value_info(output, TensorProto.FLOAT, shape))
     return helper.make_model(
         helper.make_graph(
             nodes,
@@ -169,18 +168,34 @@ def test_fuses_inverse_distance_blend_with_shared_distances(variables: int) -> N
 def test_keeps_externally_consumed_inverse_distance_intermediate() -> None:
     model = _inverse_distance_blend_model()
     model.graph.output.append(
-        helper.make_tensor_value_info(
-            "inverse_0", TensorProto.FLOAT, (1, 8, 1)
-        )
+        helper.make_tensor_value_info("inverse_0", TensorProto.FLOAT, (1, 8, 1))
     )
     onnx.checker.check_model(model, full_check=True)
 
     assert _replace_inverse_distance_blends(onnx, model) == 0
 
     assert all(
-        node.op_type != "PNMIRExactInverseDistanceBlend"
-        for node in model.graph.node
+        node.op_type != "PNMIRExactInverseDistanceBlend" for node in model.graph.node
     )
+
+
+@pytest.mark.parametrize("variables", (1, 2))
+@pytest.mark.parametrize("consumer", ("center_half_0", "weighted_0_1", "inverse_1"))
+def test_keeps_inverse_distance_producer_needed_by_plugin_input(
+    variables: int, consumer: str
+) -> None:
+    model = _inverse_distance_blend_model(variables=variables, samples=2)
+    for node in model.graph.node:
+        if list(node.output) == [consumer]:
+            node.input[0] = "inverse_0"
+    onnx.checker.check_model(model, full_check=True)
+    original = model.SerializeToString()
+
+    replacements = _replace_inverse_distance_blends(onnx, model)
+
+    _check_model_with_tensorrt_plugins(model)
+    assert replacements == 0
+    assert model.SerializeToString() == original
 
 
 @pytest.mark.parametrize(

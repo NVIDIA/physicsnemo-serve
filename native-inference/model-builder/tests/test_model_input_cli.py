@@ -12,112 +12,16 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
-import tempfile
 import unittest
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from pnmir_build import cli, inputs
-import test_worker
+from model_builder.build import cli, inputs, worker
+from model_input_test_support import ModelInputFixture
+from authoring_test_support import linux_container
 
 
-class ModelInputCliTests(unittest.TestCase):
-    def setUp(self):
-        temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(temporary.cleanup)
-        self.root = Path(temporary.name).resolve()
-        self.source = self.root / "recipe"
-        self.source.mkdir()
-        self.recipe_path = self.source / "recipe.json"
-        self.recipe = {
-            "format_version": 2,
-            "name": "configured",
-            "version": "0.1.0",
-            "adapter": "export.py",
-            "factory": "create_model",
-            "cases": "create_cases",
-            "input_names": ["input"],
-            "output_names": ["output"],
-            "supported_backends": ["aoti"],
-            "default_backend": "aoti",
-            "config": {"path": "config.json"},
-            "checkpoint": {"format": "torch-state-dict"},
-            "assets": {"normalization": {"path": "normalization.json"}},
-        }
-        self.recipe_path.write_text(json.dumps(self.recipe, indent=3) + "\n")
-        (self.source / "export.py").write_text("# no model imports during planning\n")
-        config = self.source / "config.json"
-        config.write_text('{"width": 4}\n')
-        checkpoint = self.root / "customer checkpoint.pt"
-        checkpoint.write_bytes(b"opaque weights; never loaded by the CLI")
-        asset = self.source / "normalization.json"
-        asset.write_text('{"scale": 2}\n')
-
-        def descriptor(path, origin):
-            return {
-                "path": str(path),
-                "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
-                "size_bytes": path.stat().st_size,
-                "origin": origin,
-            }
-
-        self.resolved = {
-            "config": descriptor(config, "recipe"),
-            "checkpoint": descriptor(checkpoint, "cli"),
-            "assets": {"normalization": descriptor(asset, "recipe")},
-            "config_data": {"width": 4},
-            "effective_config": {"sha256": "e" * 64, "size_bytes": 12},
-        }
-        self.identities = {
-            name: {key: value[key] for key in ("sha256", "size_bytes")}
-            for name, value in self.resolved.items()
-            if name in ("config", "checkpoint", "effective_config")
-        }
-        self.identities["assets"] = {
-            "normalization": {
-                key: self.resolved["assets"]["normalization"][key]
-                for key in ("sha256", "size_bytes")
-            }
-        }
-        self.output = self.root / "candidate"
-        self.runtime = self.root / "physicsnemo-infer"
-        self.runtime.write_text("#!/bin/sh\nexit 0\n")
-        self.runtime.chmod(0o755)
-        self.image = "example/builder@sha256:" + "a" * 64
-        self.lock = self.root / "toolchain.lock.json"
-        self.lock.write_text(json.dumps({"format_version": 1}))
-        self.plan = {
-            "recipe_path": self.recipe_path,
-            "recipe": self.recipe,
-            "model_inputs": self.resolved,
-            "output": self.output,
-            "device": "cpu",
-            "image": self.image,
-            "runtime": self.runtime,
-            "backends": ["aoti"],
-            "executor": "local",
-            "toolchain_lock": {"path": str(self.lock), "sha256": "b" * 64},
-            "selection_source": "argument",
-        }
-
-    def arguments(self, *extra):
-        return [
-            "build",
-            "--recipe",
-            str(self.recipe_path),
-            "--output",
-            str(self.output),
-            "--lock",
-            str(self.lock),
-            "--executor",
-            "local",
-            "--runtime",
-            str(self.runtime),
-            "--device",
-            "cpu",
-            *extra,
-        ]
-
+class ModelInputCliTests(ModelInputFixture, unittest.TestCase):
     def parse(self, *extra):
         with contextlib.redirect_stderr(io.StringIO()):
             try:
@@ -129,19 +33,7 @@ class ModelInputCliTests(unittest.TestCase):
         )
         return parsed
 
-    def invoke(self, *args):
-        stderr = io.StringIO()
-        with (
-            contextlib.redirect_stderr(stderr),
-            contextlib.redirect_stdout(io.StringIO()),
-        ):
-            try:
-                code = cli.main(self.arguments(*args))
-            except SystemExit as error:
-                code = error.code
-        return code, stderr.getvalue()
-
-    def test_build_and_doctor_expose_model_input_options(self):
+    def test_build_and_check_expose_model_input_options(self):
         args = self.parse(
             "--config",
             "customer.json",
@@ -158,10 +50,35 @@ class ModelInputCliTests(unittest.TestCase):
         self.assertEqual(args.asset, ["normalization=stats.json"])
         with contextlib.redirect_stdout(io.StringIO()) as help_text:
             with self.assertRaises(SystemExit) as exit_info:
-                cli.parser().parse_args(["doctor", "--help"])
+                cli.parser().parse_args(["check", "--help"])
         self.assertEqual(exit_info.exception.code, 0)
         for option in ("--config", "--checkpoint", "--checkpoint-sha256", "--asset"):
             self.assertIn(option, help_text.getvalue())
+
+    def test_check_consolidates_configuration_validation(self):
+        self.assertNotIn("doctor", cli.parser().format_help())
+        with contextlib.redirect_stdout(io.StringIO()) as help_text:
+            with self.assertRaises(SystemExit) as exit_info:
+                cli.parser().parse_args(["check", "--help"])
+        self.assertEqual(exit_info.exception.code, 0)
+        self.assertIn("--config-only", help_text.getvalue())
+        with self.assertRaisesRegex(cli.UsageError, "unrecognized arguments"):
+            cli.parser().parse_args(["build", "--config-only"])
+
+    def test_recipe_check_requires_explicit_configuration_only_mode(self):
+        arguments = self.arguments("--json")
+        arguments[0] = "check"
+        with (
+            contextlib.redirect_stdout(io.StringIO()) as stdout,
+            contextlib.redirect_stderr(io.StringIO()),
+            mock.patch.object(cli, "container_build") as build,
+        ):
+            code = cli.main(arguments)
+        self.assertEqual(code, 2)
+        result = json.loads(stdout.getvalue())
+        self.assertIn("--config-only", result["diagnostics"][0]["message"])
+        build.assert_not_called()
+        self.assertFalse(self.output.exists())
 
     def test_v2_recipe_is_accepted_and_input_schema_errors_are_usage_errors(self):
         with mock.patch.object(inputs, "validate_input_spec") as validate:
@@ -240,7 +157,7 @@ class ModelInputCliTests(unittest.TestCase):
                 side_effect=ValueError("checkpoint SHA-256 mismatch"),
             ),
             mock.patch.object(cli.shutil, "which") as docker,
-            mock.patch("pnmir_build.worker.execute_build") as execute,
+            mock.patch("model_builder.build.worker.execute_build") as execute,
         ):
             code, error = self.invoke("--runtime", str(self.root / "missing"))
         self.assertEqual(code, 2)
@@ -263,7 +180,7 @@ class ModelInputCliTests(unittest.TestCase):
                 with (
                     mock.patch.object(cli, "resolve", return_value=self.plan),
                     mock.patch(
-                        "pnmir_build.worker.execute_build", side_effect=execute
+                        "model_builder.build.worker.execute_build", side_effect=execute
                     ) as worker,
                 ):
                     code, _ = self.invoke()
@@ -284,7 +201,9 @@ class ModelInputCliTests(unittest.TestCase):
         self.plan["model_inputs"] = None
         with (
             mock.patch.object(cli, "resolve", return_value=self.plan),
-            mock.patch("pnmir_build.worker.execute_build", return_value={}) as execute,
+            mock.patch(
+                "model_builder.build.worker.execute_build", return_value={}
+            ) as execute,
         ):
             code, _ = self.invoke()
         self.assertEqual(code, 0)
@@ -294,21 +213,21 @@ class ModelInputCliTests(unittest.TestCase):
 
     def test_v1_input_override_is_rejected_before_worker_import(self):
         self.recipe_path.write_text(json.dumps(dict(self.recipe, format_version=1)))
-        with mock.patch("pnmir_build.worker.execute_build") as execute:
+        with mock.patch("model_builder.build.worker.execute_build") as execute:
             code, error = self.invoke("--config", self.resolved["config"]["path"])
         self.assertEqual(code, 2)
         self.assertIn("overrides require recipe format_version 2", error)
         execute.assert_not_called()
         self.assertFalse(self.output.exists())
 
-    def test_doctor_resolves_real_v2_files_without_site_packages(self):
+    def test_config_only_resolves_real_v2_files_without_site_packages(self):
         arguments = self.arguments("--checkpoint", self.resolved["checkpoint"]["path"])
-        arguments[0] = "doctor"
+        arguments[:1] = ["check", "--config-only"]
         result = subprocess.run(
             [
                 sys.executable,
                 "-S",
-                str(Path(__file__).resolve().parents[2] / "physicsnemo-model-builder"),
+                str(Path(__file__).resolve().parents[2] / "pnms-model-builder"),
                 *arguments,
             ],
             cwd=self.root,
@@ -317,9 +236,12 @@ class ModelInputCliTests(unittest.TestCase):
             timeout=15,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(json.loads(result.stdout)["status"], "configuration-ok")
+        document = json.loads(result.stdout)
+        self.assertEqual(document["command"], "check")
+        self.assertEqual(document["status"], "configuration-ok")
         self.assertFalse(self.output.exists())
 
+    @linux_container()
     def test_container_stages_inputs_and_keeps_original_recipe_bytes(self):
         original = self.recipe_path.read_bytes()
 
@@ -377,46 +299,6 @@ class ModelInputCliTests(unittest.TestCase):
         self.assertEqual(stage_call.call_args.args[0], self.resolved)
         validate.assert_called_once_with(self.plan)
         self.assertEqual(self.recipe_path.read_bytes(), original)
-
-    def completed_v2(self):
-        fixture = test_worker.WorkerTest(methodName="runTest")
-        fixture.setUp()
-        self.addCleanup(fixture.doCleanups)
-        fixture.run_build(["aoti"])
-        recipe = dict(fixture.recipe, format_version=2)
-        for field in ("config", "checkpoint", "assets"):
-            recipe[field] = copy.deepcopy(self.recipe[field])
-        resolved = inputs.resolve_inputs(
-            recipe, self.recipe_path, checkpoint=self.resolved["checkpoint"]["path"]
-        )
-        source = fixture.output / "source"
-        staged = inputs.stage_inputs(resolved, source)
-        (source / "recipe.json").write_text(json.dumps(recipe))
-        (source / "effective-recipe.json").write_text(
-            json.dumps(inputs.effective_recipe(recipe, staged, source))
-        )
-        build_path = fixture.output / "build.json"
-        release_path = fixture.output / "model/model-release.json"
-        build = json.loads(build_path.read_text())
-        build["variants"]["aoti"]["graph"]["entrypoint"] = "program.pt2"
-        build["source"]["files"] = test_worker.worker._inventory(source, fixture.output)
-        release = json.loads(release_path.read_text())
-        identities = inputs.input_identities(resolved)
-        build["model_inputs"] = identities
-        release["model_inputs"] = identities
-        release_path.write_text(json.dumps(release))
-        build["release"].update(
-            sha256=hashlib.sha256(release_path.read_bytes()).hexdigest(),
-            size_bytes=release_path.stat().st_size,
-        )
-        build_path.write_text(json.dumps(build))
-        plan = dict(
-            self.plan,
-            output=fixture.output,
-            recipe=recipe,
-            model_inputs=resolved,
-        )
-        return plan, build_path, release_path, build, release, identities
 
     def test_container_completion_checks_both_model_input_identities(self):
         plan, build_path, release_path, original_build, original_release, identities = (
@@ -491,9 +373,7 @@ class ModelInputCliTests(unittest.TestCase):
                             target.read_bytes()
                         ).hexdigest()
                         effective_path.write_text(json.dumps(effective))
-                    build["source"]["files"] = test_worker.worker._inventory(
-                        source, plan["output"]
-                    )
+                    build["source"]["files"] = worker._inventory(source, plan["output"])
                 else:
                     build["source"]["files"] = [
                         record

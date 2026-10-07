@@ -11,7 +11,7 @@ import unittest
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from pnmir_build import authoring, cli, project_lock, project_run
+from model_builder.build import authoring, cli, project_lock, project_run
 
 
 class ProjectRetentionTests(unittest.TestCase):

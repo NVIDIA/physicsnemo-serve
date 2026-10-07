@@ -1,11 +1,12 @@
-#include "physicsnemo/inference/backends/tensorrt_exact_weighted_blend_plugin.hpp"
+#include "physicsnemo/inference/backends/tensorrt_exact.hpp"
+
+#include "exact_plugin_support.hpp"
 
 #include <NvInfer.h>
 #include <cuda_runtime_api.h>
 
 #include <cstdint>
 #include <cstdio>
-#include <limits>
 #include <new>
 
 namespace physicsnemo::inference {
@@ -28,19 +29,7 @@ __global__ void exact_weighted_blend_kernel(
   }
 }
 
-bool element_count(const nvinfer1::Dims& input, std::int64_t* elements) {
-  if (input.nbDims < 1) return false;
-  std::int64_t result = 1;
-  for (int32_t index = 0; index < input.nbDims; ++index) {
-    if (input.d[index] <= 0 ||
-        result > std::numeric_limits<std::int64_t>::max() / input.d[index]) {
-      return false;
-    }
-    result *= input.d[index];
-  }
-  *elements = result;
-  return true;
-}
+using tensorrt_detail::element_count;
 
 bool same_dimensions(const nvinfer1::Dims& left,
                      const nvinfer1::Dims& right) {
@@ -68,15 +57,7 @@ class ExactWeightedBlendPlugin final
  public:
   nvinfer1::IPluginCapability* getCapabilityInterface(
       nvinfer1::PluginCapabilityType type) noexcept override {
-    switch (type) {
-      case nvinfer1::PluginCapabilityType::kCORE:
-        return static_cast<nvinfer1::IPluginV3OneCore*>(this);
-      case nvinfer1::PluginCapabilityType::kBUILD:
-        return static_cast<nvinfer1::IPluginV3OneBuild*>(this);
-      case nvinfer1::PluginCapabilityType::kRUNTIME:
-        return static_cast<nvinfer1::IPluginV3OneRuntime*>(this);
-    }
-    return nullptr;
+    return tensorrt_detail::capability_interface(this, type);
   }
 
   nvinfer1::IPluginV3* clone() noexcept override {
@@ -132,13 +113,8 @@ class ExactWeightedBlendPlugin final
   bool supportsFormatCombination(
       int32_t position, const nvinfer1::DynamicPluginTensorDesc* in_out,
       int32_t nb_inputs, int32_t nb_outputs) noexcept override {
-    if (in_out == nullptr || position < 0 || position >= 5 || nb_inputs != 4 ||
-        nb_outputs != 1) {
-      return false;
-    }
-    const auto& descriptor = in_out[position].desc;
-    return descriptor.type == nvinfer1::DataType::kFLOAT &&
-           descriptor.format == nvinfer1::TensorFormat::kLINEAR;
+    return tensorrt_detail::supports_fp32_linear(
+        position, in_out, nb_inputs, nb_outputs, 4);
   }
 
   int32_t getNbOutputs() const noexcept override { return 1; }

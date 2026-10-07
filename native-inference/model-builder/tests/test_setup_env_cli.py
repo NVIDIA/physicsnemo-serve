@@ -13,7 +13,7 @@ import unittest
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from pnmir_build import cli, environment, scaffold
+from model_builder.build import cli, environment, scaffold
 
 
 class SetupEnvironmentCommandTests(unittest.TestCase):
@@ -30,9 +30,11 @@ class SetupEnvironmentCommandTests(unittest.TestCase):
         self.make_executable(self.cmake)
         which = mock.patch(
             "shutil.which",
-            side_effect=lambda name: str(self.cmake)
-            if name == "cmake"
-            else (str(name) if Path(name).is_file() else None),
+            side_effect=lambda name: (
+                str(self.cmake)
+                if name == "cmake"
+                else (str(name) if Path(name).is_file() else None)
+            ),
         )
         which.start()
         self.addCleanup(which.stop)
@@ -73,7 +75,7 @@ class SetupEnvironmentCommandTests(unittest.TestCase):
         if "venv" in command:
             self.make_executable(self.destination / "bin" / "python")
         if "pip" in command and "install" in command:
-            self.make_executable(self.destination / "bin" / "physicsnemo-model-builder")
+            self.make_executable(self.destination / "bin" / "pnms-model-builder")
         if "--build" in command and "cmake" in Path(command[0]).name:
             self.make_executable(
                 self.destination / ".physicsnemo" / "runtime" / "physicsnemo-infer"
@@ -146,6 +148,45 @@ class SetupEnvironmentCommandTests(unittest.TestCase):
             )
         )
 
+    def test_source_staging_preserves_nested_build_and_dist_packages(self):
+        package = self.root / "builder source"
+        retained = {
+            "pyproject.toml": '[project]\nname = "model-builder"\nversion = "1.0"\n',
+            "src/model_builder/__init__.py": "# package\n",
+            "src/model_builder/build/__init__.py": "# build package\n",
+            "src/model_builder/build/module.py": "VALUE = 'build source'\n",
+            "src/model_builder/dist/module.py": "VALUE = 'nested source'\n",
+        }
+        excluded = {
+            "build/generated.py": "# generated build output\n",
+            "dist/package.whl": "generated wheel",
+            ".pytest_cache/state": "cached result",
+            "src/model_builder/build/__pycache__/module.pyc": "cached bytecode",
+            "src/model_builder/package.egg-info/PKG-INFO": "generated metadata",
+        }
+        for relative, content in (retained | excluded).items():
+            path = package / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content)
+
+        code, result, _, _ = self.invoke(
+            "--builder-package", str(package), "--runtime", str(self.runtime)
+        )
+        self.assertEqual(code, 0, result)
+        staged = self.destination / ".physicsnemo" / "builder-source"
+        self.assertEqual(
+            {
+                path.relative_to(staged).as_posix()
+                for path in staged.rglob("*")
+                if path.is_file()
+            },
+            set(retained),
+        )
+        for relative, content in retained.items():
+            self.assertEqual((staged / relative).read_text(), content)
+        for relative, content in (retained | excluded).items():
+            self.assertEqual((package / relative).read_text(), content)
+
     def test_checkout_bootstraps_sdk_once_with_venv_python(self):
         code, result, _, run = self.invoke("--python", str(self.selected_python))
         self.assertEqual(code, 0, result)
@@ -201,7 +242,7 @@ class SetupEnvironmentCommandTests(unittest.TestCase):
             )
         if "pip" in command and "install" in command:
             self.make_executable(
-                self.destination / "Scripts" / "physicsnemo-model-builder.exe"
+                self.destination / "Scripts" / "pnms-model-builder.exe"
             )
         if "--build" in command and "cmake" in Path(command[0]).name:
             self.make_executable(
@@ -246,7 +287,8 @@ class SetupEnvironmentCommandTests(unittest.TestCase):
         build = next(command for command in commands if "--build" in command)
         self.assertEqual(build[build.index("--config") + 1], "Release")
         self.assertEqual(
-            result["build_command"][:3], [result["python"], "-m", "pnmir_build.cli"]
+            result["build_command"][:3],
+            [result["python"], "-m", "model_builder.build.cli"],
         )
         for call in run.call_args_list[1:]:
             self.assertIn(str(trt_root / "bin"), call.kwargs["env"]["PATH"])
@@ -348,7 +390,11 @@ class SetupEnvironmentCommandTests(unittest.TestCase):
         )
         self.assertEqual(
             build[:3],
-            [str(self.destination / "Scripts" / "python.exe"), "-m", "pnmir_build.cli"],
+            [
+                str(self.destination / "Scripts" / "python.exe"),
+                "-m",
+                "model_builder.build.cli",
+            ],
         )
         self.assertEqual(result["build"]["status"], "complete")
         self.assertEqual(self.project_file.read_bytes(), self.project_bytes)
@@ -496,7 +542,7 @@ class SetupEnvironmentCommandTests(unittest.TestCase):
     ):
         modules = {}
         for name in (
-            "pnmir_build.cli",
+            "model_builder.build.cli",
             "torch",
             "numpy",
             "onnx",
@@ -568,7 +614,7 @@ class SetupEnvironmentCommandTests(unittest.TestCase):
         def missing_entrypoint(command, **kwargs):
             completed = self.success(command, **kwargs)
             if "pip" in command and "install" in command:
-                (self.destination / "bin" / "physicsnemo-model-builder").unlink()
+                (self.destination / "bin" / "pnms-model-builder").unlink()
             return completed
 
         code, result, _, _ = self.invoke(
@@ -648,7 +694,7 @@ class SetupEnvironmentCommandTests(unittest.TestCase):
             build[:2],
             [
                 str(self.destination / "bin" / "python"),
-                str(self.destination / "bin" / "physicsnemo-model-builder"),
+                str(self.destination / "bin" / "pnms-model-builder"),
             ],
         )
         self.assertEqual(build[build.index("--executor") + 1], "local")

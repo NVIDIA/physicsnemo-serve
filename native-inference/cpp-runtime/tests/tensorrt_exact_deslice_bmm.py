@@ -21,9 +21,19 @@ def run(cli, package, backend, scratch, *arguments):
     scratch.mkdir(parents=True, exist_ok=True)
     env = dict(os.environ, TEMP=str(scratch), TMP=str(scratch))
     return subprocess.run(
-        [str(cli), "run", str(package), "--backend", backend, "--device",
-         "cpu" if backend == "mock" else "cuda", *arguments],
-        capture_output=True, text=True, env=env,
+        [
+            str(cli),
+            "run",
+            str(package),
+            "--backend",
+            backend,
+            "--device",
+            "cpu" if backend == "mock" else "cuda",
+            *arguments,
+        ],
+        capture_output=True,
+        text=True,
+        env=env,
     )
 
 
@@ -35,11 +45,17 @@ def manifest(inputs, outputs, backend, artifact):
     return {
         "format_version": 1,
         "model": {"name": "exact-deslice", "version": "1"},
-        "inputs": inputs, "outputs": outputs,
-        "artifacts": [{"backend": backend,
-                       "target": "cpu" if backend == "mock" else "cuda",
-                       "precision": "fp32", "path": artifact,
-                       "required_operators": [{"id": OPERATOR, "abi": "1"}]}],
+        "inputs": inputs,
+        "outputs": outputs,
+        "artifacts": [
+            {
+                "backend": backend,
+                "target": "cpu" if backend == "mock" else "cuda",
+                "precision": "fp32",
+                "path": artifact,
+                "required_operators": [{"id": OPERATOR, "abi": "1"}],
+            }
+        ],
     }
 
 
@@ -57,16 +73,21 @@ def main():
     registration = root / "registration"
     registration.mkdir()
     (registration / "identity.mock").write_text("pnmir mock identity artifact v1\n")
-    doc = manifest([tensor("input", [3])], [tensor("output", [3])],
-                   "mock", "identity.mock")
+    doc = manifest(
+        [tensor("input", [3])], [tensor("output", [3])], "mock", "identity.mock"
+    )
     path = registration / "model.json"
     path.write_text(json.dumps(doc))
-    result = run(args.pnmir, registration, "mock", root / "child-temp", "--values", "1,2,3")
+    result = run(
+        args.pnmir, registration, "mock", root / "child-temp", "--values", "1,2,3"
+    )
     require_success(result)
     assert result.stdout.strip() == "output: 1 2 3", result.stdout
     doc["artifacts"][0]["required_operators"][0]["abi"] = "unsupported"
     path.write_text(json.dumps(doc))
-    result = run(args.pnmir, registration, "mock", root / "child-temp", "--values", "1,2,3")
+    result = run(
+        args.pnmir, registration, "mock", root / "child-temp", "--values", "1,2,3"
+    )
     assert result.returncode != 0 and OPERATOR in result.stderr, result.stderr
 
     import tensorrt as trt
@@ -83,15 +104,20 @@ def main():
     generator = torch.Generator(device="cuda").manual_seed(927)
     for tokens in (75, 2048):
         shape = (1, tokens, 8, 32)
-        specifications = [tensor("weights", (1, tokens, 8, 512)),
-                          tensor("attended", (1, 512, 8, 32))]
+        specifications = [
+            tensor("weights", (1, tokens, 8, 512)),
+            tensor("attended", (1, 512, 8, 32)),
+        ]
         logger = trt.Logger(trt.Logger.WARNING)
         builder = trt.Builder(logger)
         network = builder.create_network(0)
-        inputs = [network.add_input(item["name"], trt.float32, tuple(item["shape"]))
-                  for item in specifications]
-        plugin = creator.create_plugin("deslice", trt.PluginFieldCollection([]),
-                                       trt.TensorRTPhase.BUILD)
+        inputs = [
+            network.add_input(item["name"], trt.float32, tuple(item["shape"]))
+            for item in specifications
+        ]
+        plugin = creator.create_plugin(
+            "deslice", trt.PluginFieldCollection([]), trt.TensorRTPhase.BUILD
+        )
         layer = network.add_plugin_v3(inputs, [], plugin)
         assert layer is not None
         restore = network.add_shuffle(layer.get_output(0))
@@ -106,14 +132,22 @@ def main():
         package = root / f"n{tokens}"
         package.mkdir()
         (package / "model.plan").write_bytes(bytes(plan))
-        doc = manifest(specifications, [tensor("output", shape)], "tensorrt", "model.plan")
+        doc = manifest(
+            specifications, [tensor("output", shape)], "tensorrt", "model.plan"
+        )
         doc["artifacts"][0]["runtime_version"] = trt.__version__
         (package / "model.json").write_text(json.dumps(doc))
         for index in range(3):
-            weights = torch.randn(specifications[0]["shape"], device="cuda", generator=generator)
-            attended = torch.randn(specifications[1]["shape"], device="cuda", generator=generator)
+            weights = torch.randn(
+                specifications[0]["shape"], device="cuda", generator=generator
+            )
+            attended = torch.randn(
+                specifications[1]["shape"], device="cuda", generator=generator
+            )
             # Original operation and original physical layouts, without a contiguous BHSD copy.
-            expected = torch.einsum("bths,bhsd->bthd", weights, attended.permute(0, 2, 1, 3))
+            expected = torch.einsum(
+                "bths,bhsd->bthd", weights, attended.permute(0, 2, 1, 3)
+            )
             case = package / f"case-{index}"
             case.mkdir()
             arguments = []
@@ -122,12 +156,21 @@ def main():
                 binary.write_bytes(value.cpu().numpy().tobytes())
                 arguments += ["--input-file", f"{spec['name']}={binary}"]
             actual = case / "output.bin"
-            result = run(args.pnmir, package, "tensorrt", case / "child-temp",
-                         *arguments, "--output-file", str(actual))
+            result = run(
+                args.pnmir,
+                package,
+                "tensorrt",
+                case / "child-temp",
+                *arguments,
+                "--output-file",
+                str(actual),
+            )
             require_success(result)
             expected_bytes = expected.cpu().numpy().tobytes()
             (case / "expected.bin").write_bytes(expected_bytes)
-            assert actual.read_bytes() == expected_bytes, f"N={tokens} case {index} differs from eager"
+            assert actual.read_bytes() == expected_bytes, (
+                f"N={tokens} case {index} differs from eager"
+            )
     print("Deslice registration and ABI gate passed; six CUDA cases byte-identical.")
     return 0
 

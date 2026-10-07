@@ -1,141 +1,19 @@
-# Native Windows 11 development
+# Windows SDK reference
 
-Model Builder and the C++ Inference SDK have native Windows build paths for
-AOTInductor and TensorRT. The standard environment setup builds the generic
-TensorRT backend; exact TensorRT profiles require the manually configured SDK
-described below. Run the commands in **Developer
-PowerShell for VS 2022**, targeting x64, from the repository root. WSL and Docker
-are not required. `setup-env` does not install system compilers or GPU drivers.
+For prerequisites, environment setup, activation and your first native model
+build, follow the user manual's [Windows setup chapter](user-guide.md#windows-setup).
+This reference covers C++ SDK tests and exact TensorRT plugin builds.
 
-Configured Windows CI jobs exercise the core SDK, static/shared installation,
-and CPU AOTInductor. They must pass on the branch before claiming Windows validation.
-CUDA qualification must run on the target Windows GPU: a successful Linux/H100
-run or a skipped CUDA test does not qualify a Windows/L4 deployment. The native
-Windows GPU path is experimental until the checks below pass on your machine.
+Run the commands below from the repository root in **Developer PowerShell for
+VS 2022**, targeting x64, after completing that chapter. Reuse its `$builderEnv`,
+`$tensorRt`, `$env:CUDA_PATH`, `$env:TORCH_CUDA_ARCH_LIST`, `$env:LINK` and
+`$env:PYTHONUTF8` settings, and activate
+`<environment>/.physicsnemo/activate.ps1`. The ordinary venv activation script
+alone does not add the native DLL paths.
 
-## Prerequisites
-
-- Windows 11 x64 and an NVIDIA Windows driver compatible with your CUDA toolkit.
-  Native Windows CUDA does not require changing the GPU into a WSL driver mode.
-- Full CPython 3.12 x64, with development headers and libraries (not embedded Python).
-- Visual Studio 2022 or Build Tools 2022, with **Desktop development with C++**,
-  MSVC v143, and a Windows SDK. Use the x64 developer shell so `cl.exe` is available
-  to AOTInductor as well as CMake.
-- CMake 3.24 or newer, so the Visual Studio generator treats external SDK
-  headers as system includes while retaining strict warnings for project code.
-- CUDA Toolkit **12.8**, including compiler and development files.
-- A **TensorRT 10.x Windows x64 CUDA 12** SDK, including `include/NvInfer.h`,
-  `lib/nvinfer_10.lib`, and its DLLs in `bin` or `lib`. Point `--tensorrt-root` at
-  the extracted SDK directory. A Python-only TensorRT installation is insufficient.
-
-The checked-in [CUDA requirements](../model-builder/requirements-windows-cu128.txt)
-select PyTorch 2.10.0 with CUDA 12.8 and the community `triton-windows` 3.6 series.
-PyTorch publishes [Windows CUDA wheels](https://pytorch.org/get-started/previous-versions/);
-the [Windows Triton project](https://github.com/woct0rdho/triton-windows) documents
-the PyTorch/Triton version pairing. This requirements file is a starting profile,
-not a fully qualified dependency lock. Model-specific requirements may need more
-packages. NVIDIA documents the [TensorRT Windows SDK installation](https://docs.nvidia.com/deeplearning/tensorrt/latest/installing-tensorrt/install-zip.html).
-
-Use a short checkout path such as `C:\src\physicsnemo-serve` to leave room for
-generated compiler filenames. Confirm the system tools before installing Python
-dependencies:
-
-```powershell
-python --version
-cmake --version
-Get-Command cl
-nvcc --version
-nvidia-smi
-```
-
-## Create one environment for both backends
-
-Set the TensorRT directory to the SDK you extracted. The environment directory
-must not already exist. For an L4, the CUDA architecture is 8.9.
-
-```powershell
-$builderEnv = Join-Path $env:USERPROFILE '.venvs\physicsnemo-native'
-$tensorRt = 'C:\SDKs\TensorRT-10.13.3.9'
-$env:CUDA_PATH = 'C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.8'
-$env:PATH = "$env:CUDA_PATH\bin;$env:PATH"
-$env:TORCH_CUDA_ARCH_LIST = '8.9'
-$env:PYTHONUTF8 = '1'
-# PyTorch 2.10 native Windows AOTI omits this CUDA runtime import library.
-$cudaRuntimeLibrary = Join-Path $env:CUDA_PATH 'lib\x64\cudart.lib'
-if (!(Test-Path $cudaRuntimeLibrary)) { throw 'CUDA runtime development library missing.' }
-$env:LINK = ($env:LINK + ' "' + $cudaRuntimeLibrary + '"').Trim()
-
-$setupJson = python .\native-inference\physicsnemo-model-builder setup-env $builderEnv `
-  --backend aoti --backend tensorrt `
-  --tensorrt-root $tensorRt --tensorrt-cuda-major 12 `
-  --requirements .\native-inference\model-builder\requirements-windows-cu128.txt `
-  --json
-if ($LASTEXITCODE -ne 0) { throw 'Environment setup failed; inspect the reported setup.log.' }
-$setup = $setupJson | ConvertFrom-Json
-$runtime = $setup.runtime
-
-. (Join-Path $builderEnv '.physicsnemo\activate.ps1')
-```
-
-Setup selects the Windows `Scripts` venv layout, builds an x64 Release SDK,
-and installs TensorRT Python bindings matching the C++ SDK headers. Its
-PowerShell activation wrapper adds Torch, TensorRT and CUDA DLL directories
-to the current process's `PATH`; use that wrapper in subsequent developer
-shells as well. The ordinary `Scripts/Activate.ps1` alone does not add those
-native dependency paths. Activation follows your existing PowerShell policy.
-Setup retains the runtime path and activation command in
-`<environment>/.physicsnemo/environment.json` and leaves model project files unchanged.
-
-Keep the CUDA, `LINK`, and `PYTHONUTF8` settings in each developer shell used for
-model builds and CTest. The process-scoped [`LINK` setting](https://learn.microsoft.com/en-us/cpp/build/reference/linking?view=msvc-170#link-environment-variables)
-supplies `cudart.lib` to MSVC without modifying PyTorch. UTF-8 mode also allows
-framework progress messages to reach redirected logs on Windows.
-
-For an extracted CUDA SDK whose Visual Studio integration is not registered,
-set `$env:CMAKE_GENERATOR_TOOLSET = "cuda=$env:CUDA_PATH,host=x64"` before setup.
-That SDK must include `extras\visual_studio_integration\MSBuildExtensions`.
-Setup forwards this toolset explicitly; it also honors
-`CMAKE_GENERATOR_INSTANCE` when selecting a particular Visual Studio installation.
-
-To prepare just one backend, pass only its `--backend`. TensorRT requires
-CUDA-enabled PyTorch for eager reference/export. CUDA AOTInductor additionally
-requires the matching Windows Triton package; CPU AOTInductor does not require
-Triton or a GPU. AOTInductor exports and the SDK must use the same Torch version.
-
-## Verify CUDA export and native inference
-
-Check actual GPU computation before compiling a model:
-
-```powershell
-python -c "import torch, triton, tensorrt; assert torch.cuda.is_available(); print(torch.__version__, torch.version.cuda, triton.__version__, tensorrt.__version__); print(torch.cuda.get_device_name(0), torch.cuda.get_device_capability(0)); print((torch.ones(4, device='cuda') * 2 + 1).cpu())"
-if ($LASTEXITCODE -ne 0) { throw 'CUDA dependency check failed.' }
-
-$candidate = Join-Path (Get-Location) ('out\inference\l4-' + [guid]::NewGuid().ToString('N'))
-physicsnemo-model-builder build affine `
-  --executor local --runtime $runtime `
-  --backend aoti --backend tensorrt `
-  --device cuda --required-gpu-arch sm89 --output $candidate --json
-if ($LASTEXITCODE -ne 0) { throw 'Native backend parity failed; inspect candidate logs.' }
-
-& $runtime run "$candidate\model\backends\aoti" `
-  --backend aoti --device cuda --values '0,1,-1,4'
-if ($LASTEXITCODE -ne 0) { throw 'AOTInductor inference failed.' }
-& $runtime run "$candidate\model\backends\tensorrt" `
-  --backend tensorrt --device cuda --values '0,1,-1,4'
-if ($LASTEXITCODE -ne 0) { throw 'TensorRT inference failed.' }
-```
-
-Both CLI invocations should print `output: 1 3 -1 9`. The build itself compares
-all three affine cases with independent Python eager references for **both**
-requested backends. Preserve `build.json`, `execution.json`, `checks/` and `logs/`
-with the checkout commit and dirty diff when reporting results. Each build needs
-a new output directory. Build packages on Windows for the target GPU; Linux
-compiled packages and H100 engines are not Windows/L4 qualification evidence.
-
-For a custom format-2 model project, run `init` using Python or the installed
-command, connect the adapter/checkpoint, and set `backends` to `["aoti", "tensorrt"]`
-plus the `executor`/`runtime` settings returned by setup. New projects initialized
-on Windows default to local execution. Run `check` before `build`.
+Configured Windows CI jobs exercise the core SDK, static/shared installation
+and CPU AOTInductor. CUDA and exact-profile validation must run on the target
+Windows GPU; Linux/H100 results do not qualify a Windows deployment.
 
 ## C++ development tests
 
@@ -225,7 +103,7 @@ $env:PATH = "$exactSdk\bin;$env:PATH"
 Keep the entire installed `bin` directory available: the runtime registers all
 twelve compiled plugin DLLs, while Transolver's v2 profile uses nine. Set the
 project's `runtime` to `$exactRuntime` and declare the assets listed in
-[TensorRT profiles](add-model.md#tensorrt-profiles). On Windows their filenames
+[TensorRT profiles](reference.md#tensorrt-profiles-and-assets). On Windows their filenames
 are `pnmir_tensorrt_exact_<operator>_plugin.dll`, without the Linux `lib` prefix.
 Copy the selected DLLs into the project's declared asset paths so Model Builder
 captures and hashes them. Updating a project's profile or assets requires

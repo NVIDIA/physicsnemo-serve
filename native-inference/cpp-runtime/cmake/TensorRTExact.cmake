@@ -2,7 +2,7 @@
 set(pnmir_tensorrt_exact_targets)
 foreach(operator IN ITEMS linear gemm token_sum slice_bmm deslice_bmm layer_norm softmax attention gelu weighted_blend scalar_div inverse_distance_blend)
   set(plugin pnmir_tensorrt_exact_${operator}_plugin)
-  if(operator MATCHES "^(linear|gemm|slice_bmm|deslice_bmm)$")
+  if(operator MATCHES "^(gemm|slice_bmm|deslice_bmm)$")
     set(extension cpp)
   else()
     set(extension cu)
@@ -14,7 +14,7 @@ foreach(operator IN ITEMS linear gemm token_sum slice_bmm deslice_bmm layer_norm
   target_include_directories(${plugin}
     PUBLIC
       $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-      $<INSTALL_INTERFACE:include>)
+      $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
   target_include_directories(${plugin} SYSTEM PRIVATE "${PNMIR_TENSORRT_INCLUDE_DIR}")
   if(MSVC AND extension STREQUAL "cu")
     # Visual Studio's CUDA task emits SYSTEM directories as ordinary -I flags.
@@ -28,7 +28,7 @@ foreach(operator IN ITEMS linear gemm token_sum slice_bmm deslice_bmm layer_norm
     $<INSTALL_INTERFACE:PhysicsNeMoInference::tensorrt_native>
     CUDA::cudart)
   if(operator STREQUAL "linear")
-    target_link_libraries(${plugin} PRIVATE CUDA::cublasLt)
+    target_link_libraries(${plugin} PRIVATE CUDA::cublasLt CUDA::cublas)
   elseif(operator MATCHES "^(gemm|slice_bmm|deslice_bmm)$")
     target_link_libraries(${plugin} PRIVATE CUDA::cublas)
   endif()

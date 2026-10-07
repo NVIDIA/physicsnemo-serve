@@ -17,7 +17,7 @@ class JsonOutputTests(unittest.TestCase):
         script = (
             "import ctypes, json, os, sys\n"
             f"sys.path.insert(0, {str(BUILDER)!r})\n"
-            "from pnmir_build.results import capture_stdout\n"
+            "from model_builder.build.results import capture_stdout\n"
             "crt = ctypes.CDLL('ucrtbase' if os.name == 'nt' else None)\n"
             "if os.name == 'nt':\n"
             "    crt.__acrt_iob_func.argtypes = [ctypes.c_uint]\n"
@@ -150,7 +150,7 @@ class JsonOutputTests(unittest.TestCase):
         run = self.run_capture("""
             from types import SimpleNamespace
             from unittest import mock
-            from pnmir_build import results
+            from model_builder.build import results
             events = []
             flush = mock.Mock(side_effect=lambda _: events.append('flush') or 0)
             set_handle = mock.Mock(side_effect=lambda *_: events.append('handle') or 1)

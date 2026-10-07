@@ -2,18 +2,7 @@
 #include "physicsnemo/inference/runtime.hpp"
 
 #ifdef PNMIR_HAS_TENSORRT_EXACT
-#include "physicsnemo/inference/backends/tensorrt_exact_attention_plugin.hpp"
-#include "physicsnemo/inference/backends/tensorrt_exact_deslice_bmm_plugin.hpp"
-#include "physicsnemo/inference/backends/tensorrt_exact_gelu_plugin.hpp"
-#include "physicsnemo/inference/backends/tensorrt_exact_gemm_plugin.hpp"
-#include "physicsnemo/inference/backends/tensorrt_exact_inverse_distance_blend_plugin.hpp"
-#include "physicsnemo/inference/backends/tensorrt_exact_layer_norm_plugin.hpp"
-#include "physicsnemo/inference/backends/tensorrt_exact_linear_plugin.hpp"
-#include "physicsnemo/inference/backends/tensorrt_exact_scalar_div_plugin.hpp"
-#include "physicsnemo/inference/backends/tensorrt_exact_slice_bmm_plugin.hpp"
-#include "physicsnemo/inference/backends/tensorrt_exact_softmax_plugin.hpp"
-#include "physicsnemo/inference/backends/tensorrt_exact_token_sum_plugin.hpp"
-#include "physicsnemo/inference/backends/tensorrt_exact_weighted_blend_plugin.hpp"
+#include "physicsnemo/inference/backends/tensorrt_exact.hpp"
 #endif
 
 #include <NvInfer.h>
@@ -27,6 +16,7 @@
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -34,23 +24,49 @@
 namespace physicsnemo::inference {
 namespace {
 
+#ifdef PNMIR_HAS_TENSORRT_EXACT
+struct ExactPlugin {
+  int (*register_plugin)() noexcept;
+  std::string_view operator_id;
+  std::string_view operator_abi;
+};
+
+// Keep registration entry points and manifest identities together. These symbol
+// references also keep every plugin DSO loaded before plan deserialization.
+constexpr ExactPlugin kExactPlugins[] = {
+    {pnmir_tensorrt_exact_linear_register,
+     kTensorRTExactLinearOperatorId, kTensorRTExactLinearOperatorAbi},
+    {pnmir_tensorrt_exact_gemm_register,
+     kTensorRTExactGemmOperatorId, kTensorRTExactGemmOperatorAbi},
+    {pnmir_tensorrt_exact_token_sum_register,
+     kTensorRTExactTokenSumOperatorId, kTensorRTExactTokenSumOperatorAbi},
+    {pnmir_tensorrt_exact_slice_bmm_register,
+     kTensorRTExactSliceBmmOperatorId, kTensorRTExactSliceBmmOperatorAbi},
+    {pnmir_tensorrt_exact_deslice_bmm_register,
+     kTensorRTExactDesliceBmmOperatorId, kTensorRTExactDesliceBmmOperatorAbi},
+    {pnmir_tensorrt_exact_layer_norm_register,
+     kTensorRTExactLayerNormOperatorId, kTensorRTExactLayerNormOperatorAbi},
+    {pnmir_tensorrt_exact_softmax_register,
+     kTensorRTExactSoftmaxOperatorId, kTensorRTExactSoftmaxOperatorAbi},
+    {pnmir_tensorrt_exact_attention_register,
+     kTensorRTExactAttentionOperatorId, kTensorRTExactAttentionOperatorAbi},
+    {pnmir_tensorrt_exact_gelu_register,
+     kTensorRTExactGeluOperatorId, kTensorRTExactGeluOperatorAbi},
+    {pnmir_tensorrt_exact_weighted_blend_register,
+     kTensorRTExactWeightedBlendOperatorId, kTensorRTExactWeightedBlendOperatorAbi},
+    {pnmir_tensorrt_exact_scalar_div_register,
+     kTensorRTExactScalarDivOperatorId, kTensorRTExactScalarDivOperatorAbi},
+    {pnmir_tensorrt_exact_inverse_distance_blend_register,
+     kTensorRTExactInverseDistanceBlendOperatorId, kTensorRTExactInverseDistanceBlendOperatorAbi},
+};
+#endif
+
 void register_exact_plugins() {
 #ifdef PNMIR_HAS_TENSORRT_EXACT
-  // References keep each plugin DSO loaded so its TensorRT creator is present
-  // before deserializing a plan. Registration entry points are ABI-stable.
-  if (pnmir_tensorrt_exact_linear_register() != 0 ||
-      pnmir_tensorrt_exact_gemm_register() != 0 ||
-      pnmir_tensorrt_exact_token_sum_register() != 0 ||
-      pnmir_tensorrt_exact_slice_bmm_register() != 0 ||
-      pnmir_tensorrt_exact_deslice_bmm_register() != 0 ||
-      pnmir_tensorrt_exact_layer_norm_register() != 0 ||
-      pnmir_tensorrt_exact_softmax_register() != 0 ||
-      pnmir_tensorrt_exact_attention_register() != 0 ||
-      pnmir_tensorrt_exact_gelu_register() != 0 ||
-      pnmir_tensorrt_exact_weighted_blend_register() != 0 ||
-      pnmir_tensorrt_exact_scalar_div_register() != 0 ||
-      pnmir_tensorrt_exact_inverse_distance_blend_register() != 0) {
-    throw std::runtime_error("TensorRT exact plugin registration failed");
+  for (const auto& plugin : kExactPlugins) {
+    if (plugin.register_plugin() != 0) {
+      throw std::runtime_error("TensorRT exact plugin registration failed");
+    }
   }
 #endif
 }
@@ -234,11 +250,16 @@ void validate_contract(const nvinfer1::ICudaEngine& engine,
       throw std::runtime_error("TensorRT " + kind +
                                " must use device memory: " + spec.name);
     }
+    if (engine.getTensorFormat(spec.name.c_str()) !=
+        nvinfer1::TensorFormat::kLINEAR) {
+      throw std::runtime_error("TensorRT " + kind +
+                               " must use LINEAR format: " + spec.name);
+    }
   }
 }
 
 std::size_t tensor_bytes(const TensorSpec& spec) {
-  return element_count(spec.shape) * dtype_size(spec.dtype);
+  return tensor_byte_size(spec.shape, spec.dtype);
 }
 
 class TensorRTSession final : public BackendSession {
@@ -438,30 +459,10 @@ std::unique_ptr<Backend> create_tensorrt_backend() {
 void register_tensorrt_exact_operators(Runtime& runtime) {
 #ifdef PNMIR_HAS_TENSORRT_EXACT
   register_exact_plugins();
-  runtime.register_operator(std::string(kTensorRTExactLinearOperatorId),
-                            std::string(kTensorRTExactLinearOperatorAbi));
-  runtime.register_operator(std::string(kTensorRTExactGemmOperatorId),
-                            std::string(kTensorRTExactGemmOperatorAbi));
-  runtime.register_operator(std::string(kTensorRTExactTokenSumOperatorId),
-                            std::string(kTensorRTExactTokenSumOperatorAbi));
-  runtime.register_operator(std::string(kTensorRTExactSliceBmmOperatorId),
-                            std::string(kTensorRTExactSliceBmmOperatorAbi));
-  runtime.register_operator(std::string(kTensorRTExactDesliceBmmOperatorId),
-                            std::string(kTensorRTExactDesliceBmmOperatorAbi));
-  runtime.register_operator(std::string(kTensorRTExactLayerNormOperatorId),
-                            std::string(kTensorRTExactLayerNormOperatorAbi));
-  runtime.register_operator(std::string(kTensorRTExactSoftmaxOperatorId),
-                            std::string(kTensorRTExactSoftmaxOperatorAbi));
-  runtime.register_operator(std::string(kTensorRTExactAttentionOperatorId),
-                            std::string(kTensorRTExactAttentionOperatorAbi));
-  runtime.register_operator(std::string(kTensorRTExactGeluOperatorId),
-                            std::string(kTensorRTExactGeluOperatorAbi));
-  runtime.register_operator(std::string(kTensorRTExactWeightedBlendOperatorId),
-                            std::string(kTensorRTExactWeightedBlendOperatorAbi));
-  runtime.register_operator(std::string(kTensorRTExactScalarDivOperatorId),
-                            std::string(kTensorRTExactScalarDivOperatorAbi));
-  runtime.register_operator(std::string(kTensorRTExactInverseDistanceBlendOperatorId),
-                            std::string(kTensorRTExactInverseDistanceBlendOperatorAbi));
+  for (const auto& plugin : kExactPlugins) {
+    runtime.register_operator(std::string(plugin.operator_id),
+                              std::string(plugin.operator_abi));
+  }
 #else
   static_cast<void>(runtime);
 #endif

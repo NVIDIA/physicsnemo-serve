@@ -87,6 +87,49 @@ FileOutput parse_file_output(const std::string& text) {
   return {text.substr(0, separator), text.substr(separator + 1)};
 }
 
+std::filesystem::path resolve_output_path(const std::filesystem::path& path,
+                                          std::size_t symlinks_left = 40) {
+  std::filesystem::path resolved;
+  for (const auto& component : std::filesystem::absolute(path)) {
+    resolved /= component;
+    if (std::filesystem::is_symlink(resolved)) {
+      if (symlinks_left == 0) {
+        throw std::invalid_argument("too many symlinks in output path: " +
+                                    path.string());
+      }
+      const auto target = std::filesystem::read_symlink(resolved);
+      // Resolve dangling targets too: an earlier output could create them.
+      resolved = resolve_output_path(
+          target.is_absolute() ? target : resolved.parent_path() / target,
+          symlinks_left - 1);
+    } else {
+      resolved = resolved.lexically_normal();
+    }
+  }
+  return resolved;
+}
+
+void validate_output_paths(const std::vector<FileOutput>& output_files,
+                           const std::filesystem::path& output_metadata) {
+  std::vector<std::filesystem::path> paths;
+  for (const auto& output : output_files) paths.push_back(output.path);
+  if (!output_metadata.empty()) paths.push_back(output_metadata);
+  std::vector<std::filesystem::path> resolved_paths;
+  for (const auto& path : paths) {
+    const auto resolved = resolve_output_path(path);
+    for (std::size_t previous = 0; previous < resolved_paths.size(); ++previous) {
+      std::error_code error;
+      if (resolved == resolved_paths[previous] ||
+          std::filesystem::equivalent(resolved, resolved_paths[previous], error)) {
+        throw std::invalid_argument("output paths must be distinct: " +
+                                    paths[previous].string() + " and " +
+                                    path.string());
+      }
+    }
+    resolved_paths.push_back(resolved);
+  }
+}
+
 InputShape parse_input_shape(const std::string& text) {
   const auto separator = text.find('=');
   if (separator == std::string::npos || separator == 0 ||
@@ -166,12 +209,18 @@ double percentile(const std::vector<double>& sorted, std::size_t numerator) {
 }
 
 std::vector<float> parse_values(const std::string& text) {
+  if (text.ends_with(',')) throw std::invalid_argument("empty input value");
   std::vector<float> values;
   std::stringstream stream(text);
   std::string item;
   while (std::getline(stream, item, ',')) {
     if (item.empty()) throw std::invalid_argument("empty input value");
-    values.push_back(std::stof(item));
+    std::size_t consumed = 0;
+    const float value = std::stof(item, &consumed);
+    if (item.find_first_not_of(" \t\n\r\f\v", consumed) != std::string::npos) {
+      throw std::invalid_argument("invalid input value: " + item);
+    }
+    values.push_back(value);
   }
   if (values.empty()) throw std::invalid_argument("at least one value is required");
   return values;
@@ -214,6 +263,7 @@ void write_bytes(const std::filesystem::path& path,
     output.write(reinterpret_cast<const char*>(storage.data()),
                  static_cast<std::streamsize>(storage.size()));
   }
+  output.close();
   if (!output) {
     throw std::runtime_error("cannot write output file: " + path.string());
   }
@@ -291,6 +341,7 @@ int run(int argc, char** argv) {
     throw std::invalid_argument(
         "provide either --values or one or more --input-file arguments");
   }
+  validate_output_paths(output_files, output_metadata);
 
   const auto package_load_start = std::chrono::steady_clock::now();
   const auto package = physicsnemo::inference::ModelPackage::load(package_path);
@@ -373,8 +424,8 @@ int run(int argc, char** argv) {
             "dynamic input requires --input-shape: " + spec->name);
       }
       validate_actual_shape(*spec, actual_shape);
-      const std::size_t expected_size = physicsnemo::inference::element_count(actual_shape) *
-                                        physicsnemo::inference::dtype_size(spec->dtype);
+      const std::size_t expected_size =
+          physicsnemo::inference::tensor_byte_size(actual_shape, spec->dtype);
       owned_inputs.emplace_back(spec->name, spec->dtype, physicsnemo::inference::Device{},
                                 std::move(actual_shape),
                                 read_bytes(file_input.path, expected_size));
@@ -449,6 +500,8 @@ int run(int argc, char** argv) {
         throw std::invalid_argument("duplicate output tensor: " + name);
       }
       write_bytes(file_output.path, output->storage());
+      // Creating a file can reveal case or Unicode aliases on its filesystem.
+      validate_output_paths(output_files, output_metadata);
       std::cout << name << ": wrote " << output->storage().size()
                 << " bytes to " << file_output.path.string() << '\n';
     }

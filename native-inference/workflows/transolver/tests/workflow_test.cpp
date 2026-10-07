@@ -77,7 +77,8 @@ std::string base64_encode(const std::vector<std::uint8_t>& bytes) {
 }
 
 std::filesystem::path write_inline_binary_vtu_fixture(
-    const bool use_uint64_header) {
+    const bool use_uint64_header,
+    const std::size_t piece_count = 1) {
   const auto suffix = std::chrono::steady_clock::now()
                           .time_since_epoch()
                           .count();
@@ -107,11 +108,18 @@ std::filesystem::path write_inline_binary_vtu_fixture(
       << "<VTKFile type='UnstructuredGrid' version='0.1' "
          "byte_order='LittleEndian' header_type='"
       << (use_uint64_header ? "UInt64" : "UInt32") << "'>\n"
-      << "<UnstructuredGrid><Piece NumberOfPoints='4' NumberOfCells='0'>\n"
-      << "<Points><DataArray type='Float32' Name='Points' "
-         "NumberOfComponents='3' format='binary'>\n"
-      << base64_encode(binary)
-      << "\n</DataArray></Points></Piece></UnstructuredGrid></VTKFile>\n";
+      << "<UnstructuredGrid>\n";
+  for (std::size_t piece = 0; piece < piece_count; ++piece) {
+    stream
+        << "<Piece NumberOfPoints='4' NumberOfCells='0'>\n"
+        << "<Points><DataArray type='Float32' Name='Points' "
+           "NumberOfComponents='3' format='binary'>\n"
+        << base64_encode(binary)
+        << "\n</DataArray></Points>\n"
+        << "<!-- A > character and <Piece> inside a comment are not tags. -->\n"
+        << "</Piece>\n";
+  }
+  stream << "</UnstructuredGrid></VTKFile>\n";
   stream.close();
   return path;
 }
@@ -269,6 +277,21 @@ void test_bounded_inline_binary_vtu_reader() {
   std::filesystem::remove(uint32_path);
 }
 
+void test_multipiece_inline_binary_vtu_reader() {
+  for (const bool use_uint64_header : {false, true}) {
+    const auto path = write_inline_binary_vtu_fixture(use_uint64_header, 2);
+    bool rejected = false;
+    try {
+      transolver_workflow::InlineBinaryVtuPointStream stream(path);
+    } catch (const std::runtime_error& error) {
+      rejected = std::string_view(error.what()).find("exactly one Piece") !=
+                 std::string_view::npos;
+    }
+    std::filesystem::remove(path);
+    check(rejected, "VTU stream silently accepted multiple Pieces");
+  }
+}
+
 }  // namespace
 
 int main() {
@@ -276,6 +299,7 @@ int main() {
     test_domains_and_contracts();
     test_stats_and_decoding();
     test_bounded_inline_binary_vtu_reader();
+    test_multipiece_inline_binary_vtu_reader();
     std::cout << "transolver workflow tests passed\n";
     return 0;
   } catch (const std::exception& error) {

@@ -171,6 +171,7 @@ void write_f32(
       static_cast<const char*>(contiguous.const_data_ptr()),
       static_cast<std::streamsize>(
           contiguous.numel() * contiguous.element_size()));
+  stream.close();
   if (!stream) {
     throw std::runtime_error("failed to write output file: " + path.string());
   }
@@ -346,6 +347,10 @@ void write_metadata(const std::filesystem::path& path, const Json& payload) {
     throw std::runtime_error("cannot create metadata file: " + path.string());
   }
   stream << payload.dump(2) << '\n';
+  stream.close();
+  if (!stream) {
+    throw std::runtime_error("failed to write metadata file: " + path.string());
+  }
 }
 
 }  // namespace

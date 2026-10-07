@@ -37,6 +37,7 @@ std::string_view to_string(DeviceType device_type);
 DType parse_dtype(std::string_view value);
 DeviceType parse_device_type(std::string_view value);
 std::size_t element_count(const Shape& shape);
+std::size_t tensor_byte_size(const Shape& shape, DType dtype);
 
 struct TensorView {
   std::string name;

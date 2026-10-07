@@ -39,7 +39,7 @@ class CudaEnvironmentTests(unittest.TestCase):
                 assembler.write_bytes(b"assembler fixture; never executed")
                 spec = importlib.util.spec_from_file_location(
                     "cuda_environment_exporter_test",
-                    SOURCE / "pnmir_export/exporter.py",
+                    SOURCE / "model_builder/export/exporter.py",
                 )
                 exporter = importlib.util.module_from_spec(spec)
                 with (

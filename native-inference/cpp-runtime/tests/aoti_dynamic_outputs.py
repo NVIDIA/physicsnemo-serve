@@ -10,7 +10,7 @@ import tempfile
 
 import torch
 
-from pnmir_export import export_package
+from model_builder.export import export_package
 
 
 class DynamicOutputs(torch.nn.Module):
@@ -28,7 +28,14 @@ class DynamicOutputs(torch.nn.Module):
 
 
 OUTPUT_NAMES = (
-    "doubled", "transposed", "concatenated", "columns", "rows", "flat", "first", "sum"
+    "doubled",
+    "transposed",
+    "concatenated",
+    "columns",
+    "rows",
+    "flat",
+    "first",
+    "sum",
 )
 OUTPUT_SHAPES = ([-1, 4], [4, -1], [-1, 4], [4], [-1], [-1], [1, 4], [])
 
@@ -45,7 +52,9 @@ def main() -> int:
 
     executable = args.pnmir.resolve()
     if not executable.is_file():
-        raise FileNotFoundError(f"PhysicsNeMo Inference executable not found: {executable}")
+        raise FileNotFoundError(
+            f"PhysicsNeMo Inference executable not found: {executable}"
+        )
     package = args.output.resolve()
     export_package(
         DynamicOutputs(),
@@ -113,16 +122,26 @@ def main() -> int:
             assert metadata["execution_device"]["type"] == args.target, metadata
             assert len(metadata["outputs"]) == len(OUTPUT_NAMES), metadata
             for name, path, expected, observed in zip(
-                OUTPUT_NAMES, output_files, expected_outputs, metadata["outputs"], strict=True
+                OUTPUT_NAMES,
+                output_files,
+                expected_outputs,
+                metadata["outputs"],
+                strict=True,
             ):
                 assert observed["name"] == name, observed
                 assert observed["dtype"] == "float32", observed
                 assert observed["shape"] == list(expected.shape), observed
-                assert observed["byte_size"] == expected.numel() * expected.element_size(), observed
+                assert (
+                    observed["byte_size"] == expected.numel() * expected.element_size()
+                ), observed
                 storage = bytearray(path.read_bytes())
-                actual = torch.frombuffer(storage, dtype=torch.float32).reshape(expected.shape)
+                actual = torch.frombuffer(storage, dtype=torch.float32).reshape(
+                    expected.shape
+                )
                 torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-6)
-            print(f"AOTI {args.target} batch {batch}: all {len(OUTPUT_NAMES)} output shapes and values match")
+            print(
+                f"AOTI {args.target} batch {batch}: all {len(OUTPUT_NAMES)} output shapes and values match"
+            )
     return 0
 
 

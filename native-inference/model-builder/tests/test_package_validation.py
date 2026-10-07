@@ -16,7 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 class PackageValidationTests(unittest.TestCase):
     def setUp(self):
         import torch
-        from pnmir_export import validation
+        from model_builder.export import validation
 
         self.torch = torch
         self.validation = validation
@@ -44,12 +44,18 @@ class PackageValidationTests(unittest.TestCase):
     def native_run(self, outputs, *, input_shapes=(), dynamic_outputs=False):
         def run(command, **kwargs):
             self.assertEqual(
-                [command[index + 1] for index, value in enumerate(command)
-                 if value == "--input-shape"],
+                [
+                    command[index + 1]
+                    for index, value in enumerate(command)
+                    if value == "--input-shape"
+                ],
                 list(input_shapes),
             )
-            output_files = [command[index + 1] for index, value in enumerate(command)
-                            if value == "--output-file"]
+            output_files = [
+                command[index + 1]
+                for index, value in enumerate(command)
+                if value == "--output-file"
+            ]
             for argument, spec, value in zip(
                 output_files, self.output_specs, outputs, strict=True
             ):
@@ -59,22 +65,28 @@ class PackageValidationTests(unittest.TestCase):
             if dynamic_outputs:
                 self.assertIn("--output-metadata", command)
                 metadata = Path(command[command.index("--output-metadata") + 1])
-                metadata.write_text(json.dumps({
-                    "schema_version": 1,
-                    "backend": command[command.index("--backend") + 1],
-                    "execution_device": {"type": "cpu", "index": 0},
-                    "completed": True,
-                    "outputs": [
+                metadata.write_text(
+                    json.dumps(
                         {
-                            "name": spec["name"],
-                            "dtype": "float32",
-                            "shape": list(value.shape),
-                            "device": {"type": "cpu", "index": 0},
-                            "byte_size": value.numel() * value.element_size(),
+                            "schema_version": 1,
+                            "backend": command[command.index("--backend") + 1],
+                            "execution_device": {"type": "cpu", "index": 0},
+                            "completed": True,
+                            "outputs": [
+                                {
+                                    "name": spec["name"],
+                                    "dtype": "float32",
+                                    "shape": list(value.shape),
+                                    "device": {"type": "cpu", "index": 0},
+                                    "byte_size": value.numel() * value.element_size(),
+                                }
+                                for spec, value in zip(
+                                    self.output_specs, outputs, strict=True
+                                )
+                            ],
                         }
-                        for spec, value in zip(self.output_specs, outputs, strict=True)
-                    ],
-                }))
+                    )
+                )
             else:
                 self.assertNotIn("--output-metadata", command)
             return subprocess.CompletedProcess(command, 0, "", "")
@@ -83,15 +95,24 @@ class PackageValidationTests(unittest.TestCase):
 
     def validate(self, inputs, outputs):
         return self.validation.validate_pnmir_package(
-            self.executable, self.package, inputs, outputs,
-            backend="aoti", device="cpu",
+            self.executable,
+            self.package,
+            inputs,
+            outputs,
+            backend="aoti",
+            device="cpu",
         )
 
     def test_dynamic_inputs_use_each_tensor_shape_and_keep_static_scalar_inputs(self):
         torch = self.torch
         self.manifest([[-1, 4], [2, -1, -1], [4], []], [[1]])
         outputs = (torch.ones(1),)
-        inputs = (torch.ones(3, 4), torch.ones(2, 3, 5), torch.ones(4), torch.tensor(2.0))
+        inputs = (
+            torch.ones(3, 4),
+            torch.ones(2, 3, 5),
+            torch.ones(4),
+            torch.tensor(2.0),
+        )
         with self.native_run(outputs, input_shapes=("input_0=3,4", "input_1=2,3,5")):
             metrics = self.validate(inputs, outputs)
         self.assertEqual(metrics[0].max_abs, 0.0)
@@ -102,7 +123,10 @@ class PackageValidationTests(unittest.TestCase):
         outputs = (torch.ones(4),)
         with self.native_run(outputs, input_shapes=("input_0=3,4",)) as run:
             metrics = self.validation.validate_onnxruntime_package(
-                self.executable, self.package, (torch.ones(3, 4),), outputs,
+                self.executable,
+                self.package,
+                (torch.ones(3, 4),),
+                outputs,
             )
         command = run.call_args.args[0]
         self.assertEqual(command[command.index("--backend") + 1], "onnxruntime")

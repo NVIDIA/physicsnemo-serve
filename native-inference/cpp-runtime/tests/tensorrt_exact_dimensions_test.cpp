@@ -7,11 +7,7 @@
 #include <memory>
 #include <stdexcept>
 
-#include "physicsnemo/inference/backends/tensorrt_exact_gemm_plugin.hpp"
-#include "physicsnemo/inference/backends/tensorrt_exact_deslice_bmm_plugin.hpp"
-#include "physicsnemo/inference/backends/tensorrt_exact_slice_bmm_plugin.hpp"
-#include "physicsnemo/inference/backends/tensorrt_exact_layer_norm_plugin.hpp"
-#include "physicsnemo/inference/backends/tensorrt_exact_softmax_plugin.hpp"
+#include "physicsnemo/inference/backends/tensorrt_exact.hpp"
 
 namespace {
 

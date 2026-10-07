@@ -17,7 +17,7 @@ except ImportError:
     torch = None
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from pnmir_build import worker
+from model_builder.build import worker
 
 
 ADAPTER = """import json
@@ -190,6 +190,51 @@ class ModelInputWorkerTests(unittest.TestCase):
         self.assertIs(load.call_args.kwargs["weights_only"], True)
         self.assertEqual(load.call_args.kwargs["map_location"], "cpu")
 
+    def test_inplace_model_preserves_inputs_for_each_validation_case(self):
+        adapter = """import torch
+SOURCE = torch.tensor([1., 2., 3., 4.])
+class Mutating(torch.nn.Module):
+    def forward(self, value):
+        return value.add_(1)
+def create_model():
+    model = Mutating()
+    model.source = SOURCE
+    return model
+def create_cases():
+    return [(SOURCE,), (SOURCE,)]
+"""
+        (self.root / "export.py").write_text(adapter)
+        recipe = {
+            key: value
+            for key, value in self.recipe.items()
+            if key not in {"config", "checkpoint", "assets"}
+        }
+        recipe["format_version"] = 1
+        for infer_contract in (False, True):
+            with self.subTest(infer_contract=infer_contract):
+                prepared = worker._prepare_model(
+                    recipe, self.recipe_path, "cpu", infer_contract=infer_contract
+                )
+                self.assertEqual(len(prepared["cases"]), 2)
+                for case, inputs, references in zip(
+                    prepared["cases"],
+                    prepared["inputs"],
+                    prepared["references"],
+                    strict=True,
+                ):
+                    self.assertEqual(
+                        struct.unpack("=4f", inputs[0]["data"]), (1.0, 2.0, 3.0, 4.0)
+                    )
+                    self.assertEqual(case[0].tolist(), [1.0, 2.0, 3.0, 4.0])
+                    expected = struct.unpack("=4f", references[0]["data"])
+                    self.assertEqual(expected, (2.0, 3.0, 4.0, 5.0))
+                    self.assertEqual(
+                        prepared["model"](case[0].clone()).tolist(), list(expected)
+                    )
+                self.assertEqual(
+                    prepared["model"].source.tolist(), [1.0, 2.0, 3.0, 4.0]
+                )
+
     def test_strict_state_errors_fail_before_backend_execution(self):
         valid = {"scale": torch.tensor([2.0]), "bias": torch.tensor([1.0])}
         invalid = {
@@ -280,7 +325,7 @@ class ModelInputWorkerTests(unittest.TestCase):
         self.assertEqual(len(self.compiled_references), 1)
 
     def test_explicit_resolved_overrides_are_used_and_recorded(self):
-        from pnmir_build.inputs import resolve_inputs
+        from model_builder.build.inputs import resolve_inputs
 
         replacement = self.root / "override.json"
         replacement.write_text(json.dumps({"offset": 8.0, "nested": {"value": 1}}))

@@ -65,7 +65,7 @@ deploy/config.yaml
 # Model Builder candidates and native SDK builds
 /out/
 
-# Local reports, customer demo scripts, recordings, and assets
+# Local reports, recordings, and assets
 /reports/
 
 # Local native inference agent instructions
@@ -77,3 +77,7 @@ deploy/config.yaml
 /docs/earthmover-hf-integration-design.md
 /docs/native-inference-architecture-diagram.md
 /docs/native-inference-overview-audit.md
+
+# The frontend source package is named build; retain it beside generated build directories.
+!/native-inference/model-builder/src/model_builder/build/
+!/native-inference/model-builder/src/model_builder/build/*.py

@@ -7,15 +7,16 @@ import unittest
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from pnmir_build import worker
-import test_worker
+from model_builder.build import worker
+import worker_test_support
 
 
 class BuildTargetGateTests(unittest.TestCase):
     def setUp(self):
-        self.fixture = test_worker.WorkerTest()
-        self.fixture.setUp()
-        self.addCleanup(self.fixture.doCleanups)
+        self.fixture = worker_test_support.WorkerFixture()
+        self.fixture.addCleanup = self.addCleanup
+        if hasattr(self.fixture, "setUp"):
+            self.fixture.setUp()
         self.fixture.set_runtime(
             "device"
         )  # Explicit native double reports CUDA execution.

@@ -4,49 +4,16 @@ import hashlib
 from pathlib import Path
 import subprocess
 import sys
-import tempfile
 from types import SimpleNamespace
 import unittest
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from pnmir_export import tensorrt_exact_graphs, tensorrt_profiles
+from tensorrt_test_support import TensorRTPluginFixture, EXACT, CREATORS, TRANSFORMS
+from model_builder.export import tensorrt_exact_graphs, tensorrt_profiles
 
 
-EXACT = "layout-order-exact"
-CREATORS = (
-    "PNMIRExactLinear",
-    "PNMIRExactGemm",
-    "PNMIRExactTokenSum",
-    "PNMIRExactSliceBmm",
-    "PNMIRExactLayerNorm",
-    "PNMIRExactSoftmax",
-    "PNMIRExactAttention",
-    "PNMIRExactGelu",
-)
-TRANSFORMS = (
-    ("exact_linear", "_replace_linear_subgraphs"),
-    ("exact_gemm", "_replace_constant_rhs_matmuls"),
-    ("exact_layer_norm", "_replace_layer_norms"),
-    ("exact_attention", "_replace_attention_subgraphs"),
-    ("exact_token_sum", "_replace_token_sums"),
-    ("exact_slice_bmm", "_replace_slice_bmms"),
-    ("exact_gelu", "_replace_gelu_subgraphs"),
-    ("exact_softmax", "_replace_softmaxes"),
-)
-
-
-class TensorRTProfileTests(unittest.TestCase):
-    def setUp(self):
-        temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(temporary.cleanup)
-        self.root = Path(temporary.name).resolve()
-        self.libraries = {}
-        for name in tensorrt_profiles.EXACT_PLUGIN_NAMES:
-            path = self.root / (name + ".so")
-            path.write_bytes(("library identity fixture: " + name).encode())
-            self.libraries[name] = path
-
+class TensorRTProfileTests(TensorRTPluginFixture, unittest.TestCase):
     def test_preflight_and_operator_contract_need_no_optional_framework(self):
         result = subprocess.run(
             [
@@ -54,7 +21,7 @@ class TensorRTProfileTests(unittest.TestCase):
                 "-S",
                 "-c",
                 "import sys; sys.path.insert(0, sys.argv[1]); "
-                "from pnmir_export import tensorrt_profiles as p; "
+                "from model_builder.export import tensorrt_profiles as p; "
                 "assert p.validate_tensorrt_profile('baseline') == 'baseline'; "
                 "assert p.validate_tensorrt_profile('layout-order-exact') == 'layout-order-exact'; "
                 "assert len(p.required_operators()) == 8; "

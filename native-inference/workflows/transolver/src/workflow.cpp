@@ -249,24 +249,59 @@ torch::Tensor load_surface_features(
 
 constexpr std::size_t kMaximumXmlTagBytes = 1024U * 1024U;
 
+bool skip_to_xml_delimiter(
+    std::ifstream& stream, const std::string_view delimiter) {
+  std::array<char, 64U * 1024U> buffer;
+  while (stream) {
+    const auto position = stream.tellg();
+    stream.read(buffer.data(), static_cast<std::streamsize>(buffer.size()));
+    const auto size = static_cast<std::size_t>(stream.gcount());
+    if (stream.bad()) {
+      throw std::runtime_error("cannot read VTU XML");
+    }
+    const auto found = std::string_view(buffer.data(), size).find(delimiter);
+    if (found != std::string_view::npos) {
+      stream.clear();
+      stream.seekg(
+          position + static_cast<std::streamoff>(found + delimiter.size()));
+      return static_cast<bool>(stream);
+    }
+    if (stream.eof()) {
+      return false;
+    }
+    // Preserve delimiters split across two blocks without retaining payloads.
+    if (delimiter.size() > 1U) {
+      stream.seekg(-static_cast<std::streamoff>(delimiter.size() - 1U),
+                   std::ios::cur);
+    }
+  }
+  return false;
+}
+
 std::string next_xml_tag(std::ifstream& stream) {
-  char value = '\0';
-  while (stream.get(value) && value != '<') {
-  }
-  if (!stream) {
-    throw std::runtime_error("VTU ended before its Points DataArray");
-  }
-  std::string tag(1, '<');
-  while (stream.get(value)) {
-    tag.push_back(value);
-    if (value == '>') {
-      return tag;
+  while (skip_to_xml_delimiter(stream, "<")) {
+    std::string tag(1, '<');
+    char value = '\0';
+    while (stream.get(value)) {
+      tag.push_back(value);
+      if (tag == "<!--" || tag == "<![CDATA[") {
+        if (!skip_to_xml_delimiter(stream, tag == "<!--" ? "-->" : "]]>")) {
+          throw std::runtime_error("VTU contains truncated XML content");
+        }
+        break;
+      }
+      if (value == '>') {
+        return tag;
+      }
+      if (tag.size() > kMaximumXmlTagBytes) {
+        throw std::runtime_error("VTU XML tag exceeds the supported size");
+      }
     }
-    if (tag.size() > kMaximumXmlTagBytes) {
-      throw std::runtime_error("VTU XML tag exceeds the supported size");
+    if (!stream) {
+      throw std::runtime_error("VTU contains a truncated XML tag");
     }
   }
-  throw std::runtime_error("VTU contains a truncated XML tag");
+  throw std::runtime_error("VTU ended before its expected XML tag");
 }
 
 std::optional<std::string> xml_attribute(
@@ -494,6 +529,10 @@ class InlineBinaryVtuPointStream::Impl {
       if (tag.starts_with("<VTKFile")) {
         vtk_file_tag = tag;
       } else if (tag.starts_with("<Piece")) {
+        if (piece_tag.has_value()) {
+          throw std::runtime_error(
+              "bounded VTU loading supports exactly one Piece");
+        }
         piece_tag = tag;
       } else if (tag.starts_with("<Points")) {
         inside_points = true;
@@ -545,6 +584,21 @@ class InlineBinaryVtuPointStream::Impl {
       throw std::runtime_error(
           "VTU NumberOfPoints is outside the supported range");
     }
+
+    // Validate the whole grid before exposing the first piece as a point stream.
+    // The tag reader skips base64 payloads in fixed-size blocks without decoding.
+    const auto points_position = stream_.tellg();
+    while (true) {
+      const auto tag = next_xml_tag(stream_);
+      if (tag.starts_with("<Piece")) {
+        throw std::runtime_error(
+            "bounded VTU loading supports exactly one Piece");
+      }
+      if (tag.starts_with("</UnstructuredGrid")) {
+        break;
+      }
+    }
+    stream_.seekg(points_position);
     total_points_ = static_cast<std::int64_t>(available);
     decoder_ = std::make_unique<Base64StreamDecoder>(stream_);
     std::array<std::uint8_t, 8> header{};

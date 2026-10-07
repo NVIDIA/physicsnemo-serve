@@ -9,10 +9,10 @@ import tempfile
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from pnmir_build.tensors import tensor_contracts, tensor_names
-from pnmir_build import worker
-from pnmir_build import cli
-import test_model_input_cli
+from model_builder.build.tensors import tensor_contracts, tensor_names
+from model_builder.build import worker
+from model_builder.build import cli
+import model_input_test_support
 
 
 class TensorContractTests(unittest.TestCase):
@@ -89,7 +89,7 @@ class TensorContractTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     tensor_contracts(recipe)
 
-    def test_worker_and_framework_free_doctor_accept_named_shapes(self):
+    def test_worker_and_framework_free_config_only_check_accept_named_shapes(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary).resolve()
             recipe = dict(
@@ -107,10 +107,12 @@ class TensorContractTests(unittest.TestCase):
             path = root / "recipe.json"
             path.write_text(json.dumps(recipe))
             (root / "export.py").write_text(
-                "raise AssertionError('doctor must not import adapter')\n"
+                "raise AssertionError('check --config-only must not import adapter')\n"
             )
             (root / "config.json").write_text("{}")
-            (root / "weights.pt").write_bytes(b"doctor must not deserialize weights")
+            (root / "weights.pt").write_bytes(
+                b"check --config-only must not deserialize weights"
+            )
             try:
                 parsed, _ = worker._read_recipe(path, ["aoti"])
             except ValueError as error:
@@ -119,8 +121,9 @@ class TensorContractTests(unittest.TestCase):
             command = [
                 sys.executable,
                 "-S",
-                str(Path(__file__).resolve().parents[2] / "physicsnemo-model-builder"),
-                "doctor",
+                str(Path(__file__).resolve().parents[2] / "pnms-model-builder"),
+                "check",
+                "--config-only",
                 "--recipe",
                 str(path),
                 "--executor",
@@ -145,12 +148,15 @@ class TensorContractTests(unittest.TestCase):
             self.assertFalse((root / "output").exists())
 
     def test_frontend_rejects_invalid_declared_shape_without_export(self):
-        fixture = test_model_input_cli.ModelInputCliTests(methodName="runTest")
-        fixture.setUp()
-        self.addCleanup(fixture.doCleanups)
+        fixture = model_input_test_support.ModelInputFixture()
+        fixture.addCleanup = self.addCleanup
+        if hasattr(fixture, "setUp"):
+            fixture.setUp()
         recipe = dict(fixture.recipe)
         recipe.pop("input_names")
         recipe.pop("output_names")
+        recipe.pop("dtype")
+        recipe.pop("shape")
         recipe.update(inputs=self.recipe["inputs"], outputs=self.recipe["outputs"])
         recipe["outputs"][0]["shape"] = [-1]
         fixture.recipe_path.write_text(json.dumps(recipe))
@@ -158,9 +164,10 @@ class TensorContractTests(unittest.TestCase):
             cli.read_recipe(fixture.recipe_path)
 
     def test_container_completion_honors_named_tensor_contract(self):
-        fixture = test_model_input_cli.ModelInputCliTests(methodName="runTest")
-        fixture.setUp()
-        self.addCleanup(fixture.doCleanups)
+        fixture = model_input_test_support.ModelInputFixture()
+        fixture.addCleanup = self.addCleanup
+        if hasattr(fixture, "setUp"):
+            fixture.setUp()
         plan, *_ = fixture.completed_v2()
         recipe = plan["recipe"]
         for key in ("input_names", "output_names", "dtype", "shape"):

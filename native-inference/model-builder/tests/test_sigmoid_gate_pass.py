@@ -9,9 +9,9 @@ import unittest
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from pnmir_export import compat
-from pnmir_export.graph_passes import prepare_onnx_program
-from pnmir_export.options import ExportOptions
+from model_builder.export import compat
+from model_builder.export.graph_passes import prepare_onnx_program
+from model_builder.export.options import ExportOptions
 
 
 @unittest.skipUnless(importlib.util.find_spec("torch"), "requires Torch")

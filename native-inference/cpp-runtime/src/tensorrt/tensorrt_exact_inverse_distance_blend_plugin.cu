@@ -1,11 +1,11 @@
-#include "physicsnemo/inference/backends/tensorrt_exact_inverse_distance_blend_plugin.hpp"
+#include "physicsnemo/inference/backends/tensorrt_exact.hpp"
+#include "exact_plugin_support.hpp"
 
 #include <NvInfer.h>
 #include <cuda_runtime_api.h>
 
 #include <cstdint>
 #include <cstdio>
-#include <limits>
 #include <new>
 
 namespace physicsnemo::inference {
@@ -46,19 +46,7 @@ __global__ void exact_inverse_distance_blend_kernel(
   }
 }
 
-bool element_count(const nvinfer1::Dims& input, std::int64_t* elements) {
-  if (input.nbDims < 1) return false;
-  std::int64_t result = 1;
-  for (int32_t index = 0; index < input.nbDims; ++index) {
-    if (input.d[index] <= 0 ||
-        result > std::numeric_limits<std::int64_t>::max() / input.d[index]) {
-      return false;
-    }
-    result *= input.d[index];
-  }
-  *elements = result;
-  return true;
-}
+using tensorrt_detail::element_count;
 
 bool same_dimensions(const nvinfer1::Dims& left,
                      const nvinfer1::Dims& right) {
@@ -92,15 +80,7 @@ class ExactInverseDistanceBlendPlugin final
 
   nvinfer1::IPluginCapability* getCapabilityInterface(
       nvinfer1::PluginCapabilityType type) noexcept override {
-    switch (type) {
-      case nvinfer1::PluginCapabilityType::kCORE:
-        return static_cast<nvinfer1::IPluginV3OneCore*>(this);
-      case nvinfer1::PluginCapabilityType::kBUILD:
-        return static_cast<nvinfer1::IPluginV3OneBuild*>(this);
-      case nvinfer1::PluginCapabilityType::kRUNTIME:
-        return static_cast<nvinfer1::IPluginV3OneRuntime*>(this);
-    }
-    return nullptr;
+    return tensorrt_detail::capability_interface(this, type);
   }
 
   nvinfer1::IPluginV3* clone() noexcept override {

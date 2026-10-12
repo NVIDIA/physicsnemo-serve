@@ -1,0 +1,40 @@
+{
+  "format_version": 2,
+  "name": "aoti-profiles-mlp",
+  "version": "0.1.0",
+  "adapter": "adapter.py",
+  "source": [],
+  "checkpoint": "weights.pt",
+  "config": {"input_dim": 128, "hidden_dim": 256, "output_dim": 32},
+  "assets": {"validation_inputs": "cases.pt"},
+  "input_names": ["features"],
+  "output_names": ["predictions"],
+  "backends": ["aoti"],
+  "executor": "local",
+  "device": "cuda",
+  "output_root": "builds",
+  "default_profile": "accuracy",
+  "profiles": {
+    "accuracy": {
+      "aoti_profile": "aten-boundary-exact-v2",
+      "aoti_options": {
+        "max_autotune": false,
+        "epilogue_fusion": false,
+        "shape_padding": false,
+        "coordinate_descent_tuning": false
+      }
+    },
+    "standard": {
+      "aoti_profile": "baseline",
+      "aoti_options": {}
+    },
+    "autotune": {
+      "aoti_profile": "baseline",
+      "aoti_options": {"max_autotune": true, "epilogue_fusion": true}
+    },
+    "autotune-no-fusion": {
+      "aoti_profile": "baseline",
+      "aoti_options": {"max_autotune": true, "epilogue_fusion": false}
+    }
+  }
+}

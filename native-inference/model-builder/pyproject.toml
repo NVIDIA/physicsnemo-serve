@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=80", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pnms-model-builder"
+version = "0.1.0"
+description = "Recipe-driven model export and native package verification for PhysicsNeMo"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "Apache-2.0"
+dependencies = []
+
+[project.optional-dependencies]
+export = ["torch>=2.6", "numpy>=1.24"]
+tensorrt = ["torch>=2.6", "numpy>=1.24", "onnx>=1.16", "onnxscript>=0.3", "tensorrt>=10"]
+
+[project.scripts]
+pnms-model-builder = "model_builder.build.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["model_builder*"]
+namespaces = false
+
+[tool.setuptools.data-files]
+"share/pnms-model-builder" = ["toolchain.lock.json"]
+"share/pnms-model-builder/models/affine" = ["models/affine/recipe.json", "models/affine/export.py"]

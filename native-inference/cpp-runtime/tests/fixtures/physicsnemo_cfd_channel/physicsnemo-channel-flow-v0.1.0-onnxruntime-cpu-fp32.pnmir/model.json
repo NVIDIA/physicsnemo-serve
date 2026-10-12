@@ -1,0 +1,40 @@
+{
+  "format_version": 1,
+  "model": {
+    "name": "physicsnemo-channel-flow",
+    "version": "0.1.0"
+  },
+  "producer": {
+    "name": "pnm-ir-onnx-import",
+    "version": "0.1.0",
+    "onnx_version": "1.20.1"
+  },
+  "inputs": [
+    {
+      "name": "coordinates",
+      "dtype": "float32",
+      "shape": [
+        9,
+        2
+      ]
+    }
+  ],
+  "outputs": [
+    {
+      "name": "flow",
+      "dtype": "float32",
+      "shape": [
+        9,
+        3
+      ]
+    }
+  ],
+  "artifacts": [
+    {
+      "backend": "onnxruntime",
+      "target": "cpu",
+      "precision": "fp32",
+      "path": "artifacts/onnx/model.onnx"
+    }
+  ]
+}

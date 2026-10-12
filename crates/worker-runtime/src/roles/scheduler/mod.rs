@@ -8,10 +8,11 @@ mod discovery;
 mod fanout;
 mod parent_slots;
 mod profile;
+mod queue;
 mod reservation;
 mod reserved_memory;
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -40,7 +41,13 @@ pub(crate) use self::discovery::{
 };
 use self::parent_slots::{ParentSlotAcquire, ParentSlotStore, RedisParentSlotStore};
 use self::profile::ResourceManager;
-use self::reservation::{ReservedResource, ResourceReservationTable, is_reservation_blocked_error};
+use self::queue::{
+    PriorityQueue, QueueAgeMetric, WarmCacheAffinityMetric, WeightedMetric, WorkflowPriorityMetric,
+};
+use self::reservation::{
+    ReservedResource, ResourceAvailabilityView, ResourceReservationTable,
+    is_reservation_blocked_error,
+};
 
 #[derive(Debug, Clone)]
 struct QueuedRequest {
@@ -72,10 +79,39 @@ fn failed_run_ids(queued: &QueuedRequest) -> Vec<&str> {
     run_ids
 }
 
-#[derive(Debug, Default)]
 struct SchedulerQueueState {
-    queue: VecDeque<QueuedRequest>,
+    queue: PriorityQueue<QueuedRequest, ResourceAvailabilityView>,
     pending_ids: HashSet<String>,
+}
+
+impl SchedulerQueueState {
+    fn new(config: &SchedulerRoleConfig) -> Self {
+        let metrics = vec![
+            WeightedMetric::new(
+                config.queue_priority_metric_weight as f64,
+                Arc::new(WorkflowPriorityMetric::new(
+                    config.workflow_priorities.clone(),
+                )),
+            ),
+            WeightedMetric::new(
+                config.queue_age_metric_weight as f64,
+                Arc::new(QueueAgeMetric::new(Duration::from_secs(
+                    config.queue_age_saturation_secs,
+                ))),
+            ),
+            WeightedMetric::new(
+                config.queue_warm_affinity_metric_weight as f64,
+                Arc::new(WarmCacheAffinityMetric),
+            ),
+        ];
+        Self {
+            queue: PriorityQueue::new(
+                metrics,
+                Duration::from_millis(config.queue_unschedulable_retry_delay_ms),
+            ),
+            pending_ids: HashSet::new(),
+        }
+    }
 }
 
 pub(crate) fn scheduler_deferred_error() -> anyhow::Error {
@@ -308,6 +344,9 @@ impl SchedulerRole {
             Self::normalized_memory_utilization_percent(config.memory_utilization_percent);
         config.gpu_discovery_interval_secs =
             Self::normalized_resource_discovery_interval_secs(config.gpu_discovery_interval_secs);
+        if config.queue_unschedulable_retry_delay_ms == 0 {
+            config.queue_unschedulable_retry_delay_ms = 100;
+        }
 
         ResourceManager::warm_known_profile_resources_cache();
 
@@ -321,9 +360,11 @@ impl SchedulerRole {
         ));
 
         let interval = Duration::from_secs(config.gpu_discovery_interval_secs);
+        let scheduler_queue_state = Arc::new(Mutex::new(SchedulerQueueState::new(&config)));
 
         let discovery_task: Box<dyn BackgroundTask> = Box::new(ResourceDiscoveryTask {
             reservations: reservations.clone(),
+            scheduler_queue_state: scheduler_queue_state.clone(),
             interval,
             qm: Box::new(qm),
             registry_key: config.gpu_registry_key.clone(),
@@ -335,7 +376,7 @@ impl SchedulerRole {
             parent_slots,
             parent_state,
             collect_store,
-            scheduler_queue_state: Arc::new(Mutex::new(SchedulerQueueState::default())),
+            scheduler_queue_state,
             request_failures: LocalFailureTracker::default(),
             metrics,
             stream_prefix: env.stream_prefix.clone(),
@@ -380,6 +421,11 @@ impl SchedulerRole {
             let _ = self.parent_slots.release(parent_run_id).await?;
         }
 
+        self.scheduler_queue_state
+            .lock()
+            .await
+            .queue
+            .clear_deferrals();
         Ok(())
     }
 
@@ -724,8 +770,22 @@ impl SchedulerRole {
     }
 
     async fn next_request(&self) -> Result<SchedulerRequest> {
+        let now = Instant::now();
+        if !self
+            .scheduler_queue_state
+            .lock()
+            .await
+            .queue
+            .has_ready_candidate(now)
+        {
+            return Ok(SchedulerRequest::Empty);
+        }
+        let resource_snapshot = self.reservations.resource_availability_snapshot().await?;
         let mut state = self.scheduler_queue_state.lock().await;
-        let Some(head) = state.queue.front().cloned() else {
+        let Some(head) = state
+            .queue
+            .find_highest_priority_candidate(&resource_snapshot, now)
+        else {
             return Ok(SchedulerRequest::Empty);
         };
         if let Some(batch_request) = self.create_batch_request(&mut state, head.clone()).await? {
@@ -803,6 +863,16 @@ impl SchedulerRole {
         // Finalize successful work, leave blocked work queued, or apply retry policy.
         match schedule_result {
             Ok(ScheduleAttemptOutcome::Blocked) => {
+                let queue_key = Self::queue_key(&queued.msg);
+                // Temporarily exclude the blocked request so another ready queue
+                // candidate can be selected before this request is retried.
+                self.scheduler_queue_state
+                    .lock()
+                    .await
+                    .queue
+                    .defer(Instant::now(), |candidate| {
+                        Self::queue_key(&candidate.msg) == queue_key
+                    });
                 info!(
                     msg_id = queued.msg.id(),
                     run_id = queued.msg.run_id(),
@@ -1032,6 +1102,7 @@ impl BackgroundTask for SchedulerTask {
 /// Periodic GPU discovery task.
 struct ResourceDiscoveryTask {
     reservations: ResourceReservationTable,
+    scheduler_queue_state: Arc<Mutex<SchedulerQueueState>>,
     interval: Duration,
     qm: Box<QueueManager>,
     registry_key: String,
@@ -1062,7 +1133,13 @@ impl BackgroundTask for ResourceDiscoveryTask {
             );
             tokio::time::timeout(Duration::from_secs(30), async move {
                 let update = discover_resources(&qm, registry_key.as_str()).await?;
-                self.reservations.sync_from_discovery_update(update).await
+                self.reservations.sync_from_discovery_update(update).await?;
+                self.scheduler_queue_state
+                    .lock()
+                    .await
+                    .queue
+                    .clear_deferrals();
+                Ok::<(), anyhow::Error>(())
             })
             .await
             .map_err(|_| anyhow!("GPU discovery timed out after 30s"))??;
@@ -2024,6 +2101,16 @@ mod tests {
         assert_eq!(forwarded["items"][1]["run_id"], "run-c");
         assert_eq!(role.queued_request_count().await, 1);
 
+        role.handle(
+            &release_msg(
+                "run-a",
+                r#"{"run_id":"run-a","resource_id":0,"memory_mb":20000,"status":"completed"}"#,
+            ),
+            "release",
+            &sink,
+        )
+        .await
+        .unwrap();
         run_scheduler_task(&tasks, &sink).await;
         let writes = sink.writes();
         assert_eq!(writes.len(), 2);
@@ -2354,8 +2441,8 @@ mod tests {
         let forwarded: JsonValue = serde_json::from_str(&writes[0].payload).unwrap();
         assert_eq!(forwarded["batch_info"]["batch_size"], 2);
         assert_eq!(forwarded["batch_info"]["flush_reason"], "max_wait_ms");
-        assert_eq!(forwarded["items"][0]["run_id"], "run-a");
-        assert_eq!(forwarded["items"][1]["run_id"], "run-b");
+        assert_eq!(forwarded["items"][0]["run_id"], "run-b");
+        assert_eq!(forwarded["items"][1]["run_id"], "run-a");
         assert_eq!(role.queued_request_count().await, 0);
 
         set_env_var("SCHEDULER_DISCOVERY_JSON", prev_discovery.as_deref());
@@ -2613,6 +2700,18 @@ mod tests {
             .await;
         }
         run_scheduler_task(&tasks, &sink).await;
+        assert_eq!(sink.writes().len(), 1);
+        assert_eq!(role.queued_request_count().await, 2);
+        role.handle(
+            &release_msg(
+                "run-a",
+                r#"{"run_id":"run-a","resource_id":0,"memory_mb":2000,"status":"completed"}"#,
+            ),
+            "release",
+            &sink,
+        )
+        .await
+        .unwrap();
         run_scheduler_task(&tasks, &sink).await;
         assert_eq!(sink.writes().len(), 2);
         assert_eq!(role.queued_request_count().await, 0);
@@ -3110,6 +3209,17 @@ mod tests {
         .await;
         run_scheduler_task(&tasks, &sink).await;
 
+        role.handle(
+            &release_msg_for_stream(
+                "run-a",
+                r#"{"run_id":"run-a","resource_id":0,"memory_mb":20000,"status":"completed"}"#,
+                "gpu_release",
+            ),
+            "gpu_release",
+            &sink,
+        )
+        .await
+        .unwrap();
         queue_schedule(
             &role,
             &schedule_msg_for_stream(
@@ -3127,8 +3237,8 @@ mod tests {
 
         role.handle(
             &release_msg_for_stream(
-                "run-a",
-                r#"{"run_id":"run-a","resource_id":0,"memory_mb":20000,"status":"completed"}"#,
+                "run-b",
+                r#"{"run_id":"run-b","resource_id":0,"memory_mb":20000,"status":"completed"}"#,
                 "gpu_release",
             ),
             "gpu_release",
@@ -3859,6 +3969,125 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn scheduler_selects_higher_priority_workflow_before_fifo_head() {
+        let _guard = test_env::env_lock().lock().await;
+        let prev_discovery = std::env::var("SCHEDULER_DISCOVERY_JSON").ok();
+        set_env_var(
+            "SCHEDULER_DISCOVERY_JSON",
+            Some(
+                r#"[{"resource_id":0,"stream_name":"execute.python.gpu.demo","total_memory_mb":16000,"used_memory_mb":0,"device_kind":"gpu","executor_class":"python.gpu.demo","tags":[],"status":"available"}]"#,
+            ),
+        );
+        let env = scheduler_env_with_config(
+            "test:",
+            json!({
+                "workflow_priorities": {"premium": 10, "standard": 0},
+                "queue_age_metric_weight": 0,
+                "queue_warm_affinity_metric_weight": 0
+            }),
+        );
+        let (_redis_server, role, tasks) =
+            scheduler_with_test_queue_manager("scheduler-priority", &env).await;
+        let sink = RecordingSink::new();
+        run_gpu_discovery(&tasks, &sink).await;
+
+        queue_schedule(
+            &role,
+            &schedule_msg_with_id(
+                "1-0",
+                "run-standard",
+                &basic_schedule_payload("standard", "python.gpu.demo", 1, 1_024),
+            ),
+            "schedule",
+            &sink,
+        )
+        .await;
+        queue_schedule(
+            &role,
+            &schedule_msg_with_id(
+                "2-0",
+                "run-premium",
+                &basic_schedule_payload("premium", "python.gpu.demo", 1, 1_024),
+            ),
+            "schedule",
+            &sink,
+        )
+        .await;
+
+        run_scheduler_task(&tasks, &sink).await;
+        assert_eq!(sink.writes()[0].run_id, "run-premium");
+        assert_eq!(role.queued_request_count().await, 1);
+
+        set_env_var("SCHEDULER_DISCOVERY_JSON", prev_discovery.as_deref());
+    }
+
+    #[tokio::test]
+    async fn scheduler_defers_busy_request_and_dispatches_ready_request() {
+        let _guard = test_env::env_lock().lock().await;
+        let prev_discovery = std::env::var("SCHEDULER_DISCOVERY_JSON").ok();
+        set_env_var(
+            "SCHEDULER_DISCOVERY_JSON",
+            Some(
+                r#"[{"resource_id":0,"stream_name":"execute.python.gpu.high","total_memory_mb":16000,"used_memory_mb":0,"device_kind":"gpu","executor_class":"python.gpu.high","tags":[],"status":"available"},{"resource_id":1,"stream_name":"execute.python.gpu.low","total_memory_mb":16000,"used_memory_mb":0,"device_kind":"gpu","executor_class":"python.gpu.low","tags":[],"status":"available"}]"#,
+            ),
+        );
+        let env = scheduler_env_with_config(
+            "test:",
+            json!({
+                "workflow_priorities": {"high": 100, "low": 0},
+                "queue_age_metric_weight": 0,
+                "queue_warm_affinity_metric_weight": 0
+            }),
+        );
+        let (_redis_server, role, tasks) =
+            scheduler_with_test_queue_manager("scheduler-deferral", &env).await;
+        let sink = RecordingSink::new();
+        run_gpu_discovery(&tasks, &sink).await;
+
+        queue_schedule(
+            &role,
+            &schedule_msg_with_id(
+                "1-0",
+                "run-occupier",
+                &basic_schedule_payload("occupier", "python.gpu.high", 1, 1_024),
+            ),
+            "schedule",
+            &sink,
+        )
+        .await;
+        run_scheduler_task(&tasks, &sink).await;
+
+        queue_schedule(
+            &role,
+            &schedule_msg_with_id(
+                "2-0",
+                "run-high",
+                &basic_schedule_payload("high", "python.gpu.high", 1, 1_024),
+            ),
+            "schedule",
+            &sink,
+        )
+        .await;
+        queue_schedule(
+            &role,
+            &schedule_msg_with_id(
+                "3-0",
+                "run-low",
+                &basic_schedule_payload("low", "python.gpu.low", 1, 1_024),
+            ),
+            "schedule",
+            &sink,
+        )
+        .await;
+
+        run_scheduler_task(&tasks, &sink).await;
+        assert_eq!(sink.writes()[1].run_id, "run-low");
+        assert_eq!(role.queued_request_count().await, 1);
+
+        set_env_var("SCHEDULER_DISCOVERY_JSON", prev_discovery.as_deref());
+    }
+
+    #[tokio::test]
     async fn scheduler_dlqs_persistent_batch_and_marks_item_runs_failed() {
         let _guard = test_env::env_lock().lock().await;
         let prev_discovery = std::env::var("SCHEDULER_DISCOVERY_JSON").ok();
@@ -4085,8 +4314,8 @@ mod tests {
         )
         .await;
         run_scheduler_task(&tasks, &sink).await;
-        assert_eq!(role.queued_request_count().await, 0);
-        assert_eq!(role.reservations.used_memory_mb(0).await, Some(40_000));
+        assert_eq!(role.queued_request_count().await, 1);
+        assert_eq!(role.reservations.used_memory_mb(0).await, Some(20_000));
 
         role.handle(
             &release_msg(
@@ -4098,7 +4327,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(role.reservations.used_memory_mb(0).await, Some(20_000));
+        assert_eq!(role.reservations.used_memory_mb(0).await, Some(0));
 
         run_scheduler_task(&tasks, &sink).await;
         assert_eq!(role.queued_request_count().await, 0);
@@ -4114,9 +4343,9 @@ mod tests {
         )
         .await;
         run_scheduler_task(&tasks, &sink).await;
-        assert_eq!(sink.writes().len(), 3);
-        assert_eq!(role.queued_request_count().await, 0);
-        assert_eq!(role.reservations.used_memory_mb(0).await, Some(40_000));
+        assert_eq!(sink.writes().len(), 2);
+        assert_eq!(role.queued_request_count().await, 1);
+        assert_eq!(role.reservations.used_memory_mb(0).await, Some(20_000));
 
         role.handle(
             &release_msg(
@@ -4189,10 +4418,10 @@ mod tests {
         )
         .await;
         run_scheduler_task(&tasks_after_restart, &sink).await;
-        assert_eq!(role_after_restart.queued_request_count().await, 0);
+        assert_eq!(role_after_restart.queued_request_count().await, 1);
         assert_eq!(
             role_after_restart.reservations.used_memory_mb(0).await,
-            Some(40_000)
+            Some(20_000)
         );
 
         role_after_restart
@@ -4208,7 +4437,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             role_after_restart.reservations.used_memory_mb(0).await,
-            Some(20_000)
+            Some(0)
         );
 
         run_scheduler_task(&tasks_after_restart, &sink).await;

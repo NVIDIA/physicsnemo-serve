@@ -65,7 +65,28 @@
         "gpu_discovery_interval_secs": 60,
         "batching_enabled": true,
         "max_batch_size": 4,
-        "max_batch_wait_ms": 5000
+        "max_batch_wait_ms": 5000,
+        "workflow_priorities": {
+          "e2s-deterministic": 1,
+          "e2s-deterministic-earth2": 1,
+          "e2s-deterministic-fcn": 1,
+          "e2s-diagnostic": 1,
+          "e2s-ensemble": 1,
+          "e2s-example-user": 1,
+          "e2s-foundry-fcn3": 1,
+          "e2s-foundry-fcn3-stormscope-goes": 1,
+          "e2s-stormcast-fcn3": 1,
+          "earth2-deterministic": 1,
+          "earth2-deterministic-batch": 1,
+          "earth2-ensemble": 1,
+          "earth2-ensemble-fanout": 1,
+          "physicsnemo-cfd-surface-benchmark": 1
+        },
+        "queue_priority_metric_weight": 1,
+        "queue_age_metric_weight": 1,
+        "queue_warm_affinity_metric_weight": 1,
+        "queue_age_saturation_secs": 300,
+        "queue_unschedulable_retry_delay_ms": 100
       }
     },
     "collect": {

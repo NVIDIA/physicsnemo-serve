@@ -41,7 +41,16 @@
         "gpu_registry_key": "gpu:registry",
         "batching_enabled": true,
         "max_batch_size": 4,
-        "max_batch_wait_ms": 200
+        "max_batch_wait_ms": 200,
+        "workflow_priorities": {
+          "interactive-forecast": 10,
+          "batch-forecast": 0
+        },
+        "queue_priority_metric_weight": 1,
+        "queue_age_metric_weight": 1,
+        "queue_warm_affinity_metric_weight": 1,
+        "queue_age_saturation_secs": 300,
+        "queue_unschedulable_retry_delay_ms": 100
       }
     },
     "results": {

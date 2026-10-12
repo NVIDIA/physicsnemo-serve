@@ -74,13 +74,15 @@ impl ResourceAvailabilityView {
         payload: &SchedulePayload,
     ) -> QueueCandidateStatus {
         let mut resolved = payload.clone();
-        let Ok((needed_gpus, _, _)) = resolve_resource_config(&mut resolved) else {
+        let Ok((needed_gpus, needed_memory_mb, _)) = resolve_resource_config(&mut resolved) else {
             // Let the reservation path produce the definitive validation error and
             // apply its retry/DLQ policy instead of deferring an invalid request forever.
             return QueueCandidateStatus::Eligible {
                 has_warm_worker: false,
             };
         };
+        resolved.gpus_required = needed_gpus;
+        resolved.memory_mb = needed_memory_mb;
 
         let mut ready = 0;
         let mut temporarily_blocked = 0;
@@ -1258,6 +1260,24 @@ mod tests {
                 .evaluate_candidate_status(&msg),
             QueueCandidateStatus::Eligible { .. }
         ));
+    }
+
+    #[test]
+    fn oversized_request_is_not_deferred_when_matching_worker_is_busy() {
+        let snapshot = ResourceAvailabilityView::for_tests(
+            vec![gpu(0, "gpu:0", 40_000, 0)],
+            HashMap::from([(0, 1_000)]),
+        );
+        let msg = payload_with_resource_profile("run-oversized", "wf", 1, 33_000);
+        assert_eq!(msg.gpus_required, 0);
+        assert_eq!(msg.memory_mb, 0);
+
+        assert_eq!(
+            snapshot.evaluate_candidate_status(&msg),
+            QueueCandidateStatus::Eligible {
+                has_warm_worker: false
+            }
+        );
     }
 
     #[tokio::test]

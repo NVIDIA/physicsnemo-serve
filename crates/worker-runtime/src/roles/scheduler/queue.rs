@@ -217,7 +217,8 @@ impl QueueScoreMetric<QueuedRequest, ResourceAvailabilityView> for WorkflowPrior
 }
 
 /// Gradually raises the priority of waiting requests to prevent starvation.
-/// Scores grow from zero to one at the configured saturation horizon.
+/// The score reaches one at the configured horizon and continues growing so
+/// that age eventually outweighs bounded priority and affinity scores.
 pub(super) struct QueueAgeMetric {
     saturation: Duration,
 }
@@ -242,10 +243,9 @@ impl QueueScoreMetric<QueuedRequest, ResourceAvailabilityView> for QueueAgeMetri
         _candidate_status: QueueCandidateStatus,
         now: Instant,
     ) -> f64 {
-        (now.saturating_duration_since(item.enqueued_at)
+        now.saturating_duration_since(item.enqueued_at)
             .as_secs_f64()
-            / self.saturation.as_secs_f64())
-        .min(1.0)
+            / self.saturation.as_secs_f64()
     }
 }
 
@@ -475,15 +475,14 @@ mod tests {
     }
 
     #[test]
-    fn queue_age_metric_normalizes_at_saturation_horizon() {
+    fn queue_age_metric_continues_growing_after_saturation_horizon() {
         let metric = QueueAgeMetric::new(Duration::from_secs(50));
         let now = Instant::now();
-        let request = queued_request("demo", None, now - Duration::from_secs(25));
         let context = resource_snapshot_with_cached_workflow("demo");
 
         assert_eq!(
             metric.score(
-                &request,
+                &queued_request("demo", None, now - Duration::from_secs(25)),
                 &context,
                 QueueCandidateStatus::Eligible {
                     has_warm_worker: false,
@@ -491,6 +490,50 @@ mod tests {
                 now
             ),
             0.5
+        );
+        assert_eq!(
+            metric.score(
+                &queued_request("demo", None, now - Duration::from_secs(75)),
+                &context,
+                QueueCandidateStatus::Eligible {
+                    has_warm_worker: false,
+                },
+                now
+            ),
+            1.5
+        );
+    }
+
+    #[test]
+    fn overdue_request_eventually_outranks_priority_and_warm_affinity() {
+        let now = Instant::now();
+        let mut queue = PriorityQueue::new(
+            vec![
+                WeightedMetric::new(
+                    1.0,
+                    Arc::new(WorkflowPriorityMetric::new(HashMap::from([(
+                        "high".to_string(),
+                        10,
+                    )]))),
+                ),
+                WeightedMetric::new(1.0, Arc::new(QueueAgeMetric::new(Duration::from_secs(300)))),
+                WeightedMetric::new(1.0, Arc::new(WarmCacheAffinityMetric)),
+            ],
+            Duration::from_millis(10),
+        );
+        queue.push_back(queued_request(
+            "default",
+            Some("cold"),
+            now - Duration::from_secs(601),
+        ));
+        queue.push_back(queued_request("high", Some("warm"), now));
+        let context = resource_snapshot_with_cached_workflow("warm");
+
+        assert_eq!(
+            queue
+                .find_highest_priority_candidate(&context, now)
+                .map(|candidate| candidate.payload.workflow),
+            Some("default".to_string())
         );
     }
 

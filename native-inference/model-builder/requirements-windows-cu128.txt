@@ -1,0 +1,9 @@
+# Native Windows CUDA starting environment; qualify each model on its target GPU.
+# TensorRT's CUDA variant/version is selected separately by setup-env from its SDK.
+--extra-index-url https://download.pytorch.org/whl/cu128
+torch==2.10.0+cu128
+numpy==2.1.0
+onnx==1.18.0
+onnxscript>=0.3,<1
+# Community Windows port; PyTorch 2.10 uses the Triton 3.6 compiler series.
+triton-windows>=3.6,<3.7

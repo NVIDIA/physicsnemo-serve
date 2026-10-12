@@ -1,0 +1,7 @@
+{
+  "format_version": 1,
+  "status": "unreleased",
+  "builder_image": null,
+  "runtime_path": null,
+  "note": "No public builder/SDK release exists yet. Bootstrap an image explicitly or select local execution with an installed SDK."
+}

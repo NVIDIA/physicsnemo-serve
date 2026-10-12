@@ -61,3 +61,23 @@ deploy/config.yaml
 # Claude Code skills (may contain tokens/secrets)
 .claude/skills/
 .codex
+
+# Model Builder candidates and native SDK builds
+/out/
+
+# Local reports, recordings, and assets
+/reports/
+
+# Local native inference agent instructions
+/native-inference/AGENTS.md
+
+# Local design documents and architecture assets
+/docs/assets/
+/docs/cpp-pnmir-worker-rust-ffi-design.md
+/docs/earthmover-hf-integration-design.md
+/docs/native-inference-architecture-diagram.md
+/docs/native-inference-overview-audit.md
+
+# The frontend source package is named build; retain it beside generated build directories.
+!/native-inference/model-builder/src/model_builder/build/
+!/native-inference/model-builder/src/model_builder/build/*.py

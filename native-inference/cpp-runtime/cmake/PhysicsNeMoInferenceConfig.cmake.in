@@ -1,0 +1,54 @@
+@PACKAGE_INIT@
+
+include(CMakeFindDependencyMacro)
+find_dependency(Threads)
+include("${CMAKE_CURRENT_LIST_DIR}/PhysicsNeMoInferenceCoreTargets.cmake")
+set(PhysicsNeMoInference_core_FOUND TRUE)
+set(PhysicsNeMoInference_aoti_FOUND @PNMIR_ENABLE_AOTI@)
+set(PhysicsNeMoInference_onnxruntime_FOUND @PNMIR_ENABLE_ONNXRUNTIME@)
+set(PhysicsNeMoInference_tensorrt_FOUND @PNMIR_ENABLE_TENSORRT@)
+
+# Optional backend development dependencies are resolved on the consumer host.
+# No source, Python prefix, or absolute library path from the producer is saved.
+foreach(component IN LISTS PhysicsNeMoInference_FIND_COMPONENTS)
+  if(component STREQUAL "aoti" AND PhysicsNeMoInference_aoti_FOUND)
+    find_dependency(Torch)
+    include("${CMAKE_CURRENT_LIST_DIR}/PhysicsNeMoInferenceAotiTargets.cmake")
+  elseif(component STREQUAL "onnxruntime" AND PhysicsNeMoInference_onnxruntime_FOUND)
+    find_library(PNMIR_ONNXRUNTIME_NATIVE_LIBRARY NAMES onnxruntime
+      HINTS "${PNMIR_ONNXRUNTIME_ROOT}/lib" "${PACKAGE_PREFIX_DIR}/@CMAKE_INSTALL_LIBDIR@")
+    if(NOT PNMIR_ONNXRUNTIME_NATIVE_LIBRARY)
+      set(PhysicsNeMoInference_onnxruntime_FOUND FALSE)
+    else()
+      if(NOT TARGET PhysicsNeMoInference::onnxruntime_native)
+        add_library(PhysicsNeMoInference::onnxruntime_native UNKNOWN IMPORTED)
+        set_target_properties(PhysicsNeMoInference::onnxruntime_native PROPERTIES
+          IMPORTED_LOCATION "${PNMIR_ONNXRUNTIME_NATIVE_LIBRARY}")
+      endif()
+      include("${CMAKE_CURRENT_LIST_DIR}/PhysicsNeMoInferenceOnnxruntimeTargets.cmake")
+    endif()
+  elseif(component STREQUAL "tensorrt" AND PhysicsNeMoInference_tensorrt_FOUND)
+    find_dependency(CUDAToolkit)
+    foreach(library IN ITEMS nvinfer nvinfer_plugin)
+      find_library(PNMIR_${library}_NATIVE_LIBRARY NAMES ${library} ${library}_10
+        HINTS "${PNMIR_TENSORRT_ROOT}/lib" "${PNMIR_TENSORRT_ROOT}/lib64"
+              "${PNMIR_TENSORRT_ROOT}/lib/x86_64-linux-gnu"
+              "${PACKAGE_PREFIX_DIR}/@CMAKE_INSTALL_LIBDIR@")
+    endforeach()
+    if(NOT PNMIR_nvinfer_NATIVE_LIBRARY OR NOT PNMIR_nvinfer_plugin_NATIVE_LIBRARY)
+      set(PhysicsNeMoInference_tensorrt_FOUND FALSE)
+    else()
+      if(NOT TARGET PhysicsNeMoInference::tensorrt_native)
+        add_library(PhysicsNeMoInference::tensorrt_native UNKNOWN IMPORTED)
+        set_target_properties(PhysicsNeMoInference::tensorrt_native PROPERTIES
+          IMPORTED_LOCATION "${PNMIR_nvinfer_NATIVE_LIBRARY}")
+        add_library(PhysicsNeMoInference::tensorrt_plugin_native UNKNOWN IMPORTED)
+        set_target_properties(PhysicsNeMoInference::tensorrt_plugin_native PROPERTIES
+          IMPORTED_LOCATION "${PNMIR_nvinfer_plugin_NATIVE_LIBRARY}")
+      endif()
+      include("${CMAKE_CURRENT_LIST_DIR}/PhysicsNeMoInferenceTensorrtTargets.cmake")
+    endif()
+  endif()
+endforeach()
+
+check_required_components(PhysicsNeMoInference)

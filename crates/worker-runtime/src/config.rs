@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
 use anyhow::{Context, Result, anyhow};
@@ -96,6 +96,21 @@ pub struct SchedulerRoleConfig {
     /// Maximum age of the FIFO head before a partial scheduler batch is flushed.
     #[serde(default = "default_scheduler_max_batch_wait_ms")]
     pub max_batch_wait_ms: u64,
+    /// Static priority by workflow name. Missing workflows have priority zero.
+    #[serde(default)]
+    pub workflow_priorities: HashMap<String, i64>,
+    #[serde(default = "default_queue_metric_weight")]
+    pub queue_priority_metric_weight: u64,
+    #[serde(default = "default_queue_metric_weight")]
+    pub queue_age_metric_weight: u64,
+    #[serde(default = "default_queue_metric_weight")]
+    pub queue_warm_affinity_metric_weight: u64,
+    /// Queue age in seconds at which the normalized age score reaches one.
+    #[serde(default = "default_queue_age_saturation_secs")]
+    pub queue_age_saturation_secs: u64,
+    /// Delay before reconsidering a temporarily unschedulable request.
+    #[serde(default = "default_queue_unschedulable_retry_delay_ms")]
+    pub queue_unschedulable_retry_delay_ms: u64,
 }
 
 fn default_gpu_registry_key() -> String {
@@ -122,6 +137,18 @@ fn default_scheduler_max_batch_wait_ms() -> u64 {
     200
 }
 
+fn default_queue_metric_weight() -> u64 {
+    1
+}
+
+fn default_queue_age_saturation_secs() -> u64 {
+    300
+}
+
+fn default_queue_unschedulable_retry_delay_ms() -> u64 {
+    100
+}
+
 impl Default for SchedulerRoleConfig {
     fn default() -> Self {
         Self {
@@ -131,6 +158,12 @@ impl Default for SchedulerRoleConfig {
             batching_enabled: default_scheduler_batching_enabled(),
             max_batch_size: default_scheduler_max_batch_size(),
             max_batch_wait_ms: default_scheduler_max_batch_wait_ms(),
+            workflow_priorities: HashMap::new(),
+            queue_priority_metric_weight: default_queue_metric_weight(),
+            queue_age_metric_weight: default_queue_metric_weight(),
+            queue_warm_affinity_metric_weight: default_queue_metric_weight(),
+            queue_age_saturation_secs: default_queue_age_saturation_secs(),
+            queue_unschedulable_retry_delay_ms: default_queue_unschedulable_retry_delay_ms(),
         }
     }
 }
@@ -877,6 +910,33 @@ mod tests {
             cfg.gpu_discovery_interval_secs,
             DEFAULT_GPU_DISCOVERY_INTERVAL_SECS
         );
+        assert!(cfg.workflow_priorities.is_empty());
+        assert_eq!(cfg.queue_priority_metric_weight, 1);
+        assert_eq!(cfg.queue_age_metric_weight, 1);
+        assert_eq!(cfg.queue_warm_affinity_metric_weight, 1);
+        assert_eq!(cfg.queue_age_saturation_secs, 300);
+        assert_eq!(cfg.queue_unschedulable_retry_delay_ms, 100);
+    }
+
+    #[test]
+    fn scheduler_role_config_parses_score_queue_policy() {
+        let value = serde_json::json!({
+            "workflow_priorities": {"premium": 10, "batch": -2},
+            "queue_priority_metric_weight": 3,
+            "queue_age_metric_weight": 2,
+            "queue_warm_affinity_metric_weight": 4,
+            "queue_age_saturation_secs": 600,
+            "queue_unschedulable_retry_delay_ms": 50
+        });
+        let cfg: SchedulerRoleConfig = parse_role_config(Some(&value)).unwrap();
+
+        assert_eq!(cfg.workflow_priorities["premium"], 10);
+        assert_eq!(cfg.workflow_priorities["batch"], -2);
+        assert_eq!(cfg.queue_priority_metric_weight, 3);
+        assert_eq!(cfg.queue_age_metric_weight, 2);
+        assert_eq!(cfg.queue_warm_affinity_metric_weight, 4);
+        assert_eq!(cfg.queue_age_saturation_secs, 600);
+        assert_eq!(cfg.queue_unschedulable_retry_delay_ms, 50);
     }
 
     #[test]

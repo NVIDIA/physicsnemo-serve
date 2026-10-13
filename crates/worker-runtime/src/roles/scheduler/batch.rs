@@ -418,8 +418,12 @@ impl SchedulerRole {
         let mut flush_reason = None;
         let mut memory_limited = false;
 
-        // Scan the remaining queue for unique, compatible requests.
-        for queued in state.queue.iter().skip(1) {
+        // Scan all other queued entries; metric selection does not imply that
+        // the chosen batch head is physically first in the backing deque.
+        for queued in state.queue.iter_ready(std::time::Instant::now()) {
+            if SchedulerRole::queue_key(&queued.msg) == SchedulerRole::queue_key(&head.msg) {
+                continue;
+            }
             if !seen_run_ids.insert(queued.msg.run_id().to_string()) {
                 continue;
             }

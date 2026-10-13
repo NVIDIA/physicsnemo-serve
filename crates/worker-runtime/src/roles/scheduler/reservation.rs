@@ -42,6 +42,93 @@ pub(crate) fn is_reservation_blocked_error(error: &anyhow::Error) -> bool {
     error.downcast_ref::<ReservationBlockedError>().is_some()
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum QueueCandidateStatus {
+    Eligible { has_warm_worker: bool },
+    TemporarilyBlocked,
+}
+
+/// Immutable resource view used for one queue-selection pass.
+#[derive(Debug, Clone)]
+pub(super) struct ResourceAvailabilityView {
+    resources: Vec<ResourceInfo>,
+    active_reserved_memory_mb: HashMap<u32, u64>,
+    memory_utilization_percent: u64,
+}
+
+impl ResourceAvailabilityView {
+    #[cfg(test)]
+    pub(super) fn for_tests(
+        resources: Vec<ResourceInfo>,
+        active_reserved_memory_mb: HashMap<u32, u64>,
+    ) -> Self {
+        Self {
+            resources,
+            active_reserved_memory_mb,
+            memory_utilization_percent: 80,
+        }
+    }
+
+    pub(super) fn evaluate_candidate_status(
+        &self,
+        payload: &SchedulePayload,
+    ) -> QueueCandidateStatus {
+        let mut resolved = payload.clone();
+        let Ok((needed_gpus, needed_memory_mb, _)) =
+            resolve_resource_config(&mut resolved, &self.resources)
+        else {
+            // Let the reservation path produce the definitive validation error and
+            // apply its retry/DLQ policy instead of deferring an invalid request forever.
+            return QueueCandidateStatus::Eligible {
+                has_warm_worker: false,
+            };
+        };
+        resolved.gpus_required = needed_gpus;
+        resolved.memory_mb = needed_memory_mb;
+
+        let mut ready = 0;
+        let mut temporarily_blocked = 0;
+        let mut has_warm_worker = false;
+
+        for resource in &self.resources {
+            match resource_eligibility_for_request(
+                resource,
+                &resolved,
+                self.memory_utilization_percent,
+            ) {
+                ResourceEligibility::Available => {
+                    if self
+                        .active_reserved_memory_mb
+                        .get(&resource.resource_id)
+                        .copied()
+                        .unwrap_or(0)
+                        > 0
+                    {
+                        temporarily_blocked += 1;
+                    } else {
+                        ready += 1;
+                        has_warm_worker |= resource_has_warm_workflow(resource, &resolved);
+                    }
+                }
+                ResourceEligibility::TemporarilyUnavailable(_) => {
+                    temporarily_blocked += 1;
+                }
+                ResourceEligibility::Ineligible => {}
+            }
+        }
+
+        if ready >= needed_gpus {
+            QueueCandidateStatus::Eligible { has_warm_worker }
+        } else if ready + temporarily_blocked >= needed_gpus {
+            QueueCandidateStatus::TemporarilyBlocked
+        } else {
+            QueueCandidateStatus::Eligible {
+                has_warm_worker: false,
+            }
+        }
+    }
+}
+
 /// In-memory view of discovered resource inventory.
 #[derive(Clone)]
 pub struct ResourceReservationTable {
@@ -94,7 +181,7 @@ impl ResourceReservationTable {
         }?;
         let reserved_memory = self
             .reserved_memory
-            .get_many(&[resource_id])
+            .get_active_many(&[resource_id])
             .await
             .ok()
             .and_then(|values| values.get(&resource_id).copied())
@@ -167,6 +254,25 @@ impl ResourceReservationTable {
         Ok(())
     }
 
+    pub(super) async fn resource_availability_snapshot(&self) -> Result<ResourceAvailabilityView> {
+        let _reservation_flow_guard = self.reservation_flow_lock.lock().await;
+        let resources = {
+            let map = self.resource_map.lock().await;
+            map.values().cloned().collect::<Vec<_>>()
+        };
+        let resource_ids = resources
+            .iter()
+            .map(|resource| resource.resource_id)
+            .collect::<Vec<_>>();
+        let active_reserved_memory_mb = self.reserved_memory.get_active_many(&resource_ids).await?;
+
+        Ok(ResourceAvailabilityView {
+            resources,
+            active_reserved_memory_mb,
+            memory_utilization_percent: self.memory_utilization_percent,
+        })
+    }
+
     pub(super) async fn tracked_worker_count(&self) -> usize {
         self.resource_map.lock().await.len()
     }
@@ -175,28 +281,15 @@ impl ResourceReservationTable {
         &self,
         payload: &mut SchedulePayload,
     ) -> Result<(usize, u64, ResourceConfigSource, Vec<ResourceInfo>)> {
-        let (gpus_required, memory_mb, config_source) = resolve_resource_config(payload)?;
-
-        payload.gpus_required = gpus_required;
-        payload.memory_mb = memory_mb;
-
         let resources = {
             let map = self.resource_map.lock().await;
             map.values().cloned().collect::<Vec<_>>()
         };
-        let has_executor_constraint = payload
-            .resource_profile
-            .as_ref()
-            .and_then(|profile| profile.executor_class.as_deref())
-            .is_some_and(|executor_class| !executor_class.trim().is_empty());
-        if matches!(config_source, ResourceConfigSource::KnownProfileFallback)
-            && !has_executor_constraint
-            && let Some(executor_class) =
-                uniform_worker_executor_class(payload.workflow.as_str(), resources.iter())?
-            && let Some(profile) = payload.resource_profile.as_mut()
-        {
-            profile.executor_class = Some(executor_class);
-        }
+        let (gpus_required, memory_mb, config_source) =
+            resolve_resource_config(payload, &resources)?;
+
+        payload.gpus_required = gpus_required;
+        payload.memory_mb = memory_mb;
 
         Ok((gpus_required, memory_mb, config_source, resources))
     }
@@ -223,9 +316,11 @@ impl ResourceReservationTable {
         }))
     }
 
-    /// Reserve GPUs for a schedule payload using round-robin placement.
+    /// Atomically reserve idle GPUs for a schedule payload.
     ///
-    /// Returns selected GPU ids when enough resources are available.
+    /// Warm-compatible workers are preferred, with round-robin placement within
+    /// each affinity tier. Returns the selected resources when enough idle,
+    /// compatible GPUs can be claimed.
     pub async fn reserve(&self, payload: &mut SchedulePayload) -> Result<Vec<ReservedResource>> {
         // Keep placement and accounting updates ordered within this scheduler.
         let _reservation_flow_guard = self.reservation_flow_lock.lock().await;
@@ -244,23 +339,58 @@ impl ResourceReservationTable {
             "attempting worker reservation"
         );
 
+        let resource_ids = resources
+            .iter()
+            .map(|resource| resource.resource_id)
+            .collect::<Vec<_>>();
+        let active_reserved_memory_mb = self.reserved_memory.get_active_many(&resource_ids).await?;
         let mut candidates = select_candidate_resources(&resources, payload, limit, needed_gpus)?;
+        let eligible_count = candidates.len();
+        // Only place work on GPUs with no active scheduler reservation.
+        candidates.retain(|candidate| {
+            active_reserved_memory_mb
+                .get(&candidate.resource_id)
+                .copied()
+                .unwrap_or(0)
+                == 0
+        });
+        if candidates.len() < needed_gpus && eligible_count >= needed_gpus {
+            return Err(ReservationBlockedError.into());
+        }
         debug!(
             run_id = %payload.run_id,
             workflow = %payload.workflow,
             matching_candidate_count = candidates.len(),
             "round-robin candidate evaluation complete"
         );
-        candidates.sort_by_key(|candidate| candidate.resource_id);
+        // Split candidates into affinity tiers so workers that already have the
+        // requested workflow cached or warm are always considered first.
+        let (mut warm_candidates, mut cold_candidates): (Vec<_>, Vec<_>) = candidates
+            .into_iter()
+            .partition(|candidate| resource_has_warm_workflow(candidate, payload));
+        // Establish a stable order before applying the round-robin offset.
+        warm_candidates.sort_by_key(|candidate| candidate.resource_id);
+        cold_candidates.sort_by_key(|candidate| candidate.resource_id);
         {
+            // Rotate each tier independently for fair distribution without
+            // allowing a cold worker to move ahead of a warm worker.
             let mut cursor = self
                 .rr_cursor
                 .lock()
                 .map_err(|_| anyhow!("rr_cursor poisoned"))?;
-            let offset = *cursor % candidates.len();
-            candidates.rotate_left(offset);
+            if !warm_candidates.is_empty() {
+                let offset = *cursor % warm_candidates.len();
+                warm_candidates.rotate_left(offset);
+            }
+            if !cold_candidates.is_empty() {
+                let offset = *cursor % cold_candidates.len();
+                cold_candidates.rotate_left(offset);
+            }
             *cursor = cursor.wrapping_add(needed_gpus);
         }
+        // Preserve warm-first placement after round-robin ordering within tiers.
+        warm_candidates.extend(cold_candidates);
+        let candidates = warm_candidates;
 
         let mut reserved_resource_ids: Vec<u32> = Vec::with_capacity(needed_gpus);
         let mut selected_gpu_ids = Vec::with_capacity(needed_gpus);
@@ -268,10 +398,19 @@ impl ResourceReservationTable {
             let resource_id = candidate.resource_id;
             let updated_accounted_memory_mb = match self
                 .reserved_memory
-                .reserve(resource_id, candidate.used_memory_mb, needed_memory_mb)
+                .try_reserve_idle(resource_id, candidate.used_memory_mb, needed_memory_mb)
                 .await
             {
-                Ok(updated) => updated,
+                Ok(Some(updated)) => updated,
+                Ok(None) => {
+                    for reserved_resource_id in &reserved_resource_ids {
+                        let _ = self
+                            .reserved_memory
+                            .decrement(*reserved_resource_id, needed_memory_mb)
+                            .await;
+                    }
+                    return Err(ReservationBlockedError.into());
+                }
                 Err(error) => {
                     for reserved_resource_id in &reserved_resource_ids {
                         let _ = self
@@ -360,6 +499,7 @@ pub(super) enum ResourceConfigSource {
 
 pub(super) fn resolve_resource_config(
     payload: &mut SchedulePayload,
+    resources: &[ResourceInfo],
 ) -> Result<(usize, u64, ResourceConfigSource)> {
     if let Some(profile) = payload.resource_profile.as_ref() {
         let gpus_required = profile
@@ -421,7 +561,7 @@ pub(super) fn resolve_resource_config(
             memory_mb,
             "resolve_resource_config: using known-profile fallback"
         );
-        let executor_class = payload
+        let mut executor_class = payload
             .raw_payload
             .get("runtime")
             .and_then(serde_json::Value::as_object)
@@ -430,6 +570,10 @@ pub(super) fn resolve_resource_config(
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(ToString::to_string);
+        if executor_class.is_none() {
+            executor_class =
+                uniform_worker_executor_class(payload.workflow.as_str(), resources.iter())?;
+        }
         payload.resource_profile = Some(ScheduleResourceProfile {
             gpus_required: Some(gpus_required),
             memory_mb: Some(memory_mb),
@@ -639,6 +783,30 @@ fn resource_has_conflicting_workflow(resource: &ResourceInfo, payload: &Schedule
     has_resource_workflow
 }
 
+fn resource_has_warm_workflow(resource: &ResourceInfo, payload: &SchedulePayload) -> bool {
+    let Some(requested_workflow_id) = payload
+        .workflow_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|workflow_id| !workflow_id.is_empty())
+    else {
+        return false;
+    };
+
+    resource
+        .model_cache_workflow_ids
+        .iter()
+        .any(|workflow_id| workflow_id.eq_ignore_ascii_case(requested_workflow_id))
+        || (resource
+            .warmup_workflow_id
+            .as_deref()
+            .is_some_and(|workflow_id| workflow_id.eq_ignore_ascii_case(requested_workflow_id))
+            && resource
+                .warmup_status
+                .as_deref()
+                .is_some_and(|status| status.eq_ignore_ascii_case("succeeded")))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -804,34 +972,29 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reserve_allows_multiple_requests_on_the_same_gpu_stream() {
+    async fn reserve_blocks_second_request_until_gpu_is_released() {
         let table = table_with_gpus(vec![gpu(0, "gpu:0", 40_000, 20_000)]);
 
         let mut first = payload_with_resource_profile("run-1", "__unknown_workflow__", 1, 10_000);
         table.reserve(&mut first).await.unwrap();
 
-        assert_eq!(
-            table.used_memory_mb(0).await,
-            Some(30_000),
-            "new reservations should add on top of already-observed GPU usage"
-        );
+        assert_eq!(table.used_memory_mb(0).await, Some(20_000));
 
         let mut second = payload_with_resource_profile("run-2", "__unknown_workflow__", 1, 15_000);
+        let error = table.reserve(&mut second).await.unwrap_err();
+        assert!(is_reservation_blocked_error(&error));
+
+        table.release(0, 10_000).await.unwrap();
         table.reserve(&mut second).await.unwrap();
-        assert_eq!(
-            table.used_memory_mb(0).await,
-            Some(45_000),
-            "queued requests should accumulate active accounting"
-        );
     }
 
     #[tokio::test]
-    async fn reserve_preserves_accounted_usage_when_discovery_reports_less() {
+    async fn active_reservation_stays_busy_across_discovery_refresh() {
         let table = table_with_gpus(vec![gpu(0, "gpu:0", 40_000, 20_000)]);
 
         let mut first = payload_with_resource_profile("run-1", "__unknown_workflow__", 1, 10_000);
         table.reserve(&mut first).await.unwrap();
-        assert_eq!(table.used_memory_mb(0).await, Some(30_000));
+        assert_eq!(table.used_memory_mb(0).await, Some(20_000));
 
         table
             .sync_from_discovery_update(DiscoveryUpdate::Authoritative(vec![gpu(
@@ -842,17 +1005,13 @@ mod tests {
 
         assert_eq!(
             table.used_memory_mb(0).await,
-            Some(30_000),
-            "lower live discovery should not erase durable accounted pressure"
+            Some(10_000),
+            "availability uses active reservations rather than delayed discovery usage"
         );
 
         let mut second = payload_with_resource_profile("run-2", "__unknown_workflow__", 1, 5_000);
-        table.reserve(&mut second).await.unwrap();
-        assert_eq!(
-            table.used_memory_mb(0).await,
-            Some(35_000),
-            "new reservations should build on durable accounted usage"
-        );
+        let error = table.reserve(&mut second).await.unwrap_err();
+        assert!(is_reservation_blocked_error(&error));
     }
 
     #[tokio::test]
@@ -861,7 +1020,7 @@ mod tests {
 
         let mut first = payload_with_resource_profile("run-1", "__unknown_workflow__", 1, 4_777);
         table.reserve(&mut first).await.unwrap();
-        assert_eq!(table.used_memory_mb(0).await, Some(5_249));
+        assert_eq!(table.used_memory_mb(0).await, Some(4_777));
 
         table.release(0, 4_777).await.unwrap();
         assert_eq!(
@@ -1024,6 +1183,116 @@ mod tests {
                 resource_id: 1,
             }]
         );
+    }
+
+    #[tokio::test]
+    async fn reserve_prefers_warm_worker_over_empty_worker() {
+        let table = table_with_gpus(vec![
+            worker(
+                0,
+                "execute.python.gpu.demo-empty",
+                32_000,
+                0,
+                "python.gpu.demo",
+                &["demo"],
+            ),
+            worker_cached_for(
+                worker(
+                    1,
+                    "execute.python.gpu.demo-warm",
+                    32_000,
+                    0,
+                    "python.gpu.demo",
+                    &["demo"],
+                ),
+                "demo-plugin",
+            ),
+        ]);
+        let mut msg = payload("run-warm-preference", "demo-plugin");
+        msg.workflow_id = Some("demo-plugin".to_string());
+        msg.resource_profile = Some(ScheduleResourceProfile {
+            gpus_required: Some(1),
+            memory_mb: Some(2_048),
+            executor_class: Some("python.gpu.demo".to_string()),
+            tags: Some(vec!["demo".to_string()]),
+        });
+
+        let selected = table.reserve(&mut msg).await.unwrap();
+        assert_eq!(selected[0].resource_id, 1);
+    }
+
+    #[tokio::test]
+    async fn resource_availability_snapshot_tracks_active_reservation_and_release() {
+        let table = table_with_gpus(vec![gpu(0, "gpu:0", 40_000, 39_000)]);
+        let mut msg = payload_with_resource_profile("run-1", "wf", 1, 1_000);
+
+        assert!(matches!(
+            table
+                .resource_availability_snapshot()
+                .await
+                .unwrap()
+                .evaluate_candidate_status(&msg),
+            QueueCandidateStatus::Eligible { .. }
+        ));
+
+        table.reserve(&mut msg).await.unwrap();
+        assert_eq!(
+            table
+                .resource_availability_snapshot()
+                .await
+                .unwrap()
+                .evaluate_candidate_status(&msg),
+            QueueCandidateStatus::TemporarilyBlocked
+        );
+
+        table.release(0, 1_000).await.unwrap();
+        assert!(matches!(
+            table
+                .resource_availability_snapshot()
+                .await
+                .unwrap()
+                .evaluate_candidate_status(&msg),
+            QueueCandidateStatus::Eligible { .. }
+        ));
+    }
+
+    #[test]
+    fn oversized_request_is_not_deferred_when_matching_worker_is_busy() {
+        let snapshot = ResourceAvailabilityView::for_tests(
+            vec![gpu(0, "gpu:0", 40_000, 0)],
+            HashMap::from([(0, 1_000)]),
+        );
+        let msg = payload_with_resource_profile("run-oversized", "wf", 1, 33_000);
+        assert_eq!(msg.gpus_required, 0);
+        assert_eq!(msg.memory_mb, 0);
+
+        assert_eq!(
+            snapshot.evaluate_candidate_status(&msg),
+            QueueCandidateStatus::Eligible {
+                has_warm_worker: false
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn idle_reservation_is_atomic_across_scheduler_tables() {
+        let store = Arc::new(InMemoryReservedMemoryStore::default());
+        let resource = gpu(0, "gpu:0", 40_000, 0);
+        let mut first = ResourceReservationTable::with_store(80, store.clone());
+        first.resource_map = Arc::new(Mutex::new(HashMap::from([(0, resource.clone())])));
+        let mut second = ResourceReservationTable::with_store(80, store);
+        second.resource_map = Arc::new(Mutex::new(HashMap::from([(0, resource)])));
+        let mut first_payload = payload_with_resource_profile("run-1", "wf", 1, 1_000);
+        let mut second_payload = payload_with_resource_profile("run-2", "wf", 1, 1_000);
+
+        let (first_result, second_result) = tokio::join!(
+            first.reserve(&mut first_payload),
+            second.reserve(&mut second_payload)
+        );
+        let successes = usize::from(first_result.is_ok()) + usize::from(second_result.is_ok());
+        assert_eq!(successes, 1);
+        let blocked = first_result.err().or_else(|| second_result.err()).unwrap();
+        assert!(is_reservation_blocked_error(&blocked));
     }
 
     #[tokio::test]
@@ -1398,7 +1667,7 @@ mod tests {
             ),
         );
 
-        let table = table_with_gpus(vec![
+        let workers = vec![
             worker(
                 0,
                 "execute.python.gpu.demo-a",
@@ -1415,10 +1684,21 @@ mod tests {
                 "python.gpu.demo_b",
                 &["demo-b", "gpu"],
             ),
-        ]);
+        ];
+        let table = table_with_gpus(workers.clone());
 
         let mut msg = payload("run-legacy", "legacy-demo");
         msg.resource_profile = None;
+
+        let busy_snapshot =
+            ResourceAvailabilityView::for_tests(workers, HashMap::from([(0, 1_000), (1, 1_000)]));
+        assert_eq!(
+            busy_snapshot.evaluate_candidate_status(&msg),
+            QueueCandidateStatus::Eligible {
+                has_warm_worker: false
+            },
+            "ambiguous known-profile requests must reach reserve() instead of waiting for busy workers"
+        );
 
         let result = table.reserve(&mut msg).await;
         assert!(result.is_err());
@@ -1552,9 +1832,11 @@ mod tests {
 
         let mut p1 = payload_with_resource_profile("r1", "wf", 1, 1_000);
         let ids1 = table.reserve(&mut p1).await.unwrap();
+        table.release(ids1[0].resource_id, 1_000).await.unwrap();
 
         let mut p2 = payload_with_resource_profile("r2", "wf", 1, 1_000);
         let ids2 = table.reserve(&mut p2).await.unwrap();
+        table.release(ids2[0].resource_id, 1_000).await.unwrap();
 
         let mut p3 = payload_with_resource_profile("r3", "wf", 1, 1_000);
         let ids3 = table.reserve(&mut p3).await.unwrap();

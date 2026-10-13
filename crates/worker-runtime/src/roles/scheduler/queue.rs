@@ -129,15 +129,25 @@ impl<T, C> PriorityQueue<T, C> {
     }
 }
 
+pub(super) struct QueueSelection {
+    pub(super) request: QueuedRequest,
+    pub(super) status: QueueCandidateStatus,
+}
+
+struct ScoredCandidate {
+    queue_index: usize,
+    score: f64,
+    status: QueueCandidateStatus,
+}
+
 impl PriorityQueue<QueuedRequest, ResourceAvailabilityView> {
-    pub(super) fn find_highest_priority_candidate(
+    pub(super) fn rank_ready_candidates(
         &mut self,
         resource_snapshot: &ResourceAvailabilityView,
         now: Instant,
-    ) -> Option<QueuedRequest> {
+    ) -> Vec<QueueSelection> {
         let metrics = &self.metrics;
-        let unschedulable_retry_delay = self.unschedulable_retry_delay;
-        let mut selected: Option<(usize, f64)> = None;
+        let mut ranked = Vec::new();
 
         for (index, entry) in self.entries.iter_mut().enumerate() {
             if entry.deferred_until.is_some_and(|deadline| deadline > now) {
@@ -146,10 +156,6 @@ impl PriorityQueue<QueuedRequest, ResourceAvailabilityView> {
             entry.deferred_until = None;
 
             let candidate_status = resource_snapshot.evaluate_candidate_status(&entry.item.payload);
-            if candidate_status == QueueCandidateStatus::TemporarilyBlocked {
-                Self::defer_entry(entry, now, unschedulable_retry_delay);
-                continue;
-            }
 
             let mut score = 0.0;
             for weighted_metric in metrics {
@@ -163,14 +169,26 @@ impl PriorityQueue<QueuedRequest, ResourceAvailabilityView> {
                     score += weighted_metric.weight * metric_score;
                 }
             }
-
-            // Strictly greater preserves insertion order when scores tie.
-            if selected.is_none_or(|(_, best_score)| score > best_score) {
-                selected = Some((index, score));
-            }
+            ranked.push(ScoredCandidate {
+                queue_index: index,
+                score,
+                status: candidate_status,
+            });
         }
 
-        selected.and_then(|(index, _)| self.entries.get(index).map(|entry| entry.item.clone()))
+        // Preserve insertion order when scores tie.
+        ranked.sort_by(|left, right| right.score.total_cmp(&left.score));
+        ranked
+            .into_iter()
+            .filter_map(|candidate| {
+                self.entries
+                    .get(candidate.queue_index)
+                    .map(|entry| QueueSelection {
+                        request: entry.item.clone(),
+                        status: candidate.status,
+                    })
+            })
+            .collect()
     }
 }
 
@@ -360,8 +378,10 @@ mod tests {
 
         assert_eq!(
             queue
-                .find_highest_priority_candidate(&resource_snapshot, now)
-                .map(|candidate| candidate.payload.workflow),
+                .rank_ready_candidates(&resource_snapshot, now)
+                .into_iter()
+                .next()
+                .map(|selection| selection.request.payload.workflow),
             Some("high".to_string())
         );
     }
@@ -376,14 +396,16 @@ mod tests {
 
         assert_eq!(
             queue
-                .find_highest_priority_candidate(&resource_snapshot, now)
-                .map(|candidate| candidate.payload.workflow),
+                .rank_ready_candidates(&resource_snapshot, now)
+                .into_iter()
+                .next()
+                .map(|selection| selection.request.payload.workflow),
             Some("tie-a".to_string())
         );
     }
 
     #[test]
-    fn defers_temporarily_blocked_entries_and_clears_deferrals() {
+    fn reports_candidate_status_and_supports_deferral() {
         let now = Instant::now();
         let mut queue = queue();
         queue.push_back(queued_request("high", None, now));
@@ -400,16 +422,29 @@ mod tests {
             HashMap::from([(0, 1)]),
         );
 
+        let selection = queue
+            .rank_ready_candidates(&blocked_resource_snapshot, now)
+            .into_iter()
+            .next()
+            .unwrap();
+        assert_eq!(selection.request.payload.workflow, "high");
+        assert_eq!(selection.status, QueueCandidateStatus::TemporarilyBlocked);
+        queue.defer(now, |candidate| candidate.payload.workflow == "high");
+
         assert_eq!(
             queue
-                .find_highest_priority_candidate(&blocked_resource_snapshot, now)
-                .map(|candidate| candidate.payload.workflow),
+                .rank_ready_candidates(&blocked_resource_snapshot, now)
+                .into_iter()
+                .next()
+                .map(|selection| selection.request.payload.workflow),
             Some("low".to_string())
         );
         assert_eq!(
             queue
-                .find_highest_priority_candidate(&blocked_resource_snapshot, now)
-                .map(|candidate| candidate.payload.workflow),
+                .rank_ready_candidates(&blocked_resource_snapshot, now)
+                .into_iter()
+                .next()
+                .map(|selection| selection.request.payload.workflow),
             Some("low".to_string())
         );
 
@@ -417,8 +452,10 @@ mod tests {
         let ready_resource_snapshot = resource_snapshot_with_cached_workflow("demo");
         assert_eq!(
             queue
-                .find_highest_priority_candidate(&ready_resource_snapshot, now)
-                .map(|candidate| candidate.payload.workflow),
+                .rank_ready_candidates(&ready_resource_snapshot, now)
+                .into_iter()
+                .next()
+                .map(|selection| selection.request.payload.workflow),
             Some("high".to_string())
         );
     }
@@ -531,8 +568,10 @@ mod tests {
 
         assert_eq!(
             queue
-                .find_highest_priority_candidate(&context, now)
-                .map(|candidate| candidate.payload.workflow),
+                .rank_ready_candidates(&context, now)
+                .into_iter()
+                .next()
+                .map(|selection| selection.request.payload.workflow),
             Some("default".to_string())
         );
     }

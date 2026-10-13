@@ -45,7 +45,7 @@ use self::queue::{
     PriorityQueue, QueueAgeMetric, WarmCacheAffinityMetric, WeightedMetric, WorkflowPriorityMetric,
 };
 use self::reservation::{
-    ReservedResource, ResourceAvailabilityView, ResourceReservationTable,
+    QueueCandidateStatus, ReservedResource, ResourceAvailabilityView, ResourceReservationTable,
     is_reservation_blocked_error,
 };
 
@@ -660,10 +660,7 @@ impl SchedulerRole {
             parent_run_id = ?pending.payload.parent_run_id,
             "attempting queued scheduler request"
         );
-        if let Some(parent_run_id) = pending.payload.parent_run_id.as_deref()
-            && !parent_run_id.trim().is_empty()
-            && self.parent_state.is_terminal(parent_run_id).await?
-        {
+        if let Some(parent_run_id) = self.terminal_parent_id(&pending.payload).await? {
             debug!(
                 msg_id = pending.source_msg.id(),
                 run_id = pending.source_msg.run_id(),
@@ -748,6 +745,25 @@ impl SchedulerRole {
         })))
     }
 
+    async fn terminal_parent_id<'a>(
+        &self,
+        payload: &'a SchedulePayload,
+    ) -> Result<Option<&'a str>> {
+        let Some(parent_run_id) = payload
+            .parent_run_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|parent_run_id| !parent_run_id.is_empty())
+        else {
+            return Ok(None);
+        };
+        Ok(self
+            .parent_state
+            .is_terminal(parent_run_id)
+            .await?
+            .then_some(parent_run_id))
+    }
+
     async fn execute_schedule_decision(
         &self,
         decision: ScheduleDecision,
@@ -781,17 +797,48 @@ impl SchedulerRole {
             return Ok(SchedulerRequest::Empty);
         }
         let resource_snapshot = self.reservations.resource_availability_snapshot().await?;
-        let mut state = self.scheduler_queue_state.lock().await;
-        let Some(head) = state
+
+        // Evaluate and rank each ready entry once for this resource snapshot.
+        // Walking the resulting list avoids rescanning the queue after each
+        // blocked request while still allowing lower-ranked runnable work.
+        let candidates = self
+            .scheduler_queue_state
+            .lock()
+            .await
             .queue
-            .find_highest_priority_candidate(&resource_snapshot, now)
-        else {
-            return Ok(SchedulerRequest::Empty);
-        };
-        if let Some(batch_request) = self.create_batch_request(&mut state, head.clone()).await? {
-            return Ok(batch_request);
+            .rank_ready_candidates(&resource_snapshot, now);
+        for selection in candidates {
+            let candidate = selection.request;
+
+            if selection.status == QueueCandidateStatus::TemporarilyBlocked {
+                // Parent completion takes precedence over resource availability:
+                // return stale children through the normal scheduling path so
+                // they are acknowledged and removed instead of being deferred.
+                if self.terminal_parent_id(&candidate.payload).await?.is_some() {
+                    return Ok(SchedulerRequest::Single(candidate));
+                }
+
+                // Exclude this request until its retry deadline, then continue
+                // selecting from the remaining ready entries in the same pass.
+                let queue_key = Self::queue_key(&candidate.msg);
+                self.scheduler_queue_state
+                    .lock()
+                    .await
+                    .queue
+                    .defer(now, |queued| Self::queue_key(&queued.msg) == queue_key);
+                continue;
+            }
+
+            let mut state = self.scheduler_queue_state.lock().await;
+            if let Some(batch_request) = self
+                .create_batch_request(&mut state, candidate.clone())
+                .await?
+            {
+                return Ok(batch_request);
+            }
+            return Ok(SchedulerRequest::Single(candidate));
         }
-        Ok(SchedulerRequest::Single(head))
+        Ok(SchedulerRequest::Empty)
     }
 
     async fn process_next_request(&self, sink: &dyn MessageSink) -> Result<()> {
@@ -3863,7 +3910,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn scheduler_drops_child_dispatch_for_terminal_parent_run() {
+    async fn scheduler_drops_child_for_terminal_parent_when_gpu_is_reserved() {
         let _guard = test_env::env_lock().lock().await;
         let prev_discovery = std::env::var("SCHEDULER_DISCOVERY_JSON").ok();
 
@@ -3889,6 +3936,19 @@ mod tests {
         let sink = RecordingSink::new();
         run_gpu_discovery(&tasks, &sink).await;
 
+        queue_schedule(
+            &role,
+            &schedule_msg_with_id(
+                "1-0",
+                "gpu-occupier",
+                &basic_schedule_payload("occupier", "python.gpu.demo", 1, 4_096),
+            ),
+            "schedule",
+            &sink,
+        )
+        .await;
+        run_scheduler_task(&tasks, &sink).await;
+
         let payload = serde_json::json!({
             "workflow_id": "demo-fanout",
             "parent_run_id": "parent-ensemble",
@@ -3912,16 +3972,17 @@ mod tests {
 
         queue_schedule(
             &role,
-            &schedule_msg("parent-ensemble:item:3", &payload.to_string()),
+            &schedule_msg_with_id("2-0", "parent-ensemble:item:3", &payload.to_string()),
             "schedule",
             &sink,
         )
         .await;
         run_scheduler_task(&tasks, &sink).await;
 
-        assert!(sink.writes().is_empty());
+        assert_eq!(sink.writes().len(), 1);
         assert!(sink.handoffs().is_empty());
-        assert_eq!(sink.acked_ids(), vec!["1-0".to_string()]);
+        assert_eq!(sink.acked_ids(), vec!["1-0".to_string(), "2-0".to_string()]);
+        assert_eq!(role.queued_request_count().await, 0);
 
         set_env_var("SCHEDULER_DISCOVERY_JSON", prev_discovery.as_deref());
     }

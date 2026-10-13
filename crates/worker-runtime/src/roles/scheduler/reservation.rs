@@ -74,7 +74,9 @@ impl ResourceAvailabilityView {
         payload: &SchedulePayload,
     ) -> QueueCandidateStatus {
         let mut resolved = payload.clone();
-        let Ok((needed_gpus, needed_memory_mb, _)) = resolve_resource_config(&mut resolved) else {
+        let Ok((needed_gpus, needed_memory_mb, _)) =
+            resolve_resource_config(&mut resolved, &self.resources)
+        else {
             // Let the reservation path produce the definitive validation error and
             // apply its retry/DLQ policy instead of deferring an invalid request forever.
             return QueueCandidateStatus::Eligible {
@@ -279,28 +281,15 @@ impl ResourceReservationTable {
         &self,
         payload: &mut SchedulePayload,
     ) -> Result<(usize, u64, ResourceConfigSource, Vec<ResourceInfo>)> {
-        let (gpus_required, memory_mb, config_source) = resolve_resource_config(payload)?;
-
-        payload.gpus_required = gpus_required;
-        payload.memory_mb = memory_mb;
-
         let resources = {
             let map = self.resource_map.lock().await;
             map.values().cloned().collect::<Vec<_>>()
         };
-        let has_executor_constraint = payload
-            .resource_profile
-            .as_ref()
-            .and_then(|profile| profile.executor_class.as_deref())
-            .is_some_and(|executor_class| !executor_class.trim().is_empty());
-        if matches!(config_source, ResourceConfigSource::KnownProfileFallback)
-            && !has_executor_constraint
-            && let Some(executor_class) =
-                uniform_worker_executor_class(payload.workflow.as_str(), resources.iter())?
-            && let Some(profile) = payload.resource_profile.as_mut()
-        {
-            profile.executor_class = Some(executor_class);
-        }
+        let (gpus_required, memory_mb, config_source) =
+            resolve_resource_config(payload, &resources)?;
+
+        payload.gpus_required = gpus_required;
+        payload.memory_mb = memory_mb;
 
         Ok((gpus_required, memory_mb, config_source, resources))
     }
@@ -510,6 +499,7 @@ pub(super) enum ResourceConfigSource {
 
 pub(super) fn resolve_resource_config(
     payload: &mut SchedulePayload,
+    resources: &[ResourceInfo],
 ) -> Result<(usize, u64, ResourceConfigSource)> {
     if let Some(profile) = payload.resource_profile.as_ref() {
         let gpus_required = profile
@@ -571,7 +561,7 @@ pub(super) fn resolve_resource_config(
             memory_mb,
             "resolve_resource_config: using known-profile fallback"
         );
-        let executor_class = payload
+        let mut executor_class = payload
             .raw_payload
             .get("runtime")
             .and_then(serde_json::Value::as_object)
@@ -580,6 +570,10 @@ pub(super) fn resolve_resource_config(
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(ToString::to_string);
+        if executor_class.is_none() {
+            executor_class =
+                uniform_worker_executor_class(payload.workflow.as_str(), resources.iter())?;
+        }
         payload.resource_profile = Some(ScheduleResourceProfile {
             gpus_required: Some(gpus_required),
             memory_mb: Some(memory_mb),
@@ -1673,7 +1667,7 @@ mod tests {
             ),
         );
 
-        let table = table_with_gpus(vec![
+        let workers = vec![
             worker(
                 0,
                 "execute.python.gpu.demo-a",
@@ -1690,10 +1684,21 @@ mod tests {
                 "python.gpu.demo_b",
                 &["demo-b", "gpu"],
             ),
-        ]);
+        ];
+        let table = table_with_gpus(workers.clone());
 
         let mut msg = payload("run-legacy", "legacy-demo");
         msg.resource_profile = None;
+
+        let busy_snapshot =
+            ResourceAvailabilityView::for_tests(workers, HashMap::from([(0, 1_000), (1, 1_000)]));
+        assert_eq!(
+            busy_snapshot.evaluate_candidate_status(&msg),
+            QueueCandidateStatus::Eligible {
+                has_warm_worker: false
+            },
+            "ambiguous known-profile requests must reach reserve() instead of waiting for busy workers"
+        );
 
         let result = table.reserve(&mut msg).await;
         assert!(result.is_err());

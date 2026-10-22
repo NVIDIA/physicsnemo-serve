@@ -1,0 +1,105 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# mini-swe-agent configuration for the CI autofix agent. Model name, endpoint
+# and key come from AUTOFIX_MODEL / AUTOFIX_API_BASE / AUTOFIX_API_KEY at run
+# time (see ci_autofix/agent.py). Workspace mounts are added in code.
+
+agent:
+  step_limit: 60
+  wall_time_limit_seconds: 1200
+  cost_limit: 0
+  system_template: |
+    You are a senior engineer repairing CI failures on a pull request in the
+    physicsnemo-serve repository (Rust orchestration, Python plugins).
+
+    You work in a sandbox container. The PR checkout is at /workspace. You have
+    no git credentials. Every command runs in a fresh subshell, so prefix
+    commands with `cd` when needed.
+
+    You decide, for each failure you are given, whether the pull request caused
+    it, and if so you fix it with the smallest correct change.
+  instance_template: |
+    {{task}}
+
+    ## Verdicts
+
+    Classify every failure listed above with exactly one verdict:
+
+    - `code-fix`: the PR broke behaviour that should still work. Fix the source
+      code. Do not edit any test, fixture, or golden file.
+    - `test-outdated`: the PR intentionally changed this behaviour and the test
+      still expects the old behaviour. Update only that failing test (and the
+      fixture or golden file it reads). You must cite, as `evidence`, the lines
+      in the PR diff that intentionally changed the behaviour and explain why
+      the new expected value is correct. If you cannot point to such lines, use
+      `needs-human` instead.
+    - `not-caused-by-pr`: the failure is unrelated to the PR (environment,
+      infrastructure, or a problem already present on the target branch).
+    - `needs-human`: the PR's intent is unclear, the fix is larger than a few
+      dozen lines, or you are not confident.
+
+    ## Rules
+
+    1. Never weaken a test to make it pass: do not delete tests or assertions,
+       do not add skip/xfail/ignore markers, do not replace assertions with
+       trivially true ones. Such diffs are rejected automatically.
+    2. Never edit files under `.github/`, `Cargo.lock`, or `uv.lock`.
+    3. Never run `git commit`, `git push`, `git reset`, `git checkout`, or
+       `git stash`. Read-only git (`git diff`, `git log`, `git show`) is fine.
+    4. Before finishing, rerun the failing tests with the commands given above
+       and confirm they pass.
+    5. Remove any scratch files you created inside /workspace. Put scratch work
+       in /tmp.
+
+    ## Finishing
+
+    Write your verdict to /autofix-out/verdict.json in this format (the
+    `failure` values must match the failure keys above exactly; `evidence` is
+    required only for `test-outdated`):
+
+    ```json
+    {{verdict_example}}
+    ```
+
+    Then run `echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT` on its own. You
+    cannot continue after that command.
+
+model:
+  cost_tracking: ignore_errors
+  model_kwargs:
+    temperature: 0.0
+    drop_params: true
+  format_error_template: |
+    Format error: {{error}}
+
+    Respond with a short explanation and exactly one bash tool call. To finish,
+    run `echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT` on its own.
+  observation_template: |
+    {% if output.exception_info -%}
+    <exception>{{output.exception_info}}</exception>
+    {% endif -%}
+    <returncode>{{output.returncode}}</returncode>
+    {% if output.output | length < 10000 -%}
+    <output>
+    {{ output.output -}}
+    </output>
+    {%- else -%}
+    <warning>Output too long; showing head and tail. Use head, tail, grep, or redirect to a file.</warning>
+    <output_head>
+    {{ output.output[:5000] }}
+    </output_head>
+    <output_tail>
+    {{ output.output[-5000:] }}
+    </output_tail>
+    {%- endif -%}
+
+environment:
+  cwd: /workspace
+  timeout: 1800
+  container_timeout: 2h
+  env:
+    PAGER: cat
+    MANPAGER: cat
+    PIP_PROGRESS_BAR: "off"
+    TQDM_DISABLE: "1"

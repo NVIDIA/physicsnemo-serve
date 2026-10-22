@@ -36,7 +36,7 @@ _TRIVIAL_ASSERTS = re.compile(
 @dataclass
 class FileChange:
     path: str
-    status: str  # A, M, D, or R (renames use the new path)
+    status: str  # A, M, or D (diffs are taken with --no-renames)
     added: list[str] = field(default_factory=list)
     removed: list[str] = field(default_factory=list)
     binary: bool = False
@@ -85,7 +85,7 @@ def is_forbidden_path(path: str) -> bool:
 
 
 def parse_diff(name_status: str, unified: str) -> list[FileChange]:
-    """Build FileChanges from ``git diff --name-status -M`` and ``git diff -U0`` output."""
+    """Build FileChanges from ``git diff --name-status`` and ``git diff -U0`` output."""
     changes: dict[str, FileChange] = {}
     for line in name_status.splitlines():
         if not line.strip():

@@ -43,7 +43,11 @@ env:
   STATE_DIR: ${{ github.workspace }}/autofix-state
   PYTHONPATH: ${{ github.workspace }}/tooling/.github/autofix
   PYTHON_VERSION: "3.12"
+  # Pinned together: litellm imports mcp whenever tools are passed, which
+  # mini-swe-agent always does, and mini-swe-agent does not depend on mcp.
   MINI_SWE_AGENT_VERSION: "2.4.6"
+  LITELLM_VERSION: "1.106.2"
+  MCP_VERSION: "2.3.0"
 
 jobs:
   gate:
@@ -128,9 +132,11 @@ jobs:
           AUTOFIX_MODEL_CLASS: ${{ vars.AUTOFIX_MODEL_CLASS }}
           AUTOFIX_API_KEY: ${{ secrets.AUTOFIX_API_KEY }}
           MSWEA_SILENT_STARTUP: "1"
+          MSWEA_MODEL_RETRY_STOP_AFTER_ATTEMPT: "3"
         run: >-
           uv run --no-project --python "$PYTHON_VERSION"
           --with pyyaml --with "mini-swe-agent==$MINI_SWE_AGENT_VERSION"
+          --with "litellm==$LITELLM_VERSION" --with "mcp==$MCP_VERSION"
           python -m ci_autofix fix
           --state-dir "$STATE_DIR" --head "$GITHUB_WORKSPACE/head" --image ci-autofix-env:local
       - name: Mint a push token

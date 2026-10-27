@@ -4,17 +4,17 @@
 # CI autofix agent. Design: docs/plans/2026-10-21-ci-autofix-agent-design.md
 #
 # workflow_run and issue_comment always run this file and .github/autofix/ from
-# the default branch, so a PR cannot change what the agent may do. Use
-# workflow_dispatch with --ref to try changes from a branch.
+# the default branch, so a PR cannot change what the agent may do. To try
+# changes from a branch, use:
+#   gh workflow run ci-autofix.yml --ref <branch> -f pr_number=<n>
 #
 # Repository configuration:
-#   vars.AUTOFIX_MODE              dry-run (default) | push
-#   vars.AUTOFIX_MODEL             LiteLLM model name, e.g. openai/<model>
-#   vars.AUTOFIX_API_BASE          OpenAI-compatible endpoint for the model
-#   vars.AUTOFIX_MODEL_CLASS       optional: litellm (tool calls, default) | litellm_textbased
-#   secrets.AUTOFIX_API_KEY        key for the model endpoint
-#   vars.AUTOFIX_APP_ID            GitHub App used to push (push mode only)
-#   secrets.AUTOFIX_APP_PRIVATE_KEY
+#   vars.AUTOFIX_MODE            dry-run (default: comment the diff) | push
+#   vars.AUTOFIX_MODEL           LiteLLM model name, e.g. openai/<model>
+#   vars.AUTOFIX_API_BASE        OpenAI-compatible endpoint for the model
+#   vars.AUTOFIX_MODEL_CLASS     optional: litellm (default) | litellm_textbased
+#   secrets.AUTOFIX_API_KEY      key for the model endpoint
+#   vars.AUTOFIX_APP_ID, secrets.AUTOFIX_APP_PRIVATE_KEY   push mode only
 
 name: CI Autofix
 
@@ -29,9 +29,6 @@ on:
       pr_number:
         description: "PR number"
         required: true
-      ci_run_id:
-        description: "Failed CI run ID to fix"
-        required: true
 
 permissions:
   actions: read
@@ -40,9 +37,9 @@ permissions:
   pull-requests: write
 
 env:
-  STATE_DIR: ${{ github.workspace }}/autofix-state
-  PYTHONPATH: ${{ github.workspace }}/tooling/.github/autofix
-  PYTHON_VERSION: "3.12"
+  GH_REPO: ${{ github.repository }}
+  GH_TOKEN: ${{ github.token }}
+  STATE: ${{ github.workspace }}/autofix-state
   # Pinned together: litellm imports mcp whenever tools are passed, which
   # mini-swe-agent always does, and mini-swe-agent does not depend on mcp.
   MINI_SWE_AGENT_VERSION: "2.4.6"
@@ -60,73 +57,109 @@ jobs:
       github.event_name == 'workflow_dispatch'
     outputs:
       proceed: ${{ steps.gate.outputs.proceed }}
-      pr_number: ${{ steps.gate.outputs.pr_number }}
-      head_sha: ${{ steps.gate.outputs.head_sha }}
-      head_ref: ${{ steps.gate.outputs.head_ref }}
+      pr: ${{ steps.gate.outputs.pr }}
+      sha: ${{ steps.gate.outputs.sha }}
+      ref: ${{ steps.gate.outputs.ref }}
+      base: ${{ steps.gate.outputs.base }}
+      run_id: ${{ steps.gate.outputs.run_id }}
     steps:
-      - uses: actions/checkout@v4
-        with:
-          path: tooling
-          sparse-checkout: .github/autofix
-          persist-credentials: false
-      - uses: astral-sh/setup-uv@v3
       - name: Decide whether to act
         id: gate
         env:
-          GITHUB_TOKEN: ${{ github.token }}
-          INPUTS: ${{ toJSON(inputs) }}
-        run: >-
-          uv run --no-project --python "$PYTHON_VERSION" --with pyyaml
-          python -m ci_autofix gate
-          --event-name "$GITHUB_EVENT_NAME" --event-path "$GITHUB_EVENT_PATH"
-          --inputs "$INPUTS" --mode "${{ vars.AUTOFIX_MODE || 'dry-run' }}"
-          --state-dir "$STATE_DIR"
-      - name: Explain the skip on the PR
-        if: steps.gate.outputs.proceed != 'true' && steps.gate.outputs.notify == 'true'
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-        run: >-
-          uv run --no-project --python "$PYTHON_VERSION" --with pyyaml
-          python -m ci_autofix report --state-dir "$STATE_DIR"
-      - uses: actions/upload-artifact@v4
-        if: steps.gate.outputs.proceed == 'true'
-        with:
-          name: autofix-gate
-          path: autofix-state/state.json
+          EVENT: ${{ github.event_name }}
+          HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          COMMENT: ${{ github.event.comment.body }}
+          COMMENTER: ${{ github.event.comment.user.login }}
+          ISSUE: ${{ github.event.issue.number }}
+          INPUT_PR: ${{ inputs.pr_number }}
+        run: |
+          set -eu
+          skip() { echo "skip: $*"; echo "proceed=false" >> "$GITHUB_OUTPUT"; exit 0; }
+
+          case "$EVENT" in
+            workflow_run)
+              [[ "$HEAD_BRANCH" =~ ^pull-request/([0-9]+)$ ]] || skip "not a pull-request run"
+              pr="${BASH_REMATCH[1]}" ;;
+            issue_comment)
+              [ "$(printf '%s' "$COMMENT" | head -n1 | tr -d '\r ')" = "/autofix" ] || skip "not an /autofix command"
+              perm=$(gh api "repos/$GH_REPO/collaborators/$COMMENTER/permission" --jq .permission)
+              case "$perm" in admin|maintain|write) ;; *) skip "$COMMENTER lacks write access" ;; esac
+              pr="$ISSUE" ;;
+            workflow_dispatch)
+              pr="$INPUT_PR" ;;
+          esac
+
+          read -r state same sha ref base labeled < <(gh api "repos/$GH_REPO/pulls/$pr" --jq \
+            '[.state, (.head.repo.full_name == .base.repo.full_name), .head.sha, .head.ref, .base.ref,
+              ([.labels[].name] | index("ci-autofix") != null)] | @tsv')
+          [ "$state" = open ] || skip "PR is not open"
+          [ "$same" = true ] || skip "PRs from forks are not supported"
+          # Failed CI runs trigger the agent only on labeled PRs; comments and dispatch are explicit.
+          [ "$EVENT" != workflow_run ] || [ "$labeled" = true ] || skip "PR lacks the ci-autofix label"
+
+          attempts=$(gh api --paginate "repos/$GH_REPO/pulls/$pr/commits" \
+            --jq '.[] | select(.commit.message | startswith("ci-fix(agent):")) | .sha' | wc -l)
+          [ "$attempts" -lt 2 ] || skip "the agent already pushed $attempts fixes to this PR"
+
+          run_id=$(gh api "repos/$GH_REPO/actions/workflows/ci.yml/runs?branch=pull-request/$pr&head_sha=$sha&status=failure" \
+            --jq '.workflow_runs[0].id // empty')
+          [ -n "$run_id" ] || skip "no failed CI run for the PR head"
+
+          {
+            echo "proceed=true"
+            echo "pr=$pr"
+            echo "sha=$sha"
+            echo "ref=$ref"
+            echo "base=$base"
+            echo "run_id=$run_id"
+          } >> "$GITHUB_OUTPUT"
 
   fix:
     name: Fix
     needs: gate
     if: needs.gate.outputs.proceed == 'true'
     runs-on: linux-amd64-cpu8
-    timeout-minutes: 120
+    timeout-minutes: 60
     concurrency:
-      group: ci-autofix-pr-${{ needs.gate.outputs.pr_number }}
+      group: ci-autofix-pr-${{ needs.gate.outputs.pr }}
       cancel-in-progress: true
+    env:
+      PR: ${{ needs.gate.outputs.pr }}
+      SHA: ${{ needs.gate.outputs.sha }}
+      HEAD_REF: ${{ needs.gate.outputs.ref }}
+      BASE: ${{ needs.gate.outputs.base }}
+      RUN_ID: ${{ needs.gate.outputs.run_id }}
     steps:
       - uses: actions/checkout@v4
         with:
           path: tooling
           sparse-checkout: .github/autofix
           persist-credentials: false
-      - name: Check out the PR head without credentials
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
-          ref: ${{ needs.gate.outputs.head_sha }}
+          ref: ${{ needs.gate.outputs.sha }}
           path: head
           fetch-depth: 0
           persist-credentials: false
-      - uses: actions/download-artifact@v4
-        with:
-          name: autofix-gate
-          path: autofix-state
       - uses: astral-sh/setup-uv@v3
-      - name: Build the sandbox image
-        run: docker build -t ci-autofix-env:local tooling/.github/autofix
-      - name: Triage, run the agent, and validate
-        id: fix
+
+      - name: Prepare the agent's inputs and working copy
+        run: |
+          mkdir -p "$STATE/out" work
+          git -C head archive HEAD | tar -x -C work
+          gh run view "$RUN_ID" --log-failed | tail -c 50000 > "$STATE/failure.log"
+          gh pr view "$PR" --json title,body --jq '"## " + .title + "\n\n" + (.body // "")' > "$STATE/pr.md"
+          git -C head diff "origin/$BASE...$SHA" | head -c 60000 > "$STATE/pr.diff"
+          docker build -t ci-autofix-env:local tooling/.github/autofix
+          # From here on, git uses the trusted clone's .git with the agent's
+          # git-free copy as the work tree, so nothing the agent wrote is
+          # ever executed on the host.
+          echo "GIT_DIR=$GITHUB_WORKSPACE/head/.git" >> "$GITHUB_ENV"
+          echo "GIT_WORK_TREE=$GITHUB_WORKSPACE/work" >> "$GITHUB_ENV"
+
+      - name: Run the agent
+        id: agent
         env:
-          GITHUB_TOKEN: ${{ github.token }}
           AUTOFIX_MODEL: ${{ vars.AUTOFIX_MODEL }}
           AUTOFIX_API_BASE: ${{ vars.AUTOFIX_API_BASE }}
           AUTOFIX_MODEL_CLASS: ${{ vars.AUTOFIX_MODEL_CLASS }}
@@ -134,55 +167,94 @@ jobs:
           MSWEA_SILENT_STARTUP: "1"
           MSWEA_MODEL_RETRY_STOP_AFTER_ATTEMPT: "3"
         run: >-
-          uv run --no-project --python "$PYTHON_VERSION"
+          uv run --no-project --python 3.12
           --with pyyaml --with "mini-swe-agent==$MINI_SWE_AGENT_VERSION"
           --with "litellm==$LITELLM_VERSION" --with "mcp==$MCP_VERSION"
-          python -m ci_autofix fix
-          --state-dir "$STATE_DIR" --head "$GITHUB_WORKSPACE/head" --image ci-autofix-env:local
+          python tooling/.github/autofix/run_agent.py
+          --pr "$STATE/pr.md" --log "$STATE/failure.log" --diff "$STATE/pr.diff"
+          --workspace work --out "$STATE/out" --image ci-autofix-env:local
+
+      - name: Check the agent's changes
+        id: check
+        if: steps.agent.outcome == 'success'
+        run: |
+          git add -A
+          if git diff --cached --quiet; then
+            echo "result=none" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git diff --cached > "$STATE/fix.diff"
+          if python3 tooling/.github/autofix/guard.py > "$STATE/guard.md"; then
+            echo "result=ok" >> "$GITHUB_OUTPUT"
+          else
+            echo "result=rejected" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Mint a push token
         id: app-token
-        if: steps.fix.outputs.outcome == 'fixed' && vars.AUTOFIX_MODE == 'push'
+        if: steps.check.outputs.result == 'ok' && vars.AUTOFIX_MODE == 'push'
         uses: actions/create-github-app-token@v1
         with:
           app-id: ${{ vars.AUTOFIX_APP_ID }}
           private-key: ${{ secrets.AUTOFIX_APP_PRIVATE_KEY }}
-      - name: Push the fix to the PR branch
+
+      - name: Commit and push the fix
         id: push
         if: steps.app-token.outcome == 'success'
         env:
           TOKEN: ${{ steps.app-token.outputs.token }}
-          HEAD_REF: ${{ needs.gate.outputs.head_ref }}
-          HEAD_SHA: ${{ needs.gate.outputs.head_sha }}
         run: |
-          set -uo pipefail
+          git -c user.name="ci-autofix[bot]" -c user.email="ci-autofix[bot]@users.noreply.github.com" \
+            commit -q -m "ci-fix(agent): fix CI failures caused by this PR" \
+            -m "$(cat "$STATE/out/summary.md" 2>/dev/null)" -m "Autofix-Run: $GITHUB_RUN_ID"
           auth="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$TOKEN" | base64 -w0)"
-          remote="https://github.com/${GITHUB_REPOSITORY}.git"
-          if git -C head -c "http.extraheader=$auth" push "$remote" "HEAD:refs/heads/${HEAD_REF}"; then
-            echo "result=pushed" >> "$GITHUB_OUTPUT"
-          else
-            current=$(git -C head -c "http.extraheader=$auth" ls-remote "$remote" "refs/heads/${HEAD_REF}" | cut -f1)
-            if [ "$current" != "$HEAD_SHA" ]; then
-              echo "result=branch-moved" >> "$GITHUB_OUTPUT"
-            else
-              echo "result=failed" >> "$GITHUB_OUTPUT"
-            fi
-          fi
+          git -c "http.extraheader=$auth" push "https://github.com/${GH_REPO}.git" "HEAD:refs/heads/${HEAD_REF}"
+
       - name: Report on the PR
         if: always()
         env:
-          GITHUB_TOKEN: ${{ github.token }}
-        run: >-
-          uv run --no-project --python "$PYTHON_VERSION" --with pyyaml
-          python -m ci_autofix report --state-dir "$STATE_DIR"
-          --push-result "${{ steps.push.outputs.result || 'skipped' }}"
+          AGENT: ${{ steps.agent.outcome }}
+          CHECK: ${{ steps.check.outputs.result }}
+          PUSH: ${{ steps.push.outcome }}
+        run: |
+          {
+            echo "### CI autofix"
+            if [ "$AGENT" != success ]; then
+              echo "The agent did not complete. See the [workflow run]($GITHUB_SERVER_URL/$GH_REPO/actions/runs/$GITHUB_RUN_ID)."
+            else
+              case "$CHECK" in
+                none) echo "The agent proposed no changes." ;;
+                rejected) echo "The proposed change was rejected:" ;;
+                ok) if [ "$PUSH" = success ]; then echo "Pushed a fix commit; CI will run again."
+                    elif [ "$PUSH" = failure ]; then echo "The fix passed checks but the push failed (the branch may have moved)."
+                    else echo "Proposed fix (dry run, nothing pushed):"; fi ;;
+              esac
+              echo
+              cat "$STATE/guard.md" 2>/dev/null || true
+              echo
+              cat "$STATE/out/summary.md" 2>/dev/null || true
+              if [ "$CHECK" = ok ] || [ "$CHECK" = rejected ]; then
+                echo
+                echo "<details><summary>Diff</summary>"
+                echo
+                echo '`````diff'
+                head -c 40000 "$STATE/fix.diff"
+                echo
+                echo '`````'
+                echo "</details>"
+              fi
+            fi
+          } > "$STATE/comment.md"
+          gh pr comment "$PR" --body-file "$STATE/comment.md" --edit-last --create-if-none
+
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: autofix-pr-${{ needs.gate.outputs.pr_number }}-run-${{ github.run_id }}
+          name: autofix-pr-${{ needs.gate.outputs.pr }}-run-${{ github.run_id }}
           retention-days: 30
           if-no-files-found: ignore
           path: |
-            autofix-state/state.json
-            autofix-state/task.md
-            autofix-state/agent/
+            autofix-state/*.md
+            autofix-state/*.log
             autofix-state/*.diff
+            autofix-state/out/

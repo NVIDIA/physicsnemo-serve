@@ -10,6 +10,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+from types import SimpleNamespace
 
 from . import authoring_config, cli
 
@@ -100,12 +101,14 @@ def _resolve(args):
     if python is None:
         raise ValueError(f"Python executable was not found: {args.python}")
     python = _executable(python, "--python")
-    project = authoring_config.load(args.build) if args.build else None
-    backends = list(
-        dict.fromkeys(
-            args.backend or (project["effective"]["backends"] if project else ["aoti"])
-        )
+    backends = list(dict.fromkeys(args.backend or []))
+    project = (
+        authoring_config.load(args.build, SimpleNamespace(backend=backends))
+        if args.build
+        else None
     )
+    if not backends:
+        backends = list(project["effective"]["backends"]) if project else ["aoti"]
     requirements = [path.expanduser().absolute() for path in args.requirements]
     for path in requirements:
         if not path.is_file():

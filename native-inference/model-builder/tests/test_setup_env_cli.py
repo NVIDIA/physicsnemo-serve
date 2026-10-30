@@ -843,6 +843,82 @@ class SetupEnvironmentCommandTests(unittest.TestCase):
         self.assertNotIn("tensorrt", build)
         self.assertEqual(self.project_file.read_bytes(), self.project_bytes)
 
+    def test_provider_backend_override_is_applied_before_project_validation(self):
+        cases = (
+            (None, ["tensorrt"]),
+            (["aoti"], ["tensorrt"]),
+            (["aoti", "tensorrt"], ["tensorrt"]),
+            (["aoti", "tensorrt"], ["tensorrt", "tensorrt"]),
+        )
+        for index, (stored, selected) in enumerate(cases):
+            with self.subTest(stored=stored, selected=selected):
+                self.destination = self.root / f"provider-environment-{index}"
+                document = json.loads(self.project_bytes)
+                document["tensorrt_profile"] = "provider-default-exact-v1"
+                if stored is None:
+                    document.pop("backends")
+                else:
+                    document["backends"] = stored
+                self.project_file.write_text(json.dumps(document))
+                project_bytes = self.project_file.read_bytes()
+                options = [
+                    value for backend in selected for value in ("--backend", backend)
+                ]
+                code, result, _, run = self.invoke(
+                    "--runtime",
+                    str(self.runtime),
+                    "--build",
+                    str(self.project),
+                    *options,
+                )
+                self.assertEqual(code, 0, result)
+                self.assertEqual(result["backends"], ["tensorrt"])
+                self.assertEqual(result["build"]["status"], "complete")
+                build = next(
+                    call.args[0]
+                    for call in run.call_args_list
+                    if "build" in call.args[0]
+                )
+                self.assertEqual(
+                    [
+                        build[position + 1]
+                        for position, value in enumerate(build)
+                        if value == "--backend"
+                    ],
+                    ["tensorrt"],
+                )
+                self.assertEqual(self.project_file.read_bytes(), project_bytes)
+
+    def test_invalid_provider_backend_selection_fails_before_environment_creation(self):
+        cases = (
+            (["tensorrt"], ["aoti"]),
+            (["tensorrt"], ["tensorrt", "aoti"]),
+            (["aoti"], []),
+        )
+        for index, (stored, selected) in enumerate(cases):
+            with self.subTest(stored=stored, selected=selected):
+                self.destination = self.root / f"invalid-provider-environment-{index}"
+                document = json.loads(self.project_bytes)
+                document["tensorrt_profile"] = "provider-default-exact-v1"
+                document["backends"] = stored
+                self.project_file.write_text(json.dumps(document))
+                project_bytes = self.project_file.read_bytes()
+                options = [
+                    value for backend in selected for value in ("--backend", backend)
+                ]
+                code, result, _, run = self.invoke(
+                    "--runtime",
+                    str(self.runtime),
+                    "--build",
+                    str(self.project),
+                    *options,
+                )
+                self.assertEqual(code, 2, result)
+                self.assertIn("TensorRT-only", result["diagnostics"][0]["message"])
+                run.assert_not_called()
+                self.assertFalse(self.destination.exists())
+                self.assertEqual(self.project_file.read_bytes(), project_bytes)
+
     def test_failed_dependency_install_does_not_claim_ready_or_start_build(self):
         def fail_install(command, **kwargs):
             if "pip" in command and "install" in command:

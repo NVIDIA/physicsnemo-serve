@@ -25,13 +25,28 @@ def test_provider_workflow_can_build_a_source_pinned_image_before_qualification(
     step = next(
         s for s in qualify["steps"] if s.get("name") == "Run native inference QA"
     )
-    assert "needs.prepare-image.outputs.image" in step["env"]["NATIVE_QA_IMAGE"]
+    assert "needs.prepare-image.outputs.digest" in step["env"]["NATIVE_QA_DIGEST"]
     image_step = next(
         s for s in workflow["jobs"]["prepare-image"]["steps"] if s.get("id") == "image"
     )
     assert "--target native-qa" in image_step["run"]
     assert "CMAKE_CUDA_ARCHITECTURES=90" in image_step["run"]
     assert 'SOURCE_SHA="$NATIVE_QA_SOURCE_SHA"' in image_step["run"]
+
+
+def test_registry_names_never_cross_job_outputs_that_github_masks_as_secrets():
+    workflow = yaml.load(WORKFLOW.read_text(), Loader=yaml.BaseLoader)
+    assert workflow["jobs"]["prepare-image"]["outputs"] == {
+        "digest": "${{ steps.image.outputs.digest }}"
+    }
+    step = next(
+        s
+        for s in workflow["jobs"]["qualify"]["steps"]
+        if s.get("name") == "Run native inference QA"
+    )
+    assert (
+        step["env"]["NATIVE_QA_DIGEST"] == "${{ needs.prepare-image.outputs.digest }}"
+    )
 
 
 @pytest.mark.parametrize("prebuilt", [False, True])
@@ -74,8 +89,8 @@ if args[:2]==['buildx','build']:
         NGC_REGISTRY_PASSWORD="fixture-password",
     )
     subprocess.run(["bash", "-c", step["run"]], env=env, cwd=tmp_path, check=True)
-    expected = image if prebuilt else "registry.example/qa@sha256:" + "d" * 64
-    assert (tmp_path / "output").read_text() == f"image={expected}\n"
+    expected = "sha256:" + ("b" if prebuilt else "d") * 64
+    assert (tmp_path / "output").read_text() == f"digest={expected}\n"
     if prebuilt:
         assert not calls.exists(), "selecting an existing digest must not invoke Docker"
     else:
@@ -88,8 +103,9 @@ if args[:2]==['buildx','build']:
 
 
 @pytest.mark.parametrize("assets", ["", "/outputs/assets/manifest with spaces.json"])
+@pytest.mark.parametrize("autobuilt", [False, True])
 def test_workflow_passes_literal_inputs_to_the_standalone_native_runner(
-    tmp_path, assets
+    tmp_path, assets, autobuilt
 ):
     workflow = yaml.load(WORKFLOW.read_text(), Loader=yaml.BaseLoader)
     assert set(workflow["on"]) == {"workflow_dispatch"}
@@ -106,7 +122,12 @@ def test_workflow_passes_literal_inputs_to_the_standalone_native_runner(
     environment = os.environ | {
         "PATH": str(tmp_path) + os.pathsep + os.environ["PATH"],
         "CAPTURE": str(capture),
-        "NATIVE_QA_IMAGE": image,
+        "NATIVE_QA_IMAGE": "" if autobuilt else image,
+        "NATIVE_QA_DIGEST": "sha256:" + "c" * 64,
+        "NATIVE_QA_REPOSITORY": "registry/qa",
+        "NGC_REGISTRY": "registry",
+        "NGC_ORG": "org",
+        "NGC_IMAGE": "qa",
         "NATIVE_QA_SOURCE_SHA": "b" * 40,
         "NATIVE_QA_PROFILE": "full" if assets else "smoke",
         "NATIVE_QA_RESOURCE_SHAPE": "gpu.h100-sxm",
@@ -123,7 +144,9 @@ def test_workflow_passes_literal_inputs_to_the_standalone_native_runner(
         "python",
         "qa/scripts/run_lepton_native_inference_qa.py",
     ]
-    assert arguments[arguments.index("--image") + 1] == image
+    assert arguments[arguments.index("--image") + 1] == (
+        "registry/qa@sha256:" + "c" * 64 if autobuilt else image
+    )
     assert arguments[arguments.index("--expected-source-sha") + 1] == "b" * 40
     assert arguments[arguments.index("--profile") + 1] == (
         "full" if assets else "smoke"

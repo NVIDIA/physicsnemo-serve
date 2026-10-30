@@ -44,7 +44,7 @@ jobs:
     runs-on: linux-amd64-cpu16
     timeout-minutes: 90
     outputs:
-      image: ${{ steps.image.outputs.image }}
+      digest: ${{ steps.image.outputs.digest }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -65,7 +65,7 @@ jobs:
           [[ "$(git rev-parse HEAD)" == "$NATIVE_QA_SOURCE_SHA" ]]
           if [[ -n "$NATIVE_QA_IMAGE" ]]; then
             [[ "$NATIVE_QA_IMAGE" =~ ^[^[:space:]]+@sha256:[0-9a-f]{64}$ ]]
-            echo "image=$NATIVE_QA_IMAGE" >> "$GITHUB_OUTPUT"
+            echo "digest=${NATIVE_QA_IMAGE##*@}" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           printf '%s' "$NGC_REGISTRY_PASSWORD" | docker login "$NGC_REGISTRY" -u '$oauthtoken' --password-stdin
@@ -82,7 +82,7 @@ jobs:
             --metadata-file "$metadata" --tag "$image" --push .
           digest="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["containerimage.digest"])' "$metadata")"
           [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
-          echo "image=${repository}@${digest}" >> "$GITHUB_OUTPUT"
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
 
   qualify:
     name: Native Inference QA (${{ inputs.profile }})
@@ -100,7 +100,12 @@ jobs:
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
       - name: Run native inference QA
         env:
-          NATIVE_QA_IMAGE: ${{ needs.prepare-image.outputs.image }}
+          NATIVE_QA_IMAGE: ${{ inputs.image }}
+          NATIVE_QA_DIGEST: ${{ needs.prepare-image.outputs.digest }}
+          NATIVE_QA_REPOSITORY: ${{ vars.PNMS_QA_REPOSITORY }}
+          NGC_REGISTRY: ${{ vars.NGC_REGISTRY }}
+          NGC_ORG: ${{ secrets.NGC_ORG }}
+          NGC_IMAGE: ${{ secrets.NGC_IMAGE }}
           NATIVE_QA_SOURCE_SHA: ${{ inputs.source_sha }}
           NATIVE_QA_PROFILE: ${{ inputs.profile }}
           NATIVE_QA_RESOURCE_SHAPE: ${{ inputs.resource_shape }}
@@ -115,6 +120,10 @@ jobs:
           QA_LUSTRE_DIR: ${{ vars.QA_LUSTRE_DIR || 'qa' }}
         run: |
           set -euo pipefail
+          if [[ -z "$NATIVE_QA_IMAGE" ]]; then
+            repository="${NATIVE_QA_REPOSITORY:-${NGC_REGISTRY}/${NGC_ORG}/${NGC_IMAGE}}"
+            NATIVE_QA_IMAGE="${repository}@${NATIVE_QA_DIGEST}"
+          fi
           args=(
             --image "$NATIVE_QA_IMAGE"
             --expected-source-sha "$NATIVE_QA_SOURCE_SHA"

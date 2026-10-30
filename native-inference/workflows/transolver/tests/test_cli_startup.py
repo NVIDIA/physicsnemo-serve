@@ -50,7 +50,7 @@ class Runner::Impl {
 };
 
 Runner::Runner(RunnerConfig config)
-    : impl_(std::make_unique<Impl>(std::move(config))) {}
+    : impl_(std::make_unique<Impl>(std::move(config))) { record("construct"); }
 Runner::~Runner() = default;
 
 std::string Runner::self_test(const CancellationToken&) {
@@ -69,7 +69,10 @@ std::string Runner::self_test(const CancellationToken&) {
 
 RunnerResult Runner::run(const RunnerRequest& request, const CancellationToken&) {
   record("run");
-  std::ofstream(request.standardized_output) << "published fields\n";
+  if (!request.standardized_output.empty())
+    std::ofstream(request.standardized_output) << "published fields\n";
+  if (!request.physical_output.empty())
+    std::ofstream(request.physical_output) << "published physical fields\n";
   std::ofstream(request.metadata_path) << "published metadata\n";
   return {};
 }
@@ -136,12 +139,20 @@ RunnerResult Runner::run(const RunnerRequest& request, const CancellationToken&)
     def recorded_events(self):
         return self.events.read_text().splitlines() if self.events.exists() else []
 
+    def assert_report_rejected(self, result, message):
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn(message, result.stderr)
+        self.assertIn("--startup-report", result.stderr)
+        self.assertEqual(self.recorded_events(), [])
+
     def test_bad_fixture_without_report_fails_before_running(self):
         self.fixture.write_text("mismatch\n")
         result = self.run_cli("--startup-fixture", self.fixture)
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertIn("startup fixture mismatch", result.stderr)
-        self.assertEqual(self.recorded_events(), [f"self_test:{self.fixture}"])
+        self.assertEqual(
+            self.recorded_events(), ["construct", f"self_test:{self.fixture}"]
+        )
         self.assertFalse(self.output.exists())
         self.assertFalse(self.metadata.exists())
         self.assertFalse(self.report.exists())
@@ -149,7 +160,9 @@ RunnerResult Runner::run(const RunnerRequest& request, const CancellationToken&)
     def test_valid_fixture_without_report_checks_before_running(self):
         result = self.run_cli("--startup-fixture", self.fixture)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertEqual(self.recorded_events(), [f"self_test:{self.fixture}", "run"])
+        self.assertEqual(
+            self.recorded_events(), ["construct", f"self_test:{self.fixture}", "run"]
+        )
         self.assertEqual(self.output.read_text(), "published fields\n")
         self.assertTrue(self.metadata.is_file())
         self.assertFalse(self.report.exists())
@@ -157,13 +170,13 @@ RunnerResult Runner::run(const RunnerRequest& request, const CancellationToken&)
     def test_legacy_run_without_fixture_or_report(self):
         result = self.run_cli()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertEqual(self.recorded_events(), ["run"])
+        self.assertEqual(self.recorded_events(), ["construct", "run"])
         self.assertTrue(self.output.is_file())
 
     def test_report_option_checks_and_writes_report_before_running(self):
         result = self.run_cli("--startup-report", self.report)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertEqual(self.recorded_events(), ["self_test:", "run"])
+        self.assertEqual(self.recorded_events(), ["construct", "self_test:", "run"])
         self.assertEqual(json.loads(self.report.read_text()), {"status": "passed"})
         self.assertTrue(self.output.is_file())
 
@@ -176,7 +189,9 @@ RunnerResult Runner::run(const RunnerRequest& request, const CancellationToken&)
             startup_only=True,
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertEqual(self.recorded_events(), [f"self_test:{self.fixture}"])
+        self.assertEqual(
+            self.recorded_events(), ["construct", f"self_test:{self.fixture}"]
+        )
         self.assertEqual(json.loads(self.report.read_text()), {"status": "passed"})
         self.assertFalse(self.output.exists())
         self.assertFalse(self.metadata.exists())
@@ -186,6 +201,134 @@ RunnerResult Runner::run(const RunnerRequest& request, const CancellationToken&)
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertIn("--startup-only requires --startup-report", result.stderr)
         self.assertEqual(self.recorded_events(), [])
+
+    def test_report_cannot_share_standardized_output(self):
+        result = self.run_cli("--startup-report", self.output)
+        self.assert_report_rejected(result, "output paths must be distinct")
+        self.assertFalse(self.output.exists())
+        self.assertFalse(self.metadata.exists())
+
+    def test_report_cannot_share_physical_output(self):
+        physical = self.root / "physical.f32"
+        result = self.run_cli(
+            "--physical-output",
+            physical,
+            "--stats",
+            self.fixture,
+            "--startup-report",
+            physical,
+        )
+        self.assert_report_rejected(result, "output paths must be distinct")
+        self.assertFalse(physical.exists())
+        self.assertFalse(self.output.exists())
+        self.assertFalse(self.metadata.exists())
+
+    def test_report_cannot_share_explicit_or_default_metadata(self):
+        for options in ((), ("--metadata", self.metadata)):
+            with self.subTest(options=options):
+                result = self.run_cli(*options, "--startup-report", self.metadata)
+                self.assert_report_rejected(result, "output paths must be distinct")
+                self.assertFalse(self.output.exists())
+                self.assertFalse(self.metadata.exists())
+
+    def test_report_rejects_normalized_output_alias(self):
+        (self.root / "nested").mkdir()
+        report = self.root / "nested" / ".." / self.output.name
+        result = self.run_cli("--startup-report", report)
+        self.assert_report_rejected(result, "output paths must be distinct")
+        self.assertFalse(self.output.exists())
+
+    def test_report_rejects_symlinked_parent_output_alias(self):
+        alias = self.root / "alias"
+        alias.symlink_to(self.root, target_is_directory=True)
+        result = self.run_cli("--startup-report", alias / self.output.name)
+        self.assert_report_rejected(result, "output paths must be distinct")
+        self.assertFalse(self.output.exists())
+
+    def test_report_preserves_existing_file(self):
+        original = b"existing report must survive\n"
+        self.report.write_bytes(original)
+        result = self.run_cli("--startup-report", self.report)
+        self.assertEqual(self.report.read_bytes(), original)
+        self.assert_report_rejected(result, "already exists")
+        self.assertFalse(self.output.exists())
+        self.assertFalse(self.metadata.exists())
+
+    def test_report_preserves_authored_fixture(self):
+        original = self.fixture.read_bytes()
+        result = self.run_cli(
+            "--startup-fixture",
+            self.fixture,
+            "--startup-report",
+            self.fixture,
+            startup_only=True,
+        )
+        self.assertEqual(self.fixture.read_bytes(), original)
+        self.assert_report_rejected(result, "already exists")
+
+    def test_report_preserves_existing_fixture_symlink_and_hardlink(self):
+        for kind in ("symlink", "hardlink"):
+            with self.subTest(kind=kind):
+                self.fixture.write_text("match\n")
+                original = self.fixture.read_bytes()
+                report = self.root / f"{kind}.json"
+                if kind == "symlink":
+                    report.symlink_to(self.fixture)
+                else:
+                    report.hardlink_to(self.fixture)
+                result = self.run_cli(
+                    "--startup-fixture",
+                    self.fixture,
+                    "--startup-report",
+                    report,
+                    startup_only=True,
+                )
+                self.assertEqual(self.fixture.read_bytes(), original)
+                self.assertEqual(report.read_bytes(), original)
+                self.assert_report_rejected(result, "already exists")
+
+    def test_report_rejects_existing_directory_before_constructing_runner(self):
+        self.report.mkdir()
+        result = self.run_cli("--startup-report", self.report)
+        self.assert_report_rejected(result, "already exists")
+        self.assertEqual(list(self.report.iterdir()), [])
+
+    def test_report_rejects_dangling_final_and_parent_symlinks(self):
+        for parent in (False, True):
+            with self.subTest(parent=parent):
+                target = self.root / f"missing-{parent}"
+                alias = self.root / f"alias-{parent}"
+                alias.symlink_to(target, target_is_directory=parent)
+                report = alias / "startup.json" if parent else alias
+                result = self.run_cli("--startup-report", report)
+                self.assert_report_rejected(result, "contains a dangling symlink")
+                self.assertFalse(target.exists())
+                self.assertTrue(alias.is_symlink())
+
+    def test_startup_only_report_can_match_inactive_outputs(self):
+        result = self.run_cli(
+            "--startup-report",
+            self.report,
+            "--standardized-output",
+            self.report,
+            "--physical-output",
+            self.report,
+            "--metadata",
+            self.report,
+            startup_only=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.recorded_events(), ["construct", "self_test:"])
+        self.assertEqual(json.loads(self.report.read_text()), {"status": "passed"})
+
+    def test_new_report_keeps_legacy_field_overwrite_policy(self):
+        self.output.write_text("previous fields\n")
+        self.metadata.write_text("previous metadata\n")
+        result = self.run_cli("--startup-report", self.report)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.output.read_text(), "published fields\n")
+        self.assertEqual(self.metadata.read_text(), "published metadata\n")
+        self.assertEqual(json.loads(self.report.read_text()), {"status": "passed"})
 
 
 if __name__ == "__main__":

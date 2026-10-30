@@ -140,11 +140,13 @@ std::filesystem::path metadata_path(
 void validate_output_paths(
     const std::filesystem::path& standardized_output,
     const std::filesystem::path& physical_output,
-    const std::filesystem::path& metadata) {
+    const std::filesystem::path& metadata,
+    const std::filesystem::path& startup_report) {
   std::vector<std::pair<std::string, std::filesystem::path>> outputs{
       {"--standardized-output", standardized_output},
       {"--physical-output", physical_output},
       {"--metadata", metadata},
+      {"--startup-report", startup_report},
   };
   for (auto& [option, path] : outputs) {
     if (!path.empty()) {
@@ -236,7 +238,14 @@ int main(int argc, char** argv) {
     }
     const auto metadata = check_only ? std::filesystem::path{} : metadata_path(
         arguments, standardized_output, physical_output);
-    validate_output_paths(standardized_output, physical_output, metadata);
+    const auto startup_report = optional(arguments, "--startup-report");
+    validate_output_paths(
+        check_only ? std::filesystem::path{} : standardized_output,
+        check_only ? std::filesystem::path{} : physical_output,
+        metadata, startup_report);
+    if (!startup_report.empty() && std::filesystem::exists(startup_report)) {
+      throw std::invalid_argument("--startup-report already exists");
+    }
     const auto block_size = parse_integer(
         optional(arguments, "--block-size", "2048"), "--block-size", false);
     const auto point_limit = parse_integer(
@@ -265,7 +274,6 @@ int main(int argc, char** argv) {
       throw std::invalid_argument("unsupported --math-profile");
     }
     config.startup_fixture_path = optional(arguments, "--startup-fixture");
-    const auto startup_report = optional(arguments, "--startup-report");
     if (check_only && startup_report.empty()) {
       throw std::invalid_argument("--startup-only requires --startup-report");
     }

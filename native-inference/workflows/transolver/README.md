@@ -293,6 +293,9 @@ they share that point count's authored fixture. Both packages still execute and
 compare their own outputs. The CLI checks `--startup-fixture` even without
 `--startup-report`; the latter only requests a report file. `--startup-only true`
 continues to require `--startup-report`.
+The startup report requires a new path distinct from the active field and
+metadata outputs. Existing report paths and dangling symlinks are rejected
+before loading models.
 
 ```json
 {

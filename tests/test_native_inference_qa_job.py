@@ -132,6 +132,32 @@ def test_provider_preflight_rejects_other_gpu_architectures(tmp_path, monkeypatc
         run_job.preflight(run_job.Context(args))
 
 
+def test_provider_qualification_treats_math_skip_as_failure(tmp_path, monkeypatch):
+    from qa.native_inference import provider
+
+    args = arguments(tmp_path)
+    args.profile = "provider"
+    args.output.mkdir()
+    ctx = run_job.Context(args)
+    run = ctx.run
+
+    def skip_math(name, command):
+        if name == "provider-policy":
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                json.dumps({"provider_creators": 4, "invalid_policy_rejected": True}),
+            )
+        assert name == "provider-math"
+        return run(name, [sys.executable, "-c", "raise SystemExit(77)"])
+
+    monkeypatch.setattr(ctx, "run", skip_math)
+    with pytest.raises(RuntimeError, match="provider-math failed with exit 77"):
+        provider.qualify_plugins(ctx)
+    cases = {case["name"]: case["status"] for case in ctx.report["cases"]}
+    assert cases == {"provider.policy": "passed", "provider.math": "failed"}
+
+
 def test_provider_job_executes_both_ieee_and_provider_inventory(tmp_path, monkeypatch):
     from qa.native_inference import provider, transolver
 
@@ -232,7 +258,8 @@ def test_asset_download_failure_is_recorded_and_blocks_consumers(tmp_path, monke
 def test_subprocess_timeout_preserves_logs(tmp_path):
     args = arguments(tmp_path)
     args.output.mkdir()
-    args.command_timeout = 0.05
+    # Allow Python startup to finish before timing out the long-running child.
+    args.command_timeout = 1.0
     ctx = run_job.Context(args)
     with pytest.raises(subprocess.TimeoutExpired):
         ctx.run(

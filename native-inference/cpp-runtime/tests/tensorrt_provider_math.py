@@ -32,7 +32,9 @@ def main():
     logger = _LOGGER
     if not torch.cuda.is_available():
         return 77
-    assert torch.cuda.get_device_capability() == (9, 0), "qualified H100 required"
+    if torch.cuda.get_device_capability() != (9, 0):
+        print("Provider math requires a qualified H100 (sm90); skipping this GPU.")
+        return 77
     if args.unique_output:
         args.output = args.output / uuid.uuid4().hex
     args.output.mkdir(parents=True, exist_ok=False)

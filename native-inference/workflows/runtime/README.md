@@ -143,8 +143,10 @@ For large tensors choose `raw-fp32-le`. The parameter becomes:
 cannot introduce filesystem paths or download URLs. The file must be a regular
 file with exactly the declared byte count, and its float values must be finite.
 Raw outputs are registered as relative `<tensor-name>.f32` artifacts and returned
-with the same descriptor fields. An embedding controller must validate registered
-files and compute any publication hashes. Attempt output paths and admitted input/asset
+with the same descriptor fields. All raw destinations are checked for existing
+files and unsafe paths before inference or writing any tensor. An embedding
+controller must validate registered files and compute any publication hashes.
+Attempt output paths and admitted input/asset
 paths must be canonical and free of symlinks. Cancellation is cooperative around
 model calls and output publication; it cannot preempt an in-flight CUDA kernel.
 Raw output tensor names use at most 124 ASCII letters, digits, underscores or

@@ -15,6 +15,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <mutex>
+#include <shared_mutex>
 #include <ATen/cuda/CUDAGeneratorImpl.h>
 #include <c10/cuda/CUDAGuard.h>
 #include <filesystem>
@@ -47,6 +48,11 @@
 
 namespace {
 using Json = nlohmann::json;
+std::shared_mutex& process_math_gate() {
+  static std::shared_mutex gate;
+  return gate;
+}
+
 void configure_determinism() {
   auto& context = at::globalContext();
   context.setBenchmarkCuDNN(false);
@@ -403,6 +409,9 @@ class Runner::Impl {
     // their loading behavior, then restore the workflow's configured process
     // policy on both successful loading and exceptions. The resident sessions
     // execute with this recorded policy, independently of export precision.
+    // Loading may temporarily change process-wide Torch flags. Keep resident
+    // execution out until restoration completes, including failed loads.
+    std::unique_lock math_lock(process_math_gate());
     const RestoreMathPolicy restore_math{initialize_process(config.math_profile)};
     if (!torch::cuda::is_available()) throw std::runtime_error("CUDA was requested but is unavailable");
     c10::cuda::CUDAGuard device_guard(device);
@@ -486,6 +495,7 @@ class Runner::Impl {
 
   std::string self_test(const CancellationToken& cancellation) {
     std::lock_guard lock(request_mutex);
+    std::shared_lock math_lock(process_math_gate());
     check_cancelled(cancellation);
     c10::cuda::CUDAGuard device_guard(device);
     c10::InferenceMode inference_mode;
@@ -577,6 +587,7 @@ class Runner::Impl {
   RunnerResult run(const RunnerRequest& request, const CancellationToken& cancellation) {
     // The worker dispatch gate is primary; this lock also protects direct embedders.
     std::lock_guard lock(request_mutex);
+    std::shared_lock math_lock(process_math_gate());
     check_cancelled(cancellation);
     if (request.mesh_path.empty() || request.stl_path.empty()) {
       throw std::invalid_argument("mesh_path and stl_path are required");

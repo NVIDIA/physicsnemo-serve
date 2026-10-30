@@ -490,6 +490,14 @@ class WorkflowHost::Impl {
       owned.emplace_back(spec.name,spec.dtype,sdk::Device{},spec.shape,std::move(bytes));
     }
     for (const auto& tensor : owned) views.push_back(tensor.view());
+    // Check every destination before inference or the first write, so a later
+    // conflict cannot leave earlier raw tensors behind in this attempt.
+    for (const auto& spec : manifest.outputs) {
+      if (mapping.at("outputs").at(spec.name).at("codec") == "raw-fp32-le") {
+        const auto path = context.output_path(spec.name + ".f32");
+        require(!fs::exists(path),"raw output already exists in attempt directory");
+      }
+    }
     const auto result = context.infer(model_alias,views);
     Json payload = Json::object();
     bool primary_output = true;

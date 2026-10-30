@@ -267,6 +267,9 @@ settings after SDK model loading, including failed loads: the SDK's loading
 policy cannot silently replace the workflow's inference policy. Model export
 still uses its separately qualified compiler precision profile; runtime flags
 alone do not establish the precision of compiled kernels.
+Model loading and policy restoration hold an exclusive process gate. Resident
+requests and startup checks share that gate, so independent hosts can execute
+concurrently while another host's loading cannot change their math settings.
 
 Both profiles limit Torch intra/inter-op, OpenMP, MKL and VTK CPU pools to one
 thread, independently of CUDA math settings. Metadata records these CPU limits
@@ -293,9 +296,9 @@ they share that point count's authored fixture. Both packages still execute and
 compare their own outputs. The CLI checks `--startup-fixture` even without
 `--startup-report`; the latter only requests a report file. `--startup-only true`
 continues to require `--startup-report`.
-The startup report requires a new path distinct from the active field and
-metadata outputs. Existing report paths and dangling symlinks are rejected
-before loading models.
+The startup report requires a new path distinct from the active field, metadata
+and diagnostic dump outputs. Existing report paths and dangling symlinks are
+rejected before loading models.
 
 ```json
 {

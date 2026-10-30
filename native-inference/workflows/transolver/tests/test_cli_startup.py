@@ -31,6 +31,7 @@ class CliStartupTest(unittest.TestCase):
             r"""
 #include "transolver_workflow/runner.hpp"
 #include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <stdexcept>
 #include <utility>
@@ -69,6 +70,11 @@ std::string Runner::self_test(const CancellationToken&) {
 
 RunnerResult Runner::run(const RunnerRequest& request, const CancellationToken&) {
   record("run");
+  if (!request.dump_input_dir.empty()) {
+    std::filesystem::create_directories(request.dump_input_dir);
+    for (const auto* name : {"fx.f32", "embedding.f32", "permutation.i64", "source_cell_ids.i64"})
+      std::ofstream(std::filesystem::path(request.dump_input_dir) / name) << "diagnostic dump\n";
+  }
   if (!request.standardized_output.empty())
     std::ofstream(request.standardized_output) << "published fields\n";
   if (!request.physical_output.empty())
@@ -329,6 +335,55 @@ RunnerResult Runner::run(const RunnerRequest& request, const CancellationToken&)
         self.assertEqual(self.output.read_text(), "published fields\n")
         self.assertEqual(self.metadata.read_text(), "published metadata\n")
         self.assertEqual(json.loads(self.report.read_text()), {"status": "passed"})
+
+    def test_report_cannot_share_any_diagnostic_dump(self):
+        for name in (
+            "fx.f32",
+            "embedding.f32",
+            "permutation.i64",
+            "source_cell_ids.i64",
+        ):
+            with self.subTest(name=name):
+                directory = self.root / name.replace(".", "-")
+                directory.mkdir()
+                report = directory / name
+                result = self.run_cli(
+                    "--startup-report", report, "--dump-input-dir", directory
+                )
+                self.assert_report_rejected(result, "output paths must be distinct")
+                self.assertEqual(list(directory.iterdir()), [])
+                self.assertFalse(self.output.exists())
+
+    def test_report_cannot_alias_dump_through_symlinked_directory(self):
+        directory = self.root / "dumps"
+        directory.mkdir()
+        alias = self.root / "dump-alias"
+        alias.symlink_to(directory, target_is_directory=True)
+        result = self.run_cli(
+            "--startup-report", alias / "fx.f32", "--dump-input-dir", directory
+        )
+        self.assert_report_rejected(result, "output paths must be distinct")
+        self.assertEqual(list(directory.iterdir()), [])
+
+    def test_separate_startup_report_survives_diagnostic_dumps(self):
+        directory = self.root / "dumps"
+        result = self.run_cli(
+            "--startup-report", self.report, "--dump-input-dir", directory
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(json.loads(self.report.read_text()), {"status": "passed"})
+        self.assertEqual((directory / "fx.f32").read_text(), "diagnostic dump\n")
+
+    def test_startup_only_report_can_match_inactive_diagnostic_dump(self):
+        directory = self.root / "dumps"
+        directory.mkdir()
+        report = directory / "fx.f32"
+        result = self.run_cli(
+            "--startup-report", report, "--dump-input-dir", directory, startup_only=True
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.recorded_events(), ["construct", "self_test:"])
+        self.assertEqual(json.loads(report.read_text()), {"status": "passed"})
 
 
 if __name__ == "__main__":

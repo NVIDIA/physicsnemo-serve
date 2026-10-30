@@ -141,13 +141,18 @@ void validate_output_paths(
     const std::filesystem::path& standardized_output,
     const std::filesystem::path& physical_output,
     const std::filesystem::path& metadata,
-    const std::filesystem::path& startup_report) {
+    const std::filesystem::path& startup_report,
+    const std::filesystem::path& dump_directory) {
   std::vector<std::pair<std::string, std::filesystem::path>> outputs{
       {"--standardized-output", standardized_output},
       {"--physical-output", physical_output},
       {"--metadata", metadata},
       {"--startup-report", startup_report},
   };
+  if (!dump_directory.empty()) {
+    for (const auto* name : {"fx.f32", "embedding.f32", "permutation.i64", "source_cell_ids.i64"})
+      outputs.emplace_back(std::string("--dump-input-dir/") + name, dump_directory / name);
+  }
   for (auto& [option, path] : outputs) {
     if (!path.empty()) {
       std::filesystem::path resolved;
@@ -239,10 +244,11 @@ int main(int argc, char** argv) {
     const auto metadata = check_only ? std::filesystem::path{} : metadata_path(
         arguments, standardized_output, physical_output);
     const auto startup_report = optional(arguments, "--startup-report");
+    const auto dump_directory = std::filesystem::path(optional(arguments, "--dump-input-dir"));
     validate_output_paths(
         check_only ? std::filesystem::path{} : standardized_output,
         check_only ? std::filesystem::path{} : physical_output,
-        metadata, startup_report);
+        metadata, startup_report, check_only ? std::filesystem::path{} : dump_directory);
     if (!startup_report.empty() && std::filesystem::exists(startup_report)) {
       throw std::invalid_argument("--startup-report already exists");
     }
@@ -296,7 +302,7 @@ int main(int argc, char** argv) {
     request.standardized_output = standardized_output.string();
     request.physical_output = physical_output.string();
     request.metadata_path = metadata.string();
-    request.dump_input_dir = optional(arguments, "--dump-input-dir");
+    request.dump_input_dir = dump_directory.string();
     request.point_limit = point_limit;
     request.permutation_seed = seed;
     request.air_density = air_density;

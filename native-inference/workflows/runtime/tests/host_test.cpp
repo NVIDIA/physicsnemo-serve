@@ -3,6 +3,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <iterator>
 #include <limits>
 #include <stdexcept>
 #include <thread>
@@ -143,6 +144,47 @@ int main() {
     produced.close();
     check(roundtrip == floats, "raw tensor round trip changed values");
     rejects([&] { raw.run(request.dump()); }, "already exists");
+
+    auto multiple_manifest = manifest;
+    multiple_manifest["outputs"] = Json::array({
+      {{"name","a"},{"dtype","float32"},{"shape",{4}}},
+      {{"name","b"},{"dtype","float32"},{"shape",{4}}}});
+    std::ofstream(root / "package/model.json") << multiple_manifest.dump();
+    auto multiple_config = raw_config;
+    multiple_config["models"]["primary"]["self_test"]["expected_outputs"] = {{"a",values},{"b",values}};
+    multiple_config["tensor_adapter"]["outputs"] = {
+      {"a",{{"response_field","first"},{"codec","raw-fp32-le"}}},
+      {"b",{{"response_field","second"},{"codec","raw-fp32-le"}}}};
+    WorkflowHost multiple(multiple_config.dump());
+    multiple.self_test();
+    auto multiple_request = request;
+    const auto multiple_root = root / "multiple-outputs";
+    std::filesystem::create_directories(multiple_root);
+    multiple_request["output_dir"] = multiple_root.string();
+    std::ofstream(multiple_root / "b.f32") << "preserved output";
+    rejects([&] { multiple.run(multiple_request.dump()); }, "already exists");
+    check(!std::filesystem::exists(multiple_root / "a.f32"),
+          "later raw output conflict left an earlier output behind");
+    {
+      std::ifstream previous(multiple_root / "b.f32");
+      const std::string content{std::istreambuf_iterator<char>(previous),{}};
+      check(content == "preserved output", "raw output conflict changed an existing file");
+    }
+    std::filesystem::remove(multiple_root / "b.f32");
+    const auto multiple_result = Json::parse(multiple.run(multiple_request.dump()));
+    check(multiple_result.at("artifacts").size() == 2 &&
+          std::filesystem::file_size(multiple_root / "a.f32") == 16 &&
+          std::filesystem::file_size(multiple_root / "b.f32") == 16,
+          "request could not retry after removing only the original conflict");
+    const auto linked_root = root / "multiple-linked-output";
+    std::filesystem::create_directories(linked_root);
+    std::filesystem::create_symlink(binary,linked_root / "b.f32");
+    multiple_request["output_dir"] = linked_root.string();
+    rejects([&] { multiple.run(multiple_request.dump()); }, "symlink");
+    check(!std::filesystem::exists(linked_root / "a.f32"),
+          "later raw output symlink left an earlier output behind");
+    std::ofstream(root / "package/model.json") << manifest.dump();
+
     request["output_dir"] = (root / "raw-output-2").string();
     request["parameters"]["values"]["artifact"] = "unadmitted";
     rejects([&] { raw.run(request.dump()); }, "unknown admitted input");

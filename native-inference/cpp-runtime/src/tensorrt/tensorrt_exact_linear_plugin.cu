@@ -1,5 +1,6 @@
 #include "physicsnemo/inference/backends/tensorrt_exact.hpp"
 #include "exact_plugin_support.hpp"
+#include "exact_provider_policy.hpp"
 
 #include <NvInfer.h>
 #include <cublasLt.h>
@@ -143,6 +144,8 @@ class ExactLinearPlugin final : public nvinfer1::IPluginV3,
                                 public nvinfer1::IPluginV3OneBuild,
                                 public nvinfer1::IPluginV3OneRuntime {
  public:
+  explicit ExactLinearPlugin(bool provider = false) : policy_(provider) {}
+
   ~ExactLinearPlugin() override {
     if (workspace_ != nullptr) cudaFree(workspace_);
     if (handle_ != nullptr) cublasLtDestroy(handle_);
@@ -156,11 +159,11 @@ class ExactLinearPlugin final : public nvinfer1::IPluginV3,
   }
 
   nvinfer1::IPluginV3* clone() noexcept override {
-    return new (std::nothrow) ExactLinearPlugin();
+    return new (std::nothrow) ExactLinearPlugin(policy_.enabled());
   }
   const char* getPluginName() const noexcept override { return kPluginName; }
   const char* getPluginVersion() const noexcept override {
-    return kPluginVersion;
+    return policy_.version();
   }
   const char* getPluginNamespace() const noexcept override { return ""; }
 
@@ -214,6 +217,12 @@ class ExactLinearPlugin final : public nvinfer1::IPluginV3,
 
   int32_t getNbOutputs() const noexcept override { return 1; }
 
+  std::size_t getWorkspaceSize(
+      const nvinfer1::DynamicPluginTensorDesc*, int32_t,
+      const nvinfer1::DynamicPluginTensorDesc*, int32_t) const noexcept override {
+    return policy_.workspace_bytes();
+  }
+
   int32_t onShapeChange(const nvinfer1::PluginTensorDesc* inputs,
                         int32_t nb_inputs, const nvinfer1::PluginTensorDesc*,
                         int32_t nb_outputs) noexcept override {
@@ -225,7 +234,7 @@ class ExactLinearPlugin final : public nvinfer1::IPluginV3,
 
   int32_t enqueue(const nvinfer1::PluginTensorDesc* input_desc,
                   const nvinfer1::PluginTensorDesc*,
-                  const void* const* inputs, void* const* outputs, void*,
+                  const void* const* inputs, void* const* outputs, void* workspace,
                   cudaStream_t stream) noexcept override {
     if (input_desc == nullptr || inputs == nullptr || outputs == nullptr ||
         !valid_dimensions(input_desc[0].dims, input_desc[1].dims,
@@ -243,19 +252,24 @@ class ExactLinearPlugin final : public nvinfer1::IPluginV3,
         return 1;
       }
       return enqueue_gemm(rows, static_cast<int>(columns),
-                          static_cast<int>(inner), inputs, outputs[0], stream);
+                          static_cast<int>(inner), inputs, outputs[0], workspace, stream);
     }
     if (handle_ == nullptr && cublasLtCreate(&handle_) != CUBLAS_STATUS_SUCCESS) {
       return 1;
     }
-    if (workspace_ == nullptr &&
+    if (!policy_.enabled() && workspace_ == nullptr &&
         cudaMalloc(&workspace_, kWorkspaceBytes) != cudaSuccess) {
       return 1;
     }
+    void* lt_workspace = policy_.enabled() ? workspace : workspace_;
+    const auto lt_workspace_bytes = policy_.enabled() ? policy_.lt_workspace_bytes()
+                                                     : kWorkspaceBytes;
+    if (lt_workspace == nullptr) return 1;
 
     Descriptors descriptors;
     if (cublasLtMatmulDescCreate(&descriptors.operation,
-                                 CUBLAS_COMPUTE_32F,
+                                 policy_.enabled() ? CUBLAS_COMPUTE_32F_FAST_TF32
+                                                   : CUBLAS_COMPUTE_32F,
                                  CUDA_R_32F) != CUBLAS_STATUS_SUCCESS ||
         cublasLtMatrixLayoutCreate(&descriptors.a, CUDA_R_32F, inner, columns,
                                    inner) != CUBLAS_STATUS_SUCCESS ||
@@ -293,7 +307,7 @@ class ExactLinearPlugin final : public nvinfer1::IPluginV3,
     const auto alignment_d = pointer_alignment(outputs[0]);
     if (cublasLtMatmulPreferenceSetAttribute(
             descriptors.preference, CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES,
-            &kWorkspaceBytes, sizeof(kWorkspaceBytes)) != CUBLAS_STATUS_SUCCESS ||
+            &lt_workspace_bytes, sizeof(lt_workspace_bytes)) != CUBLAS_STATUS_SUCCESS ||
         cublasLtMatmulPreferenceSetAttribute(
             descriptors.preference, CUBLASLT_MATMUL_PREF_MIN_ALIGNMENT_A_BYTES,
             &alignment_a, sizeof(alignment_a)) != CUBLAS_STATUS_SUCCESS ||
@@ -323,7 +337,7 @@ class ExactLinearPlugin final : public nvinfer1::IPluginV3,
     const auto status = cublasLtMatmul(
         handle_, descriptors.operation, &alpha, inputs[1], descriptors.a,
         inputs[0], descriptors.b, &beta, outputs[0], descriptors.c, outputs[0],
-        descriptors.c, &heuristic.algo, workspace_, kWorkspaceBytes, stream);
+        descriptors.c, &heuristic.algo, lt_workspace, lt_workspace_bytes, stream);
     if (status != CUBLAS_STATUS_SUCCESS) {
       std::fprintf(stderr, "TensorRT exact linear cuBLASLt call failed: %d\n",
                    static_cast<int>(status));
@@ -339,18 +353,18 @@ class ExactLinearPlugin final : public nvinfer1::IPluginV3,
 
   const nvinfer1::PluginFieldCollection* getFieldsToSerialize()
       noexcept override {
-    return &fields_;
+    return policy_.enabled() ? policy_.fields() : &fields_;
   }
 
  private:
   int32_t enqueue_gemm(int rows, int columns, int inner,
-                      const void* const* inputs, void* output,
+                      const void* const* inputs, void* output, void* workspace,
                       cudaStream_t stream) noexcept {
     if (gemm_handle_ == nullptr &&
         cublasCreate(&gemm_handle_) != CUBLAS_STATUS_SUCCESS) {
       return 1;
     }
-    if (!gemm_workspace_ready_) {
+    if (!policy_.enabled() && !gemm_workspace_ready_) {
       if (!gemm_workspace_size(&gemm_workspace_bytes_) ||
           (gemm_workspace_bytes_ != 0 &&
            cudaMalloc(&gemm_workspace_, gemm_workspace_bytes_) != cudaSuccess)) {
@@ -358,11 +372,16 @@ class ExactLinearPlugin final : public nvinfer1::IPluginV3,
       }
       gemm_workspace_ready_ = true;
     }
+    void* gemm_workspace = policy_.enabled() ? workspace : gemm_workspace_;
+    const auto gemm_workspace_bytes = policy_.enabled() ? policy_.workspace_bytes()
+                                                       : gemm_workspace_bytes_;
+    if (policy_.enabled() && gemm_workspace == nullptr) return 1;
     // Setting the stream resets cuBLAS workspace, so bind it afterwards.
     if (cublasSetStream(gemm_handle_, stream) != CUBLAS_STATUS_SUCCESS ||
-        cublasSetWorkspace(gemm_handle_, gemm_workspace_, gemm_workspace_bytes_) !=
+        cublasSetWorkspace(gemm_handle_, gemm_workspace, gemm_workspace_bytes) !=
             CUBLAS_STATUS_SUCCESS ||
-        cublasSetMathMode(gemm_handle_, CUBLAS_DEFAULT_MATH) !=
+        cublasSetMathMode(gemm_handle_, policy_.enabled() ? CUBLAS_TF32_TENSOR_OP_MATH
+                                                        : CUBLAS_DEFAULT_MATH) !=
             CUBLAS_STATUS_SUCCESS ||
         cublasSetPointerMode(gemm_handle_, CUBLAS_POINTER_MODE_HOST) !=
             CUBLAS_STATUS_SUCCESS) {
@@ -399,6 +418,7 @@ class ExactLinearPlugin final : public nvinfer1::IPluginV3,
     return 0;
   }
 
+  tensorrt_detail::ProviderMathPolicy policy_;
   cublasLtHandle_t handle_{nullptr};
   void* workspace_{nullptr};
   cublasHandle_t gemm_handle_{nullptr};
@@ -430,6 +450,13 @@ class ExactLinearPluginCreator final : public nvinfer1::IPluginCreatorV3One {
 };
 
 REGISTER_TENSORRT_PLUGIN(ExactLinearPluginCreator);
+
+class ProviderExactLinearPluginCreator final
+    : public tensorrt_detail::ProviderPluginCreator<ExactLinearPlugin> {
+ public:
+  ProviderExactLinearPluginCreator() : ProviderPluginCreator(kPluginName) {}
+};
+REGISTER_TENSORRT_PLUGIN(ProviderExactLinearPluginCreator);
 
 }  // namespace
 }  // namespace physicsnemo::inference

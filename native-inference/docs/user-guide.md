@@ -66,6 +66,24 @@ dependencies in `requirements.txt`; omit `--requirements` if you need no extra
 packages. Setup installs the builder and AOTI dependencies and builds the native
 runtime. It does not install system compilers, drivers or CUDA.
 
+For both AOTI and TensorRT, use the same setup command with both backends and
+your installed TensorRT C++ SDK:
+
+```bash
+pnms-model-builder setup-env /data/builder-env-dual \
+  --requirements /data/my-model/requirements.txt \
+  --backend aoti --backend tensorrt \
+  --tensorrt-root /opt/TensorRT --tensorrt-cuda-major 13 --json
+source /data/builder-env-dual/bin/activate
+```
+
+Setup selects TensorRT Python bindings for the SDK's four-part native version,
+including a matching `.postN` packaging release when needed on Linux. For
+example, `10.14.1.48.post1` matches SDK headers `10.14.1.48`; a different native
+build number or CUDA package variant fails dependency verification. You do not
+need an AOTI-only bootstrap followed by a separate TensorRT installation. The
+full TensorRT C++ SDK, CUDA toolkit and driver must already be available.
+
 Save the returned `project_settings`: you will copy `executor` and `runtime`
 into the project. For this Linux example, setup creates the executable at
 `/data/builder-env/.physicsnemo/runtime/physicsnemo-infer`. Use the returned path

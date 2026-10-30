@@ -31,6 +31,11 @@ add_test(
 add_executable(pnmir_device_runner_count_test tests/device_runner_count_test.cpp)
 add_test(NAME pnmir_device_runner_count COMMAND pnmir_device_runner_count_test)
 
+add_executable(pnmir_tensorrt_runtime_version_test
+  tests/tensorrt_runtime_version_test.cpp)
+add_test(NAME pnmir_tensorrt_runtime_version
+  COMMAND pnmir_tensorrt_runtime_version_test)
+
 add_test(
   NAME pnmir_domino_plugin_paths
   COMMAND ${Python3_EXECUTABLE} -S

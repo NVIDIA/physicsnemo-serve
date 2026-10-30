@@ -6,7 +6,6 @@ import subprocess
 import sys
 from pathlib import Path
 
-
 REPO_ROOT = Path(__file__).resolve().parents[1]
 ENTRYPOINT = REPO_ROOT / "scripts" / "entrypoint.sh"
 
@@ -62,6 +61,7 @@ def _generate_execute_config(tmp_path: Path, native: bool, *, binary: bool = Tru
         input=source + '\nSUPERVISORD_CONF="$TEST_CONF"\ngenerate_supervisord_config\n',
         text=True,
         capture_output=True,
+        check=False,
         env={
             **os.environ,
             "WORKERS": "execute",
@@ -101,6 +101,74 @@ def test_entrypoint_python_deployment_preserves_existing_launcher(tmp_path):
     assert 'WORKER_SCRIPT="/app/scripts/inference_worker.py"' in config
 
 
+def _run_scheduler_wrapper(tmp_path: Path, *, native: bool, registered: bool):
+    source = ENTRYPOINT.read_text(encoding="utf-8")
+    wrapper = source.split("cat > /tmp/scheduler-wrapper.sh << 'WRAPPER_EOF'\n", 1)[
+        1
+    ].split("\nWRAPPER_EOF", 1)[0]
+    wrapper_path = tmp_path / "scheduler-wrapper.sh"
+    wrapper_path.write_text(wrapper)
+    binary = tmp_path / "native-worker"
+    arguments = tmp_path / "gate-arguments"
+    binary.write_text(
+        '#!/bin/sh\nprintf \'%s\\n\' "$@" > "$GATE_ARGUMENTS"\n'
+        + ("exit 0\n" if registered else "exit 1\n")
+    )
+    binary.chmod(0o755)
+    redis = tmp_path / "redis-cli"
+    redis.write_text("#!/bin/sh\nprintf '0\\n'\n")
+    redis.chmod(0o755)
+    marker = tmp_path / "scheduler-started"
+    result = subprocess.run(
+        ["bash", str(wrapper_path), "touch", str(marker)],
+        capture_output=True,
+        text=True,
+        timeout=5,
+        check=False,
+        env={
+            **os.environ,
+            "PATH": str(tmp_path) + os.pathsep + os.environ["PATH"],
+            "GPU_WAIT_TIMEOUT": "1",
+            "NATIVE_DEPLOYMENT_CONFIG": str(tmp_path / "deployment.json")
+            if native
+            else "",
+            "NATIVE_WORKER_BIN": str(binary),
+            "GATE_ARGUMENTS": str(arguments),
+        },
+    )
+    return result, marker, arguments
+
+
+def test_native_scheduler_wrapper_does_not_start_after_registration_timeout(tmp_path):
+    result, marker, _ = _run_scheduler_wrapper(tmp_path, native=True, registered=False)
+    assert result.returncode != 0, result.stdout
+    assert not marker.exists(), (
+        "native scheduler must not start with an empty inventory"
+    )
+
+
+def test_native_scheduler_wrapper_waits_for_exact_deployment_before_starting(tmp_path):
+    result, marker, arguments = _run_scheduler_wrapper(
+        tmp_path, native=True, registered=True
+    )
+    assert result.returncode == 0, result.stderr
+    assert arguments.exists(), "native registration must be checked by the worker"
+    assert arguments.read_text().splitlines() == [
+        "wait-registration",
+        str(tmp_path / "deployment.json"),
+    ]
+    assert marker.exists()
+
+
+def test_python_scheduler_wrapper_keeps_existing_registration_wait(tmp_path):
+    result, marker, arguments = _run_scheduler_wrapper(
+        tmp_path, native=False, registered=False
+    )
+    assert result.returncode == 0, result.stderr
+    assert marker.exists()
+    assert not arguments.exists()
+
+
 def test_python_image_cargo_planner_can_parse_native_workspace_member(tmp_path):
     import re
     import shutil
@@ -126,6 +194,7 @@ def test_python_image_cargo_planner_can_parse_native_workspace_member(tmp_path):
         cwd=tmp_path,
         capture_output=True,
         text=True,
+        check=False,
     )
     assert result.returncode == 0, result.stderr
 

@@ -88,17 +88,24 @@ cargo build --release --locked -p native-worker --features cpp
 ```
 
 Supply an already compiled model inventory through the
-[deployment configuration](src/deployment.rs). Start Redis and the existing API,
-scheduler and results roles with the same stream prefix and
+[deployment configuration](src/deployment.rs). Start Redis, the API and results
+roles with the same stream prefix and
 [native runtime configuration](../../native-inference/deploy/worker_runtime_config.json),
-then start the worker:
+then start the worker and gate the existing scheduler on its registration:
 
 ```sh
 export SOURCE_SHA='FULL_GIT_REVISION'
 export RELEASE_IMAGE_DIGEST='registry/repository@sha256:SHA256_DIGEST'
 export REDIS_URL=redis://127.0.0.1:6379
-./target/release/native-worker /absolute/path/to/deployment.json
+./target/release/native-worker /absolute/path/to/deployment.json &
+./target/release/native-worker wait-registration /absolute/path/to/deployment.json &&
+./target/release/worker-runtime --role scheduler --config-path native-inference/deploy/worker_runtime_config.json
 ```
+
+The native container entrypoint applies this gate automatically. It waits for the
+exact configuration, source, runtime identity and live owner before starting the
+scheduler, including after a scheduler restart. Timeout fails closed. The gate
+admits a matching warming worker; model self-tests still control availability.
 
 Startup never builds models. Deployment requires `SOURCE_SHA` and exactly one
 execution identity:
@@ -130,8 +137,13 @@ alive while one supervised native worker restarts in the same slot. Set stable
 `NATIVE_DEPLOYMENT_ID` and `NATIVE_WORKER_SLOT` values (defaults: workflow ID and
 `0`); pod names do not change the queue. An atomic 15-second per-slot lease prevents
 simultaneous ownership, one-second heartbeats renew it during startup and work,
-and a replacement publishes `warming` only after the old lease expires. Pending
-messages are reclaimed on the same consumer group. Heartbeats do not add expiry
+and a replacement acquires the slot only after the old lease expires or is
+released. Retirement preserves a `warming` logical row and clears loaded-model
+entries while atomically releasing the process lease. A retired owner cannot
+become available again or overwrite its replacement. The unchanged scheduler
+waits for warming capacity and observes readiness through its periodic discovery
+(one second in the native configuration). Pending messages are reclaimed on the
+same consumer group. Heartbeats do not add expiry
 semantics to scheduler registry discovery: a stopped supervisor can leave a stale
 row, so automatic worker restart is required. Redis loss, scheduler reservation
 loss and active-active GPU failover are outside this topology.

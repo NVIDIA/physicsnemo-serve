@@ -13,7 +13,7 @@
       "config": {
         "gpu_registry_key": "gpu:registry",
         "memory_utilization_percent": 90,
-        "gpu_discovery_interval_secs": 5,
+        "gpu_discovery_interval_secs": 1,
         "batching_enabled": false,
         "max_batch_size": 1,
         "max_batch_wait_ms": 200

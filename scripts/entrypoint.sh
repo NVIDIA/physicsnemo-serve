@@ -297,6 +297,11 @@ EOF
                 cat > /tmp/scheduler-wrapper.sh << 'WRAPPER_EOF'
 #!/bin/bash
 # Wrapper script that waits for execute worker registration before starting scheduler
+if [[ -n "${NATIVE_DEPLOYMENT_CONFIG:-}" ]]; then
+    echo "[scheduler-wrapper] Waiting for this native deployment's live registration..."
+    "${NATIVE_WORKER_BIN:-/app/bin/native-worker}" wait-registration "$NATIVE_DEPLOYMENT_CONFIG" || exit $?
+    exec "$@"
+fi
 WAIT_TIMEOUT="${GPU_WAIT_TIMEOUT:-15}"
 echo "[scheduler-wrapper] Waiting for execute worker registration (timeout: ${WAIT_TIMEOUT}s)..."
 for i in $(seq 1 $WAIT_TIMEOUT); do
@@ -332,7 +337,7 @@ priority=$scheduler_priority
 redirect_stderr=true
 stdout_logfile=/dev/stdout
 stdout_logfile_maxbytes=0
-environment=RUST_LOG="$LOG_LEVEL",REDIS_URL="$REDIS_URL",QUEUE_CONFIG="$QUEUE_CONFIG",REDIS_STREAM_PREFIX="$REDIS_STREAM_PREFIX",WORKER_RUNTIME_CONFIG="$WORKER_RUNTIME_CONFIG",GPU_WAIT_TIMEOUT="15",HEALTH_PORT="$SCHEDULER_METRICS_PORT"
+environment=RUST_LOG="$LOG_LEVEL",REDIS_URL="$REDIS_URL",QUEUE_CONFIG="$QUEUE_CONFIG",REDIS_STREAM_PREFIX="$REDIS_STREAM_PREFIX",WORKER_RUNTIME_CONFIG="$WORKER_RUNTIME_CONFIG",GPU_WAIT_TIMEOUT="15",HEALTH_PORT="$SCHEDULER_METRICS_PORT",NATIVE_DEPLOYMENT_CONFIG="$NATIVE_DEPLOYMENT_CONFIG",NATIVE_WORKER_BIN="$NATIVE_WORKER_BIN"
 EOF
             programs_added=$((programs_added + 1))
         else

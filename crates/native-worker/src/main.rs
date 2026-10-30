@@ -26,8 +26,20 @@ async fn native_main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
-    let path = std::env::args()
-        .nth(1)
+    let mut args = std::env::args().skip(1);
+    let first = args.next();
+    if first.as_deref() == Some("wait-registration") {
+        let path = args
+            .next()
+            .context("usage: native-worker wait-registration <deployment.json>")?;
+        ensure!(
+            args.next().is_none(),
+            "unexpected native registration wait argument"
+        );
+        return native_worker::startup_gate::wait_for_registration(std::path::Path::new(&path))
+            .await;
+    }
+    let path = first
         .or_else(|| std::env::var("NATIVE_DEPLOYMENT_CONFIG").ok())
         .context("usage: native-worker <deployment.json>")?;
     let config_bytes = tokio::fs::read(&path).await?;
@@ -178,7 +190,7 @@ async fn native_main() -> anyhow::Result<()> {
     .await;
     signal.abort();
     heartbeat.abort();
-    let cleanup = registration.remove().await;
+    let cleanup = registration.release().await;
     if let Err(error) = &cleanup {
         tracing::error!(%error,"native registry cleanup failed");
     }
@@ -237,7 +249,7 @@ async fn serve(
             if host_monitor.is_retired() || *monitor_shutdown.borrow() {
                 host_monitor.retire();
                 let _ = shutdown_tx.send(true);
-                let _ = registry_monitor.draining().await;
+                let _ = registry_monitor.restarting().await;
                 break;
             }
         }
@@ -267,7 +279,7 @@ async fn serve(
         ensure!(requested.load(Ordering::Acquire),"native host or registry ownership retired; restart required");
         Ok(())
     }.await;
-    let _ = registration.draining().await;
+    let _ = registration.restarting().await;
     monitor.abort();
     host.retire();
     let destroyed = host

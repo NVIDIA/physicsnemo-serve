@@ -10,3 +10,8 @@ pub mod request;
 pub mod request_inputs;
 pub mod role;
 pub mod startup;
+pub mod startup_gate;
+
+#[cfg(test)]
+#[path = "../../worker-runtime/tests/support/mod.rs"]
+mod test_support;

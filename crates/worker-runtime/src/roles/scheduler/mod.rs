@@ -210,8 +210,6 @@ struct ReleasePayload {
 pub struct SchedulerRole {
     /// Tracks discovered worker capacity and active GPU reservations.
     reservations: ResourceReservationTable,
-    /// Shared refresh path for periodic discovery and native request placement.
-    resource_discovery: ResourceDiscoveryTask,
     /// Enforces per-parent in-flight limits for fanout workloads.
     parent_slots: Arc<dyn ParentSlotStore>,
     /// Checks whether a parent run has already reached a terminal state.
@@ -324,18 +322,16 @@ impl SchedulerRole {
 
         let interval = Duration::from_secs(config.gpu_discovery_interval_secs);
 
-        let discovery_task = ResourceDiscoveryTask {
+        let discovery_task: Box<dyn BackgroundTask> = Box::new(ResourceDiscoveryTask {
             reservations: reservations.clone(),
             interval,
             qm: Box::new(qm),
             registry_key: config.gpu_registry_key.clone(),
             metrics: metrics.clone(),
-            refresh_lock: Arc::new(Mutex::new(())),
-        };
+        });
 
         let role = Self {
             reservations,
-            resource_discovery: discovery_task.clone(),
             parent_slots,
             parent_state,
             collect_store,
@@ -364,7 +360,7 @@ impl SchedulerRole {
             "Scheduler config loaded"
         );
 
-        Ok((role, vec![Box::new(discovery_task), scheduler_task]))
+        Ok((role, vec![discovery_task, scheduler_task]))
     }
 
     async fn apply_release(&self, payload: &ReleasePayload) -> Result<()> {
@@ -630,30 +626,6 @@ impl SchedulerRole {
                 "dropping queued scheduler request because parent run is already terminal"
             );
             return Ok(ScheduleDecision::Dropped);
-        }
-
-        if pending.payload.raw_payload["runtime"]["kind"].as_str() == Some("cpp") {
-            // Read the replacement generation before placement. The periodic
-            // snapshot may still be empty from the worker's restart interval.
-            let refresh_error = match self.resource_discovery.refresh().await {
-                Ok(true) => None,
-                Ok(false) => Some(anyhow!("GPU discovery returned a stale inventory")),
-                Err(error) => Some(error),
-            };
-            if let Some(error) = refresh_error {
-                warn!(
-                    run_id = %pending.payload.run_id,
-                    error = %error,
-                    "native scheduler request remains queued until resource discovery succeeds"
-                );
-                return Ok(ScheduleDecision::Blocked);
-            }
-            if self.reservations.tracked_worker_count().await == 0 {
-                // A draining or absent native generation is a temporary restart
-                // gap. Reject malformed resource profiles before retaining work.
-                reservation::resolve_resource_config(&mut pending.payload)?;
-                return Ok(ScheduleDecision::Blocked);
-            }
         }
 
         let held_parent_slot =
@@ -1058,35 +1030,12 @@ impl BackgroundTask for SchedulerTask {
 }
 
 /// Periodic GPU discovery task.
-#[derive(Clone)]
 struct ResourceDiscoveryTask {
     reservations: ResourceReservationTable,
     interval: Duration,
     qm: Box<QueueManager>,
     registry_key: String,
     metrics: Option<WorkerMetrics>,
-    refresh_lock: Arc<Mutex<()>>,
-}
-
-impl ResourceDiscoveryTask {
-    async fn refresh(&self) -> Result<bool> {
-        tokio::time::timeout(Duration::from_secs(30), async {
-            // Keep an older periodic read from overwriting a newer on-demand
-            // snapshot after a replacement has become available.
-            let _refresh = self.refresh_lock.lock().await;
-            let update = discover_resources(&self.qm, self.registry_key.as_str()).await?;
-            let authoritative = matches!(&update, discovery::DiscoveryUpdate::Authoritative(_));
-            self.reservations.sync_from_discovery_update(update).await?;
-            if let Some(metrics) = self.metrics.as_ref() {
-                metrics.set_scheduler_discovered_workers(
-                    self.reservations.tracked_worker_count().await,
-                );
-            }
-            Ok(authoritative)
-        })
-        .await
-        .map_err(|_| anyhow!("GPU discovery timed out after 30s"))?
-    }
 }
 
 impl BackgroundTask for ResourceDiscoveryTask {
@@ -1104,13 +1053,24 @@ impl BackgroundTask for ResourceDiscoveryTask {
 
     fn run<'a>(&'a self, _sink: &'a dyn MessageSink) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
+            let qm = self.qm.clone();
             let registry_key = self.registry_key.clone();
             debug!(
                 registry_key = %registry_key,
                 interval_secs = self.interval.as_secs(),
                 "running scheduler resource discovery task"
             );
-            self.refresh().await?;
+            tokio::time::timeout(Duration::from_secs(30), async move {
+                let update = discover_resources(&qm, registry_key.as_str()).await?;
+                self.reservations.sync_from_discovery_update(update).await
+            })
+            .await
+            .map_err(|_| anyhow!("GPU discovery timed out after 30s"))??;
+            if let Some(metrics) = self.metrics.as_ref() {
+                metrics.set_scheduler_discovered_workers(
+                    self.reservations.tracked_worker_count().await,
+                );
+            }
             debug!(
                 registry_key = %self.registry_key,
                 "scheduler resource discovery task completed"
@@ -3853,364 +3813,6 @@ mod tests {
         assert!(sink.handoffs().is_empty());
         assert_eq!(sink.acked_ids(), vec!["1-0".to_string()]);
 
-        set_env_var("SCHEDULER_DISCOVERY_JSON", prev_discovery.as_deref());
-    }
-
-    #[tokio::test]
-    async fn native_replacement_registry_dispatches_with_empty_periodic_discovery_cache() {
-        let _guard = test_env::env_lock().lock().await;
-        let prev_discovery = std::env::var("SCHEDULER_DISCOVERY_JSON").ok();
-        set_env_var(
-            "SCHEDULER_DISCOVERY_JSON",
-            Some(
-                r#"[{"resource_id":0,"stream_name":"execute.native.demo.owned.0.0","total_memory_mb":16000,"used_memory_mb":0,"device_kind":"gpu","executor_class":"native.demo","status":"available","model_cache":{"schema_version":1,"scope":"process","entries":[{"workflow_id":"demo-plugin"}],"total_entries":1,"warmup":{"workflow_id":"demo-plugin","status":"succeeded"}}}]"#,
-            ),
-        );
-        let (_redis_server, role, tasks) = scheduler_with_test_queue_manager_and_policy(
-            "native-replacement-empty-cache",
-            &scheduler_env("test:"),
-            retry_dlq_policy(1),
-        )
-        .await;
-        let sink = RecordingSink::new();
-        // Exactly the observed recovery boundary: periodic discovery removed
-        // the dead worker; its replacement is now available in Redis, but the
-        // next periodic discovery tick has not occurred.
-        role.reservations
-            .sync_from_discovery_update(discovery::DiscoveryUpdate::Authoritative(Vec::new()))
-            .await
-            .unwrap();
-        let mut payload: JsonValue = serde_json::from_str(&basic_schedule_payload(
-            "demo-plugin",
-            "native.demo",
-            1,
-            2_048,
-        ))
-        .unwrap();
-        payload["runtime"] = json!({"kind":"cpp","executor_class":"native.demo"});
-        queue_schedule(
-            &role,
-            &schedule_msg("native-replay", &payload.to_string()),
-            "schedule",
-            &sink,
-        )
-        .await;
-        run_scheduler_task(&tasks, &sink).await;
-        assert_eq!(
-            sink.writes().len(),
-            1,
-            "an available replacement must dispatch before the next periodic discovery tick"
-        );
-        assert_eq!(sink.writes()[0].stream_key, "execute.native.demo.owned.0.0");
-        assert!(
-            sink.handoffs().is_empty(),
-            "native replay must never enter DLQ"
-        );
-        assert!(
-            sink.writes().iter().all(|row| row.stage != "dlq"),
-            "recovery replay must not consume the DLQ retry budget"
-        );
-        assert_eq!(role.queued_request_count().await, 0);
-        set_env_var("SCHEDULER_DISCOVERY_JSON", prev_discovery.as_deref());
-    }
-
-    #[tokio::test]
-    async fn native_restart_registry_gap_keeps_requests_queued_until_replacement() {
-        let _guard = test_env::env_lock().lock().await;
-        let prev_discovery = std::env::var("SCHEDULER_DISCOVERY_JSON").ok();
-        let mut worker = json!([{"resource_id":0,"stream_name":"execute.native.demo.owned.0.0","total_memory_mb":16000,"used_memory_mb":0,"device_kind":"gpu","executor_class":"native.demo","status":"available"}]);
-        set_env_var("SCHEDULER_DISCOVERY_JSON", Some(&worker.to_string()));
-        let (_redis_server, qm) = spawn_test_queue_manager("native-restart-registry-gap").await;
-        let max_retries = 2;
-        let (role, tasks) = SchedulerRole::from_env(
-            &scheduler_env("test:"),
-            qm.clone(),
-            retry_dlq_policy(max_retries),
-            None,
-        )
-        .unwrap();
-        seed_registry_from_discovery_json(&qm, &role.config.gpu_registry_key, "generation").await;
-        let sink = RecordingSink::new();
-        run_gpu_discovery(&tasks, &sink).await;
-        assert_eq!(role.reservations.tracked_worker_count().await, 1);
-        let mut payload: JsonValue = serde_json::from_str(&basic_schedule_payload(
-            "demo-plugin",
-            "native.demo",
-            1,
-            2_048,
-        ))
-        .unwrap();
-        payload["runtime"] = json!({"kind":"cpp","executor_class":"native.demo"});
-        queue_schedule(
-            &role,
-            &schedule_msg("native-registry-gap", &payload.to_string()),
-            "schedule",
-            &sink,
-        )
-        .await;
-
-        // Graceful shutdown first marks the old generation draining, then
-        // removes its row before the supervised replacement registers.
-        worker[0]["status"] = json!("draining");
-        set_env_var("SCHEDULER_DISCOVERY_JSON", Some(&worker.to_string()));
-        seed_registry_from_discovery_json(&qm, &role.config.gpu_registry_key, "generation").await;
-        for registered in [true, false] {
-            if !registered {
-                let mut connection = qm.connection();
-                scicomp_rq::hash_ops::hdel(
-                    &mut connection,
-                    &role.config.gpu_registry_key,
-                    "generation:0",
-                )
-                .await
-                .unwrap();
-            }
-            for _ in 0..max_retries + 2 {
-                run_scheduler_task(&tasks, &sink).await;
-                assert_eq!(role.reservations.tracked_worker_count().await, 0);
-                assert!(sink.writes().is_empty());
-                assert!(
-                    sink.handoffs().is_empty(),
-                    "a native restart gap must not consume the request's DLQ budget"
-                );
-                assert!(sink.acked_ids().is_empty());
-                assert!(sink.failed_run_ids().is_empty());
-                assert_eq!(role.queued_request_count().await, 1);
-            }
-        }
-
-        worker[0]["status"] = json!("available");
-        set_env_var("SCHEDULER_DISCOVERY_JSON", Some(&worker.to_string()));
-        seed_registry_from_discovery_json(&qm, &role.config.gpu_registry_key, "generation").await;
-        run_scheduler_task(&tasks, &sink).await;
-        run_scheduler_task(&tasks, &sink).await;
-        assert_eq!(sink.writes().len(), 1);
-        assert_eq!(sink.writes()[0].run_id, "native-registry-gap");
-        assert_eq!(sink.writes()[0].stream_key, "execute.native.demo.owned.0.0");
-        assert_eq!(sink.acked_ids(), vec!["1-0".to_string()]);
-        assert!(sink.handoffs().is_empty());
-        assert!(sink.failed_run_ids().is_empty());
-        assert_eq!(role.queued_request_count().await, 0);
-        set_env_var("SCHEDULER_DISCOVERY_JSON", prev_discovery.as_deref());
-    }
-
-    #[tokio::test]
-    async fn native_discovery_failure_blocks_without_stale_dispatch_or_dlq() {
-        let _guard = test_env::env_lock().lock().await;
-        let prev_discovery = std::env::var("SCHEDULER_DISCOVERY_JSON").ok();
-        set_env_var(
-            "SCHEDULER_DISCOVERY_JSON",
-            Some(
-                r#"[{"resource_id":0,"stream_name":"execute.native.demo.owned.0.0","total_memory_mb":16000,"used_memory_mb":0,"device_kind":"gpu","executor_class":"native.demo","status":"available"}]"#,
-            ),
-        );
-        let (_redis_server, qm) = spawn_test_queue_manager("native-refresh-failure").await;
-        let (role, tasks) = SchedulerRole::from_env(
-            &scheduler_env("test:"),
-            qm.clone(),
-            retry_dlq_policy(1),
-            None,
-        )
-        .unwrap();
-        seed_registry_from_discovery_json(&qm, &role.config.gpu_registry_key, "healthy").await;
-        let sink = RecordingSink::new();
-        run_gpu_discovery(&tasks, &sink).await;
-        assert_eq!(role.reservations.tracked_worker_count().await, 1);
-        let mut connection = qm.connection();
-        scicomp_rq::hash_ops::hset(
-            &mut connection,
-            &role.config.gpu_registry_key,
-            "unrelated-malformed-row",
-            "{not-json",
-        )
-        .await
-        .unwrap();
-        let mut payload: JsonValue = serde_json::from_str(&basic_schedule_payload(
-            "demo-plugin",
-            "native.demo",
-            1,
-            2_048,
-        ))
-        .unwrap();
-        payload["runtime"] = json!({"kind":"cpp","executor_class":"native.demo"});
-        queue_schedule(
-            &role,
-            &schedule_msg("native-refresh-retry", &payload.to_string()),
-            "schedule",
-            &sink,
-        )
-        .await;
-        for _ in 0..3 {
-            run_scheduler_task(&tasks, &sink).await;
-            assert!(
-                sink.writes().is_empty(),
-                "failed refresh must not dispatch from a potentially stale generation"
-            );
-            assert!(
-                sink.handoffs().is_empty(),
-                "discovery failure must not consume the native request's DLQ budget"
-            );
-            assert!(sink.failed_run_ids().is_empty());
-            assert_eq!(role.queued_request_count().await, 1);
-        }
-        scicomp_rq::hash_ops::hdel(
-            &mut connection,
-            &role.config.gpu_registry_key,
-            "unrelated-malformed-row",
-        )
-        .await
-        .unwrap();
-        run_scheduler_task(&tasks, &sink).await;
-        assert_eq!(sink.writes().len(), 1);
-        assert_eq!(sink.writes()[0].run_id, "native-refresh-retry");
-        assert_eq!(sink.writes()[0].stream_key, "execute.native.demo.owned.0.0");
-        assert!(sink.handoffs().is_empty());
-        assert!(sink.failed_run_ids().is_empty());
-        assert_eq!(role.queued_request_count().await, 0);
-        set_env_var("SCHEDULER_DISCOVERY_JSON", prev_discovery.as_deref());
-    }
-
-    #[tokio::test]
-    async fn native_stale_discovery_blocks_without_using_cached_generation() {
-        let _guard = test_env::env_lock().lock().await;
-        let prev_discovery = std::env::var("SCHEDULER_DISCOVERY_JSON").ok();
-        let healthy = r#"[{"resource_id":0,"stream_name":"execute.native.demo.owned.0.0","total_memory_mb":16000,"used_memory_mb":0,"device_kind":"gpu","executor_class":"native.demo","status":"available"}]"#;
-        set_env_var("SCHEDULER_DISCOVERY_JSON", Some(healthy));
-        let (_redis_server, role, tasks) = scheduler_with_test_queue_manager_and_policy(
-            "native-stale-discovery",
-            &scheduler_env("test:"),
-            retry_dlq_policy(1),
-        )
-        .await;
-        let sink = RecordingSink::new();
-        run_gpu_discovery(&tasks, &sink).await;
-        assert_eq!(role.reservations.tracked_worker_count().await, 1);
-        // Invalid local discovery input takes the same Stale path as a failed
-        // NVML query, without requiring a GPU in this component test.
-        set_env_var("SCHEDULER_DISCOVERY_JSON", Some("not-json"));
-        let mut payload: JsonValue = serde_json::from_str(&basic_schedule_payload(
-            "demo-plugin",
-            "native.demo",
-            1,
-            2_048,
-        ))
-        .unwrap();
-        payload["runtime"] = json!({"kind":"cpp","executor_class":"native.demo"});
-        queue_schedule(
-            &role,
-            &schedule_msg("native-stale-retry", &payload.to_string()),
-            "schedule",
-            &sink,
-        )
-        .await;
-        run_scheduler_task(&tasks, &sink).await;
-        assert!(
-            sink.writes().is_empty(),
-            "stale discovery must not authorize dispatch from the cached generation"
-        );
-        assert!(
-            sink.handoffs().is_empty(),
-            "stale discovery must not consume request retries"
-        );
-        assert_eq!(role.queued_request_count().await, 1);
-        set_env_var("SCHEDULER_DISCOVERY_JSON", Some(healthy));
-        run_scheduler_task(&tasks, &sink).await;
-        assert_eq!(sink.writes().len(), 1);
-        assert_eq!(sink.writes()[0].run_id, "native-stale-retry");
-        assert!(sink.handoffs().is_empty());
-        assert_eq!(role.queued_request_count().await, 0);
-        set_env_var("SCHEDULER_DISCOVERY_JSON", prev_discovery.as_deref());
-    }
-
-    #[tokio::test]
-    async fn native_current_warming_registry_defers_replay_until_available() {
-        let _guard = test_env::env_lock().lock().await;
-        let prev_discovery = std::env::var("SCHEDULER_DISCOVERY_JSON").ok();
-        let mut worker = json!([{"resource_id":0,"stream_name":"execute.native.demo.owned.0.0","total_memory_mb":16000,"used_memory_mb":0,"device_kind":"gpu","executor_class":"native.demo","status":"warming","model_cache":{"schema_version":1,"scope":"process","entries":[],"total_entries":0,"warmup":{"workflow_id":"demo-plugin","status":"warming"}}}]);
-        set_env_var("SCHEDULER_DISCOVERY_JSON", Some(&worker.to_string()));
-        let (_redis_server, qm) = spawn_test_queue_manager("native-current-warming").await;
-        let (role, tasks) = SchedulerRole::from_env(
-            &scheduler_env("test:"),
-            qm.clone(),
-            retry_dlq_policy(1),
-            None,
-        )
-        .unwrap();
-        seed_registry_from_discovery_json(&qm, &role.config.gpu_registry_key, "replacement").await;
-        let sink = RecordingSink::new();
-        let mut payload: JsonValue = serde_json::from_str(&basic_schedule_payload(
-            "demo-plugin",
-            "native.demo",
-            1,
-            2_048,
-        ))
-        .unwrap();
-        payload["runtime"] = json!({"kind":"cpp","executor_class":"native.demo"});
-        queue_schedule(
-            &role,
-            &schedule_msg("native-warming-replay", &payload.to_string()),
-            "schedule",
-            &sink,
-        )
-        .await;
-        run_scheduler_task(&tasks, &sink).await;
-        assert!(
-            sink.handoffs().is_empty(),
-            "warming replacement must not dispatch or enter DLQ"
-        );
-        assert_eq!(role.queued_request_count().await, 1);
-        worker[0]["status"] = json!("available");
-        worker[0]["model_cache"]["entries"] = json!([{"workflow_id":"demo-plugin"}]);
-        worker[0]["model_cache"]["warmup"]["status"] = json!("succeeded");
-        set_env_var("SCHEDULER_DISCOVERY_JSON", Some(&worker.to_string()));
-        seed_registry_from_discovery_json(&qm, &role.config.gpu_registry_key, "replacement").await;
-        run_scheduler_task(&tasks, &sink).await;
-        assert_eq!(sink.writes().len(), 1);
-        assert_eq!(sink.writes()[0].stream_key, "execute.native.demo.owned.0.0");
-        assert!(sink.handoffs().is_empty());
-        assert_eq!(role.queued_request_count().await, 0);
-        set_env_var("SCHEDULER_DISCOVERY_JSON", prev_discovery.as_deref());
-    }
-
-    #[tokio::test]
-    async fn python_requests_keep_periodic_discovery_behavior() {
-        let _guard = test_env::env_lock().lock().await;
-        let prev_discovery = std::env::var("SCHEDULER_DISCOVERY_JSON").ok();
-        set_env_var(
-            "SCHEDULER_DISCOVERY_JSON",
-            Some(
-                r#"[{"resource_id":0,"stream_name":"execute.python.gpu.demo","total_memory_mb":16000,"used_memory_mb":0,"executor_class":"python.gpu.demo"}]"#,
-            ),
-        );
-        let (_redis_server, role, tasks) = scheduler_with_test_queue_manager_and_policy(
-            "python-periodic-unchanged",
-            &scheduler_env("test:"),
-            retry_dlq_policy(1),
-        )
-        .await;
-        let sink = RecordingSink::new();
-        let mut payload: JsonValue = serde_json::from_str(&basic_schedule_payload(
-            "demo-plugin",
-            "python.gpu.demo",
-            1,
-            2_048,
-        ))
-        .unwrap();
-        payload["runtime"] = json!({"kind":"python","executor_class":"python.gpu.demo"});
-        queue_schedule(
-            &role,
-            &schedule_msg("python-periodic", &payload.to_string()),
-            "schedule",
-            &sink,
-        )
-        .await;
-        run_scheduler_task(&tasks, &sink).await;
-        assert_eq!(
-            role.reservations.tracked_worker_count().await,
-            0,
-            "Python scheduling must not add the native on-demand refresh"
-        );
-        assert_eq!(sink.handoffs()[0].stream, "shared-dlq");
         set_env_var("SCHEDULER_DISCOVERY_JSON", prev_discovery.as_deref());
     }
 

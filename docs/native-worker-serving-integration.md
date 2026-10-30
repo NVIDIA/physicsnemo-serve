@@ -117,9 +117,18 @@ unready. `scripts/health_stub.py` uses this readiness result for native services
 Set stable `NATIVE_DEPLOYMENT_ID` and `NATIVE_WORKER_SLOT` values; their defaults
 are the workflow ID and `0`. The worker owns a 15-second slot lease and renews it
 once per second. A supervised replacement uses the same queue and consumer group
-after the previous lease expires. The scheduler refreshes native discovery before
-placement so a replacement can receive queued work before the next periodic
-discovery tick.
+after the previous lease expires. Retirement retains a `warming` logical slot,
+clears its loaded-model cache and releases only the live process lease. The
+replacement changes ownership in place. Readiness remains false during this gap.
+The unchanged scheduler already waits for warming workers; the native runtime
+configuration refreshes its inventory once per second.
+
+Before starting the scheduler, the native entrypoint runs
+`native-worker wait-registration <deployment.json>`. This waits for the exact
+deployment configuration, source, execution identity and live slot owner, then
+starts the existing scheduler. A timeout stops the launcher instead of starting
+with an empty registry. Manual launchers must apply the same gate. Initial Redis
+and NVML discovery still use the existing scheduler's error handling.
 
 Redis fences each attempt by the source delivery, consumer and attempt token.
 Completion atomically publishes the outcome, releases the original reservation
@@ -131,8 +140,10 @@ retains the engine's quarantine behavior.
 The supported restart boundary keeps Redis, API, scheduler and artifact storage
 available while one native worker restarts in the same slot. Redis must preserve
 pending messages and completion markers with a non-evicting policy; the native
-entrypoint selects `noeviction` for embedded Redis. A stopped supervisor can leave
-a stale registry row, so automatic worker restart is required. Whole-container or
+entrypoint selects `noeviction` for embedded Redis. A hard crash may leave an
+available cached row: requests can queue on its durable stream until the
+replacement starts, and readiness rejects its expired lease. A stopped supervisor
+can leave this work pending, so automatic worker restart is required. Whole-container or
 Redis loss, scheduler reservation loss and active-active GPU failover require a
 broader deployment design.
 

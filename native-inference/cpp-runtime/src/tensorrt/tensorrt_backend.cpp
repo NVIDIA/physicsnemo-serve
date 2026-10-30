@@ -1,5 +1,6 @@
 #include "physicsnemo/inference/backends/tensorrt.hpp"
 #include "physicsnemo/inference/runtime.hpp"
+#include "runtime_version.hpp"
 
 #ifdef PNMIR_HAS_TENSORRT_EXACT
 #include "physicsnemo/inference/backends/tensorrt_exact.hpp"
@@ -34,6 +35,14 @@ struct ExactPlugin {
 // Keep registration entry points and manifest identities together. These symbol
 // references also keep every plugin DSO loaded before plan deserialization.
 constexpr ExactPlugin kExactPlugins[] = {
+    {pnmir_tensorrt_exact_linear_register,
+     kTensorRTProviderDefaultLinearOperatorId, kTensorRTProviderDefaultOperatorAbi},
+    {pnmir_tensorrt_exact_gemm_register,
+     kTensorRTProviderDefaultGemmOperatorId, kTensorRTProviderDefaultOperatorAbi},
+    {pnmir_tensorrt_exact_slice_bmm_register,
+     kTensorRTProviderDefaultSliceBmmOperatorId, kTensorRTProviderDefaultOperatorAbi},
+    {pnmir_tensorrt_exact_deslice_bmm_register,
+     kTensorRTProviderDefaultDesliceBmmOperatorId, kTensorRTProviderDefaultOperatorAbi},
     {pnmir_tensorrt_exact_linear_register,
      kTensorRTExactLinearOperatorId, kTensorRTExactLinearOperatorAbi},
     {pnmir_tensorrt_exact_gemm_register,
@@ -433,9 +442,8 @@ class TensorRTBackend final : public Backend {
                 const SessionOptions& options) const override {
     const bool precision_matches =
         options.precision == "auto" || options.precision == artifact.precision;
-    const bool version_matches =
-        artifact.runtime_version.empty() ||
-        artifact.runtime_version == tensorrt_runtime_version();
+    const bool version_matches = detail::tensorrt_runtime_version_matches(
+        artifact.runtime_version, tensorrt_runtime_version());
     return artifact.backend == name() &&
            artifact.target == DeviceType::kCuda &&
            options.device.type == DeviceType::kCuda && precision_matches &&

@@ -1,5 +1,6 @@
 #include "physicsnemo/inference/backends/tensorrt_exact.hpp"
 #include "exact_plugin_support.hpp"
+#include "exact_provider_policy.hpp"
 
 #include <NvInfer.h>
 #include <cublas_v2.h>
@@ -39,6 +40,8 @@ class ExactSliceBmmPlugin final : public nvinfer1::IPluginV3,
                                   public nvinfer1::IPluginV3OneBuild,
                                   public nvinfer1::IPluginV3OneRuntime {
  public:
+  explicit ExactSliceBmmPlugin(bool provider = false) : policy_(provider) {}
+
   ~ExactSliceBmmPlugin() override {
     if (handle_ != nullptr) cublasDestroy(handle_);
   }
@@ -49,11 +52,11 @@ class ExactSliceBmmPlugin final : public nvinfer1::IPluginV3,
   }
 
   nvinfer1::IPluginV3* clone() noexcept override {
-    return new (std::nothrow) ExactSliceBmmPlugin();
+    return new (std::nothrow) ExactSliceBmmPlugin(policy_.enabled());
   }
   const char* getPluginName() const noexcept override { return kPluginName; }
   const char* getPluginVersion() const noexcept override {
-    return kPluginVersion;
+    return policy_.version();
   }
   const char* getPluginNamespace() const noexcept override { return ""; }
 
@@ -105,6 +108,12 @@ class ExactSliceBmmPlugin final : public nvinfer1::IPluginV3,
 
   int32_t getNbOutputs() const noexcept override { return 1; }
 
+  std::size_t getWorkspaceSize(
+      const nvinfer1::DynamicPluginTensorDesc*, int32_t,
+      const nvinfer1::DynamicPluginTensorDesc*, int32_t) const noexcept override {
+    return policy_.workspace_bytes();
+  }
+
   int32_t onShapeChange(const nvinfer1::PluginTensorDesc* inputs,
                         int32_t nb_inputs, const nvinfer1::PluginTensorDesc*,
                         int32_t nb_outputs) noexcept override {
@@ -114,7 +123,7 @@ class ExactSliceBmmPlugin final : public nvinfer1::IPluginV3,
 
   int32_t enqueue(const nvinfer1::PluginTensorDesc* input_desc,
                   const nvinfer1::PluginTensorDesc*,
-                  const void* const* inputs, void* const* outputs, void*,
+                  const void* const* inputs, void* const* outputs, void* workspace,
                   cudaStream_t stream) noexcept override {
     if (input_desc == nullptr || inputs == nullptr || outputs == nullptr ||
         !valid_dimensions(input_desc[0].dims, input_desc[1].dims)) {
@@ -130,7 +139,12 @@ class ExactSliceBmmPlugin final : public nvinfer1::IPluginV3,
       return 1;
     }
     if (cublasSetStream(handle_, stream) != CUBLAS_STATUS_SUCCESS ||
-        cublasSetMathMode(handle_, CUBLAS_DEFAULT_MATH) !=
+        (policy_.enabled() &&
+         (workspace == nullptr ||
+          cublasSetWorkspace(handle_, workspace, policy_.workspace_bytes()) !=
+              CUBLAS_STATUS_SUCCESS)) ||
+        cublasSetMathMode(handle_, policy_.enabled() ? CUBLAS_TF32_TENSOR_OP_MATH
+                                                   : CUBLAS_DEFAULT_MATH) !=
             CUBLAS_STATUS_SUCCESS) {
       return 1;
     }
@@ -158,10 +172,11 @@ class ExactSliceBmmPlugin final : public nvinfer1::IPluginV3,
 
   const nvinfer1::PluginFieldCollection* getFieldsToSerialize()
       noexcept override {
-    return &fields_;
+    return policy_.enabled() ? policy_.fields() : &fields_;
   }
 
  private:
+  tensorrt_detail::ProviderMathPolicy policy_;
   cublasHandle_t handle_{nullptr};
   nvinfer1::PluginFieldCollection fields_{0, nullptr};
 };
@@ -189,6 +204,13 @@ class ExactSliceBmmPluginCreator final
 };
 
 REGISTER_TENSORRT_PLUGIN(ExactSliceBmmPluginCreator);
+
+class ProviderExactSliceBmmPluginCreator final
+    : public tensorrt_detail::ProviderPluginCreator<ExactSliceBmmPlugin> {
+ public:
+  ProviderExactSliceBmmPluginCreator() : ProviderPluginCreator(kPluginName) {}
+};
+REGISTER_TENSORRT_PLUGIN(ProviderExactSliceBmmPluginCreator);
 
 }  // namespace
 }  // namespace physicsnemo::inference

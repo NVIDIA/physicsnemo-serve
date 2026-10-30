@@ -331,7 +331,12 @@ def test_tensor_reader_rejects_truncation_and_nonfinite_values(tmp_path, payload
         transolver.read_tensor(path, 1, 4)
 
 
-def test_preparation_imports_original_once_and_builds_distinct_static_shapes(tmp_path):
+@pytest.mark.parametrize("provider_mode", [False, True])
+def test_preparation_imports_original_once_and_builds_distinct_static_shapes(
+    tmp_path, provider_mode
+):
+    prefix = "provider" if provider_mode else "transolver"
+    backends_expected = ["tensorrt"] if provider_mode else ["aoti", "tensorrt"]
     assets = tmp_path / "assets"
     assets.mkdir()
     manifest, _ = assets_fixture(assets)
@@ -357,12 +362,23 @@ def test_preparation_imports_original_once_and_builds_distinct_static_shapes(tmp
             return SimpleNamespace(stdout='{"status": "imported"}')
 
         def build_project(self, name, project, backends, output):
-            points = int(name.removeprefix("transolver"))
+            points = int(name.removeprefix(prefix))
             assert f"POINT_COUNT = {points}\n" in (project / "adapter.py").read_text()
             assert (
                 project / "weights/checkpoint.pt"
             ).read_bytes() == b"converted only for builder"
-            assert backends == ["aoti", "tensorrt"]
+            assert backends == backends_expected
+            document = json.loads((project / "model-build.json").read_text())
+            assert document["tensorrt_profile"] == (
+                "provider-default-exact-v1"
+                if provider_mode
+                else "layout-order-exact-v2"
+            )
+            if provider_mode:
+                assert (
+                    document["backends"] == ["tensorrt"]
+                    and document["required_gpu_arch"] == "sm90"
+                )
             for plugin in PLUGIN_NAMES:
                 assert (
                     project
@@ -378,18 +394,18 @@ def test_preparation_imports_original_once_and_builds_distinct_static_shapes(tmp
                 "model_dir": str(output / "model"),
                 "packages": {
                     backend: str(output / "model/backends" / backend)
-                    for backend in ("aoti", "tensorrt")
+                    for backend in backends_expected
                 },
             }
 
-    records = transolver.prepare_and_build(Context(), manifest)
+    records = transolver.prepare_and_build(Context(), manifest, provider=provider_mode)
     assert calls == [
-        "transolver.assets",
-        "transolver.import",
-        "transolver.build75",
-        "transolver.build11",
+        f"{prefix}.assets",
+        f"{prefix}.import",
+        f"{prefix}.build75",
+        f"{prefix}.build11",
     ]
-    assert builds == ["transolver75", "transolver11"]
+    assert builds == [f"{prefix}75", f"{prefix}11"]
     assert [record["point_count"] for record in records] == [75, 11]
     assert all(
         record["assets"]["checkpoint"]["path"] == str(assets / "model.mdlus")
@@ -443,7 +459,11 @@ def test_surface_reference_geometry_matches_hand_calculated_centers_and_normals(
     assert version == vtk.vtkVersion.GetVTKVersion()
 
 
-def consumer_records(tmp_path):
+def consumer_records(tmp_path, *, provider_mode=False):
+    from qa.native_inference.provider import MATH_POLICY
+
+    if provider_mode:
+        installed_runtime(tmp_path)
     asset_dir = tmp_path / "assets"
     asset_dir.mkdir()
     manifest, _ = assets_fixture(asset_dir)
@@ -452,7 +472,7 @@ def consumer_records(tmp_path):
     for points in (75, 11):
         model = tmp_path / f"model{points}"
         variants, packages = {}, {}
-        for backend in ("aoti", "tensorrt"):
+        for backend in ("tensorrt",) if provider_mode else ("aoti", "tensorrt"):
             package = model / "backends" / backend
             package.mkdir(parents=True)
             (package / "payload.bin").write_bytes(f"{backend}-{points}".encode())
@@ -469,6 +489,40 @@ def consumer_records(tmp_path):
                     }
                 )
             )
+            if provider_mode:
+                path = package / "model.json"
+                document = json.loads(path.read_text())
+                document["producer"] = {"compute_capability": "9.0", "tf32": False}
+                artifact = document["artifacts"][0]
+                blas = {
+                    "exact_linear",
+                    "exact_gemm",
+                    "exact_slice_bmm",
+                    "exact_deslice_bmm",
+                }
+                artifact["required_operators"] = [
+                    {
+                        "id": "pnmir.tensorrt-"
+                        + ("provider-default-" if name in blas else "")
+                        + name.replace("_", "-"),
+                        "abi": "1",
+                    }
+                    for name in PLUGIN_NAMES
+                ]
+                artifact["correctness_profile"] = {
+                    "name": "provider-default-exact-v1",
+                    "version": 1,
+                    "math_policy": dict(MATH_POLICY),
+                    "plugins": list(PLUGIN_NAMES),
+                    "plugin_libraries": {
+                        name: {
+                            "filename": f"libpnmir_tensorrt_{name}_plugin.so",
+                            "sha256": hashlib.sha256(name.encode()).hexdigest(),
+                        }
+                        for name in PLUGIN_NAMES
+                    },
+                }
+                path.write_text(json.dumps(document))
             variants[backend] = {
                 "package": str(package.relative_to(model)),
                 "files": [
@@ -599,10 +653,13 @@ def test_consumer_rejects_missing_mislabelled_or_corrupt_backend_before_inferenc
         transolver.run_consumers(None, records)
 
 
+@pytest.mark.parametrize("provider_mode", [False, True])
 def test_consumer_runs_cpp_for_both_backends_with_shared_python_reference(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, provider_mode
 ):
-    records = consumer_records(tmp_path)
+    records = consumer_records(tmp_path, provider_mode=provider_mode)
+    prefix = "provider" if provider_mode else "transolver"
+    backends = ("tensorrt",) if provider_mode else ("aoti", "tensorrt")
     assets = records[0]["assets"]
     cases, invocations, prepared, eager, loaded = [], [], [], [], []
     mean, std = np.zeros(4, dtype=np.float32), np.ones(4, dtype=np.float32)
@@ -615,7 +672,7 @@ def test_consumer_runs_cpp_for_both_backends_with_shared_python_reference(
             "standardized_output": standardized,
             "physical_output": reference.decode_surface(standardized, mean, std),
         }
-    monkeypatch.setattr(reference, "configure_determinism", lambda: None)
+    monkeypatch.setattr(reference, "configure_determinism", lambda **kw: None)
     monkeypatch.setattr(
         reference, "load_original_model", lambda path: loaded.append(path) or object()
     )
@@ -681,20 +738,26 @@ def test_consumer_runs_cpp_for_both_backends_with_shared_python_reference(
         return callback()
 
     ctx = SimpleNamespace(
-        root=tmp_path / "run", workflow="physicsnemo-transolver", run=run, case=case
+        root=tmp_path / "run",
+        report={},
+        save=lambda: None,
+        runtime=tmp_path / "sdk/bin/physicsnemo-infer",
+        workflow="physicsnemo-transolver",
+        run=run,
+        case=case,
     )
-    transolver.run_consumers(ctx, records)
+    transolver.run_consumers(ctx, records, provider=provider_mode)
     assert cases == [
-        f"transolver.{backend}.{operation}"
-        for backend in ("aoti", "tensorrt")
+        f"{prefix}.{backend}.{operation}"
+        for backend in backends
         for operation in ("surface75", "surface161", "missing_tail")
     ]
     assert [(backend, count, check) for backend, count, check, _ in invocations] == [
         (backend, count, check)
-        for backend in ("aoti", "tensorrt")
+        for backend in backends
         for count, check in ((75, True), (161, True), (161, False))
     ]
-    assert len({output for _, _, _, output in invocations}) == 6
+    assert len({output for _, _, _, output in invocations}) == 3 * len(backends)
     assert len(loaded) == 1 and prepared == [75, 161] and eager == [75, 161]
 
 
@@ -772,3 +835,46 @@ def test_missing_tail_case_rejects_success_or_published_output_for_each_backend(
     )
     with pytest.raises(ValueError, match="did not reject|published a result"):
         transolver.run_consumers(ctx, records)
+
+
+@pytest.mark.parametrize("values,expected", [([1.000001], [1.0]), ([-0.0], [0.0])])
+def test_provider_parity_rejects_small_drift_and_signed_zero(values, expected):
+    with pytest.raises(ValueError, match="parity failed"):
+        transolver.compare_tensor(
+            np.asarray(values, dtype=np.float32),
+            np.asarray(expected, dtype=np.float32),
+            name="provider",
+            max_abs=0,
+            relative_l2=0,
+            require_bitwise=True,
+        )
+
+
+@pytest.mark.parametrize(
+    "mutation", ["profile", "precision", "operator", "plugin_hash"]
+)
+def test_provider_package_cannot_fall_back_to_ieee_or_other_libraries(
+    tmp_path, mutation
+):
+    from qa.native_inference.provider import verify_package
+
+    record = consumer_records(tmp_path, provider_mode=True)[0]
+    package = Path(record["packages"]["tensorrt"])
+    path = package / "model.json"
+    document = json.loads(path.read_text())
+    artifact = document["artifacts"][0]
+    if mutation == "profile":
+        artifact["correctness_profile"]["name"] = "layout-order-exact-v2"
+    elif mutation == "precision":
+        artifact["correctness_profile"]["math_policy"]["float32_matmul_precision"] = (
+            "highest"
+        )
+    elif mutation == "operator":
+        artifact["required_operators"][0]["id"] = "pnmir.tensorrt-exact-linear"
+    else:
+        artifact["correctness_profile"]["plugin_libraries"]["exact_linear"][
+            "sha256"
+        ] = "0" * 64
+    path.write_text(json.dumps(document))
+    with pytest.raises(ValueError, match="provider"):
+        verify_package(package, tmp_path / "sdk/lib")

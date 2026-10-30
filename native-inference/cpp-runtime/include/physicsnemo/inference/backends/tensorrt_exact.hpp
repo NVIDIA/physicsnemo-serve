@@ -54,6 +54,16 @@ inline constexpr std::string_view kTensorRTExactWeightedBlendOperatorId =
     "pnmir.tensorrt-exact-weighted-blend";
 inline constexpr std::string_view kTensorRTExactWeightedBlendOperatorAbi = "1";
 
+inline constexpr std::string_view kTensorRTProviderDefaultLinearOperatorId =
+    "pnmir.tensorrt-provider-default-exact-linear";
+inline constexpr std::string_view kTensorRTProviderDefaultGemmOperatorId =
+    "pnmir.tensorrt-provider-default-exact-gemm";
+inline constexpr std::string_view kTensorRTProviderDefaultSliceBmmOperatorId =
+    "pnmir.tensorrt-provider-default-exact-slice-bmm";
+inline constexpr std::string_view kTensorRTProviderDefaultDesliceBmmOperatorId =
+    "pnmir.tensorrt-provider-default-exact-deslice-bmm";
+inline constexpr std::string_view kTensorRTProviderDefaultOperatorAbi = "1";
+
 }  // namespace physicsnemo::inference
 
 extern "C" int pnmir_tensorrt_exact_attention_register() noexcept;

@@ -111,6 +111,104 @@ def test_existing_attempt_is_never_overwritten(tmp_path):
     assert sentinel.read_text() == "preserve failed attempt"
 
 
+def test_provider_preflight_rejects_other_gpu_architectures(tmp_path, monkeypatch):
+    args = arguments(tmp_path)
+    args.profile = "provider"
+    args.source_metadata = tmp_path / "identity.json"
+    args.source_metadata.write_text(
+        json.dumps({"source_sha": args.expected_source_sha})
+    )
+    torch = SimpleNamespace(
+        cuda=SimpleNamespace(
+            is_available=lambda: True,
+            device_count=lambda: 1,
+            get_device_capability=lambda index: (8, 9),
+        )
+    )
+    monkeypatch.setitem(sys.modules, "torch", torch)
+    monkeypatch.setitem(sys.modules, "tensorrt", SimpleNamespace())
+    monkeypatch.setattr(run_job.shutil, "which", lambda program: program)
+    with pytest.raises(ValueError, match="H100/sm90"):
+        run_job.preflight(run_job.Context(args))
+
+
+def test_provider_qualification_treats_math_skip_as_failure(tmp_path, monkeypatch):
+    from qa.native_inference import provider
+
+    args = arguments(tmp_path)
+    args.profile = "provider"
+    args.output.mkdir()
+    ctx = run_job.Context(args)
+    run = ctx.run
+
+    def skip_math(name, command):
+        if name == "provider-policy":
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                json.dumps({"provider_creators": 4, "invalid_policy_rejected": True}),
+            )
+        assert name == "provider-math"
+        return run(name, [sys.executable, "-c", "raise SystemExit(77)"])
+
+    monkeypatch.setattr(ctx, "run", skip_math)
+    with pytest.raises(RuntimeError, match="provider-math failed with exit 77"):
+        provider.qualify_plugins(ctx)
+    cases = {case["name"]: case["status"] for case in ctx.report["cases"]}
+    assert cases == {"provider.policy": "passed", "provider.math": "failed"}
+
+
+def test_provider_job_executes_both_ieee_and_provider_inventory(tmp_path, monkeypatch):
+    from qa.native_inference import provider, transolver
+
+    args = arguments(tmp_path)
+    args.profile = "provider"
+    monkeypatch.setattr(run_job, "preflight", lambda ctx: None)
+
+    def affine_build(ctx):
+        names = [
+            n
+            for n in ctx.report["expected_cases"]
+            if n.startswith("affine.") and len(n.split(".")) == 2
+        ]
+        for name in names:
+            ctx.case(name, lambda: None)
+        return []
+
+    def affine_consume(ctx, records):
+        for name in ctx.report["expected_cases"]:
+            if name.startswith("affine.") and len(name.split(".")) > 2:
+                ctx.case(name, lambda: None)
+
+    def prepare(ctx, assets, *, provider=False):
+        prefix = "provider" if provider else "transolver"
+        for operation in ("assets", "import", "build75", "build11"):
+            ctx.case(f"{prefix}.{operation}", lambda: None)
+        return [{"point_count": n, "qualification": prefix} for n in (75, 11)]
+
+    def consume(ctx, records, *, provider=False):
+        prefix = "provider" if provider else "transolver"
+        assert {r["qualification"] for r in records} == {prefix}
+        for backend in ("tensorrt",) if provider else ("aoti", "tensorrt"):
+            for operation in ("surface75", "surface161", "missing_tail"):
+                ctx.case(f"{prefix}.{backend}.{operation}", lambda: None)
+
+    def plugins(ctx):
+        ctx.case("provider.policy", lambda: None)
+        ctx.case("provider.math", lambda: None)
+
+    monkeypatch.setattr(run_job, "build_affine", affine_build)
+    monkeypatch.setattr(run_job, "consume_affine", affine_consume)
+    monkeypatch.setattr(run_job, "handoff_models", lambda ctx, records: records)
+    monkeypatch.setattr(transolver, "prepare_and_build", prepare)
+    monkeypatch.setattr(transolver, "run_consumers", consume)
+    monkeypatch.setattr(provider, "qualify_plugins", plugins)
+    assert run_job.execute(args) == 0
+    report = json.loads((args.output / "summary.json").read_text())
+    assert len(report["cases"]) == 42
+    assert all(case["status"] == "passed" for case in report["cases"])
+
+
 def test_full_profile_without_manifest_reaches_job_execution(tmp_path, monkeypatch):
     args = arguments(tmp_path)
     monkeypatch.setattr(
@@ -160,7 +258,8 @@ def test_asset_download_failure_is_recorded_and_blocks_consumers(tmp_path, monke
 def test_subprocess_timeout_preserves_logs(tmp_path):
     args = arguments(tmp_path)
     args.output.mkdir()
-    args.command_timeout = 0.05
+    # Allow Python startup to finish before timing out the long-running child.
+    args.command_timeout = 1.0
     ctx = run_job.Context(args)
     with pytest.raises(subprocess.TimeoutExpired):
         ctx.run(

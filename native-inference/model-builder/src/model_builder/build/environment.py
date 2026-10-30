@@ -10,6 +10,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+from types import SimpleNamespace
 
 from . import authoring_config, cli
 
@@ -17,6 +18,7 @@ from . import authoring_config, cli
 # Execute inside the newly installed environment, never in the frontend Python.
 _DEPENDENCY_PROBE = """
 import importlib.metadata as metadata
+import re
 import sys
 import model_builder.build.cli
 import torch
@@ -45,7 +47,8 @@ if sys.argv[1]:
     import onnx
     import onnxscript
     import tensorrt
-    if sys.argv[2] and tensorrt.__version__.split('.')[:3] != sys.argv[2].split('.')[:3]:
+    if sys.argv[2] and not re.fullmatch(
+            re.escape(sys.argv[2]) + r'(?:[.]post[0-9]+)?', tensorrt.__version__):
         raise RuntimeError('TensorRT Python version ' + tensorrt.__version__ +
                            ' does not match the C++ SDK ' + sys.argv[2])
     print('TensorRT:', tensorrt.__version__, 'CUDA package:', sys.argv[1])
@@ -98,12 +101,14 @@ def _resolve(args):
     if python is None:
         raise ValueError(f"Python executable was not found: {args.python}")
     python = _executable(python, "--python")
-    project = authoring_config.load(args.build) if args.build else None
-    backends = list(
-        dict.fromkeys(
-            args.backend or (project["effective"]["backends"] if project else ["aoti"])
-        )
+    backends = list(dict.fromkeys(args.backend or []))
+    project = (
+        authoring_config.load(args.build, SimpleNamespace(backend=backends))
+        if args.build
+        else None
     )
+    if not backends:
+        backends = list(project["effective"]["backends"]) if project else ["aoti"]
     requirements = [path.expanduser().absolute() for path in args.requirements]
     for path in requirements:
         if not path.is_file():
@@ -275,7 +280,9 @@ def command(args, result):
         if "tensorrt" in backends:
             # The generic TensorRT extra selects upstream's default CUDA major.
             # Select a variant here so a CUDA 12 SDK never silently gets cu13.
-            version = f"=={trt_version}" if trt_version else ">=10"
+            # Linux bindings may carry a .postN packaging revision. The
+            # installed probe below still requires the exact native build.
+            version = f"=={trt_version}.*" if trt_version else ">=10"
             install.extend(
                 [
                     "onnx>=1.16",

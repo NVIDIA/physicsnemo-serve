@@ -26,7 +26,10 @@ from .completion import (
 from .tensors import tensor_contracts
 from model_builder.export.aoti_profiles import validate_aoti_profile
 from model_builder.export.aoti_options import validate_aoti_options
-from model_builder.export.tensorrt_profiles import validate_tensorrt_profile
+from model_builder.export.tensorrt_profiles import (
+    validate_tensorrt_profile,
+    validate_profile_backends,
+)
 
 
 class UsageError(ValueError):
@@ -364,6 +367,10 @@ def _resolve_selection(args) -> dict:
     except (OSError, ValueError) as exc:
         raise UsageError(str(exc)) from exc
     backends = list(dict.fromkeys(args.backend or [recipe["default_backend"]]))
+    try:
+        validate_profile_backends(recipe.get("tensorrt_profile", "baseline"), backends)
+    except ValueError as exc:
+        raise UsageError(str(exc)) from exc
     unsupported = [x for x in backends if x not in recipe["supported_backends"]]
     if unsupported:
         raise UsageError(

@@ -4,17 +4,17 @@ on:
   workflow_dispatch:
     inputs:
       image:
-        description: "Published native QA image, registry/repository@sha256:<digest>"
-        required: true
+        description: "Published native QA image digest; leave empty to build from source_sha"
+        required: false
         type: string
       source_sha:
         description: "Full Git SHA baked into the QA image"
         required: true
         type: string
       profile:
-        description: "Smoke, or smoke plus real Transolver on both AOTI and TensorRT"
+        description: "Smoke, full IEEE Transolver, or full plus H100 provider parity"
         type: choice
-        options: [smoke, full]
+        options: [smoke, full, provider]
         default: smoke
       resource_shape:
         description: "Available Lepton GPU resource shape matching the image architecture"
@@ -39,8 +39,54 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  prepare-image:
+    name: Resolve native QA image
+    runs-on: linux-amd64-cpu16
+    timeout-minutes: 90
+    outputs:
+      image: ${{ steps.image.outputs.image }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_sha }}
+      - name: Build or select native QA image
+        id: image
+        env:
+          NATIVE_QA_IMAGE: ${{ inputs.image }}
+          NATIVE_QA_SOURCE_SHA: ${{ inputs.source_sha }}
+          NATIVE_QA_REPOSITORY: ${{ vars.PNMS_QA_REPOSITORY }}
+          NGC_REGISTRY: ${{ vars.NGC_REGISTRY }}
+          NGC_ORG: ${{ secrets.NGC_ORG }}
+          NGC_IMAGE: ${{ secrets.NGC_IMAGE }}
+          NGC_REGISTRY_PASSWORD: ${{ secrets.NGC_REGISTRY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          [[ "$NATIVE_QA_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$(git rev-parse HEAD)" == "$NATIVE_QA_SOURCE_SHA" ]]
+          if [[ -n "$NATIVE_QA_IMAGE" ]]; then
+            [[ "$NATIVE_QA_IMAGE" =~ ^[^[:space:]]+@sha256:[0-9a-f]{64}$ ]]
+            echo "image=$NATIVE_QA_IMAGE" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          printf '%s' "$NGC_REGISTRY_PASSWORD" | docker login "$NGC_REGISTRY" -u '$oauthtoken' --password-stdin
+          docker buildx create --use
+          repository="${NATIVE_QA_REPOSITORY:-${NGC_REGISTRY}/${NGC_ORG}/${NGC_IMAGE}}"
+          image="${repository}:native-qa-${NATIVE_QA_SOURCE_SHA}"
+          metadata="$RUNNER_TEMP/native-qa-image.json"
+          docker buildx build --platform linux/amd64 \
+            --file native-inference/model-builder/images/Dockerfile.builder \
+            --target native-qa \
+            --build-arg SOURCE_SHA="$NATIVE_QA_SOURCE_SHA" \
+            --build-arg PNMIR_ENABLE_TENSORRT=ON \
+            --build-arg CMAKE_CUDA_ARCHITECTURES=90 \
+            --metadata-file "$metadata" --tag "$image" --push .
+          digest="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["containerimage.digest"])' "$metadata")"
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          echo "image=${repository}@${digest}" >> "$GITHUB_OUTPUT"
+
   qualify:
     name: Native Inference QA (${{ inputs.profile }})
+    needs: prepare-image
     runs-on: linux-amd64-cpu4
     timeout-minutes: 150
     steps:
@@ -54,7 +100,7 @@ jobs:
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
       - name: Run native inference QA
         env:
-          NATIVE_QA_IMAGE: ${{ inputs.image }}
+          NATIVE_QA_IMAGE: ${{ needs.prepare-image.outputs.image }}
           NATIVE_QA_SOURCE_SHA: ${{ inputs.source_sha }}
           NATIVE_QA_PROFILE: ${{ inputs.profile }}
           NATIVE_QA_RESOURCE_SHAPE: ${{ inputs.resource_shape }}

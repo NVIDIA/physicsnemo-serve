@@ -410,6 +410,20 @@ if(PNMIR_ENABLE_TENSORRT)
     pnmir_tensorrt_device_runner PROPERTIES SKIP_RETURN_CODE 77
   )
   if(PNMIR_ENABLE_TENSORRT_EXACT)
+    # Provider math is qualified on Linux H100. Other architectures retain
+    # the generic exact-plugin tests; Lepton invokes these checks as mandatory.
+    if(NOT WIN32 AND "90" IN_LIST CMAKE_CUDA_ARCHITECTURES)
+      add_test(NAME pnmir_tensorrt_provider_policy
+        COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_SOURCE_DIR}/tests/tensorrt_provider_policy.py
+          --plugin-root $<TARGET_FILE_DIR:pnmir_tensorrt_exact_linear_plugin>)
+      add_test(NAME pnmir_tensorrt_provider_math
+        COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_SOURCE_DIR}/tests/tensorrt_provider_math.py
+          --plugin-root $<TARGET_FILE_DIR:pnmir_tensorrt_exact_linear_plugin>
+          --output ${CMAKE_CURRENT_BINARY_DIR}/tensorrt-provider-math --unique-output)
+      set_tests_properties(pnmir_tensorrt_provider_math PROPERTIES SKIP_RETURN_CODE 77)
+    endif()
     add_executable(pnmir_tensorrt_exact_dimensions_test
       tests/tensorrt_exact_dimensions_test.cpp)
     target_include_directories(pnmir_tensorrt_exact_dimensions_test SYSTEM PRIVATE

@@ -13,7 +13,7 @@ SUMMARY_END = "NATIVE_INFERENCE_QA_SUMMARY_END"
 
 
 def expected_cases(profile):
-    if profile not in ("smoke", "full"):
+    if profile not in ("smoke", "full", "provider"):
         raise ValueError(f"unknown QA profile: {profile}")
     return (
         [
@@ -43,7 +43,23 @@ def expected_cases(profile):
                 for backend in ("aoti", "tensorrt")
                 for operation in ("surface75", "surface161", "missing_tail")
             ]
-            if profile == "full"
+            if profile in ("full", "provider")
+            else []
+        )
+        + (
+            [
+                "provider.policy",
+                "provider.math",
+                "provider.assets",
+                "provider.import",
+                "provider.build75",
+                "provider.build11",
+            ]
+            + [
+                f"provider.tensorrt.{operation}"
+                for operation in ("surface75", "surface161", "missing_tail")
+            ]
+            if profile == "provider"
             else []
         )
     )

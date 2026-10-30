@@ -40,6 +40,36 @@ def test_complete_summary_passes():
     validate(summary())
 
 
+def test_provider_profile_requires_ieee_regressions_and_all_provider_cases():
+    names = expected_cases("provider")
+    assert set(expected_cases("full")) < set(names)
+    assert len(names) == len(set(names)) == 42
+    assert set(names) - set(expected_cases("full")) == {
+        "provider.policy",
+        "provider.math",
+        "provider.assets",
+        "provider.import",
+        "provider.build75",
+        "provider.build11",
+        "provider.tensorrt.surface75",
+        "provider.tensorrt.surface161",
+        "provider.tensorrt.missing_tail",
+    }
+    value = summary()
+    value.update(
+        profile="provider",
+        expected_cases=names,
+        cases=[{"name": n, "status": "passed"} for n in names],
+    )
+    identity = {
+        k: value[k] for k in ("run_id", "source_sha", "image_digest", "profile")
+    }
+    validate_summary(value, **identity)
+    value["cases"][-1]["status"] = "skipped"
+    with pytest.raises(ValueError, match="every required case"):
+        validate_summary(value, **identity)
+
+
 @pytest.mark.parametrize(
     "mutation",
     [

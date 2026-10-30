@@ -13,6 +13,23 @@ pub async fn healthz() -> &'static str {
 /// Readiness probe - checks Redis connectivity.
 /// Returns 200 when the server can accept traffic, 503 otherwise.
 pub async fn readyz(State(state): State<Arc<AppState>>) -> (StatusCode, Json<Value>) {
+    if let Some(expected) = &state.native_runtime {
+        let native = match expected {
+            Ok(expected) => crate::native_readiness::probe(&state, expected).await,
+            Err(error) => crate::native_readiness::unavailable(error.clone()),
+        };
+        let ready = native["ready"] == true;
+        return (
+            if ready {
+                StatusCode::OK
+            } else {
+                StatusCode::SERVICE_UNAVAILABLE
+            },
+            Json(
+                json!({"status":if ready {"ready"} else {"not ready"}, "ready":ready,"native":native}),
+            ),
+        );
+    }
     let service_lock = state.redis_service.read().await;
     match service_lock.as_ref() {
         Some(service) => {

@@ -6,6 +6,7 @@
 pub mod config;
 pub mod engine;
 pub mod health;
+pub mod identity;
 pub mod metrics;
 pub mod retry_dlq;
 pub mod roles;

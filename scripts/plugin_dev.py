@@ -356,11 +356,13 @@ def validate_plugin(plugin_root: Path) -> dict[str, Any]:
     )
 
     _validate_readiness_config(manifest)
-    validate_batch_execution_contract(module, workflow_id)
-
-    phases = plugin_phases_from_manifest(manifest)
-    for phase in phases:
-        resolve_phase_hook(module, workflow_id, phase)
+    if manifest["runtime"]["kind"] == "cpp":
+        phases = ["execute"]
+    else:
+        validate_batch_execution_contract(module, workflow_id)
+        phases = plugin_phases_from_manifest(manifest)
+        for phase in phases:
+            resolve_phase_hook(module, workflow_id, phase)
 
     _validate_example_request_fixture(plugin_root, manifest, request_schemas)
     _validate_expected_result_fixture(plugin_root, result_schema)
@@ -387,6 +389,18 @@ def check_plugin(
 
     environment = check_env_plugin(plugin_root)
     environment.pop("_exit_code", None)
+
+    if load_plugin_manifest(plugin_root / "plugin.yaml")["runtime"]["kind"] == "cpp":
+        if through_phase not in (None, "execute"):
+            raise ValueError("cpp runtime only defines native execution")
+        return {
+            "status": "ready" if environment["status"] == "ready" else "not_ready",
+            "validation": validation,
+            "environment": environment,
+            "example_run": None,
+            "execution": "requires_native_deployment",
+            "_exit_code": 0 if environment["status"] == "ready" else 1,
+        }
 
     example_phase = through_phase
     status = "ready"
@@ -426,6 +440,10 @@ def run_example_plugin(
     through_phase: str | None = None,
 ) -> dict[str, Any]:
     manifest, workflow_id, module = _load_plugin_contract(plugin_root)
+    if manifest["runtime"]["kind"] == "cpp":
+        raise ValueError(
+            "Native examples require the packaged native-worker deployment; submit the example through its REST API"
+        )
 
     plugin_phases = plugin_phases_from_manifest(manifest)
     if through_phase is not None and through_phase not in plugin_phases:
@@ -522,6 +540,10 @@ def run_local_plugin(
     bootstrap_python_bindings: bool,
     dry_run: bool,
 ) -> dict[str, Any]:
+    if load_plugin_manifest(plugin_root / "plugin.yaml")["runtime"]["kind"] == "cpp":
+        raise ValueError(
+            "Native execution requires the packaged native-worker deployment"
+        )
     validate_plugin(plugin_root)
 
     environment = check_env_plugin(plugin_root)
@@ -954,6 +976,10 @@ def build_run_local_plan(
     redis_port: int,
 ) -> dict[str, Any]:
     manifest, workflow_id, _module = _load_plugin_contract(plugin_root)
+    if manifest["runtime"]["kind"] == "cpp":
+        raise ValueError(
+            "Native execution requires the packaged native-worker deployment"
+        )
     execute_profiles = _derive_run_local_execute_worker_profiles(plugin_root, manifest)
     workspace_root = workspace or (
         plugin_root
@@ -1996,6 +2022,9 @@ def _load_plugin_contract(plugin_root: Path) -> tuple[dict[str, Any], str, Any]:
             f"Plugin workflow '{workflow_id}' is missing runtime.entrypoint"
         )
 
+    if runtime.get("kind") == "cpp":
+        return manifest, workflow_id, None
+
     entrypoint_path = plugin_root / entrypoint_name
     module = load_plugin_module(
         workflow_id, entrypoint_path, module_prefix="physicsnemo_serve_plugin_dev"
@@ -2315,6 +2344,19 @@ def _load_schema_documents(
     derived_request_schema = None
     derived_result_schema = None
     derived_form_schema = None
+    if manifest.get("runtime", {}).get("kind") == "cpp":
+        if any(
+            content_type not in request_schemas
+            for content_type in ingress.get("content_types", [])
+        ):
+            raise ValueError(
+                "cpp runtime requires explicit request schemas for every ingress content type"
+            )
+        if (
+            not outputs.get("result_schema")
+            and outputs.get("result_schema_inline") is None
+        ):
+            raise ValueError("cpp runtime requires an explicit result schema")
     if not request_schemas or (
         outputs.get("result_schema") is None
         and outputs.get("result_schema_inline") is None

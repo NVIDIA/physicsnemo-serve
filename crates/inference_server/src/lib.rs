@@ -14,6 +14,7 @@ pub mod artifact_store;
 pub mod config;
 pub mod handlers;
 pub mod metrics;
+pub mod native_readiness;
 pub mod openapi;
 pub mod plugin_registry;
 pub mod redis_ops;

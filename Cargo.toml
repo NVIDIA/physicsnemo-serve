@@ -8,6 +8,7 @@ members = [
     "crates/inference_server",
     "crates/physicsnemo-serve-cmd",
     "crates/worker-runtime",
+    "crates/native-worker",
 ]
 resolver = "2"
 

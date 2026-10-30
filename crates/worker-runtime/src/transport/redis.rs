@@ -155,6 +155,16 @@ impl RedisTransport {
                 || error.to_string().contains(code)
         })
     }
+
+    fn is_attempt_ownership_error(error: &scicomp_rq::QueueError) -> bool {
+        match error {
+            scicomp_rq::QueueError::Redis(error) => {
+                Self::is_source_ownership_error(error)
+                    || error.to_string().contains("ATTEMPT_OWNER_MISMATCH")
+            }
+            _ => false,
+        }
+    }
 }
 
 impl MessageSink for RedisTransport {
@@ -310,6 +320,61 @@ impl MessageSink for RedisTransport {
         outputs: &'a [Output],
     ) -> BoxFuture<'a, Result<Vec<String>>> {
         self.forward_many_from(std::slice::from_ref(msg), outputs)
+    }
+
+    fn begin_attempt_for_consumer<'a>(
+        &'a self,
+        msg: &'a Message,
+        attempt_token: &'a str,
+        consumer: &'a str,
+    ) -> BoxFuture<'a, Result<Option<Vec<String>>>> {
+        Box::pin(async move {
+            self.qm
+                .begin_attempt(msg, consumer, attempt_token)
+                .await
+                .map_err(|error| {
+                    if Self::is_attempt_ownership_error(&error) {
+                        message_ownership_lost(error.to_string())
+                    } else {
+                        anyhow!(error).context("redis transport: failed native attempt claim")
+                    }
+                })
+        })
+    }
+
+    fn complete_attempt_for_consumer<'a>(
+        &'a self,
+        msg: &'a Message,
+        outputs: &'a [Output],
+        attempt_token: &'a str,
+        consumer: &'a str,
+    ) -> BoxFuture<'a, Result<Vec<String>>> {
+        Box::pin(async move {
+            let prefixed: Vec<Output> = outputs
+                .iter()
+                .map(|output| {
+                    let mut prefixed =
+                        Output::new(self.stream_key(output.stream()).as_str(), output.payload());
+                    if let Some(run_id) = output.run_id() {
+                        prefixed = prefixed.with_run_id(run_id);
+                    }
+                    if let Some(stage) = output.stage() {
+                        prefixed = prefixed.with_stage(stage);
+                    }
+                    prefixed
+                })
+                .collect();
+            self.qm
+                .complete_attempt(msg, &prefixed, consumer, attempt_token)
+                .await
+                .map_err(|error| {
+                    if Self::is_attempt_ownership_error(&error) {
+                        message_ownership_lost(error.to_string())
+                    } else {
+                        anyhow!(error).context("redis transport: failed native attempt completion")
+                    }
+                })
+        })
     }
 
     fn forward_many_from<'a>(

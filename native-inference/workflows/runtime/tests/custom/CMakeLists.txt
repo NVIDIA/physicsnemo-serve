@@ -1,0 +1,5 @@
+cmake_minimum_required(VERSION 3.24)
+project(WorkflowAuthorFixture LANGUAGES CXX)
+add_library(pnms_test_custom STATIC workflow.cpp)
+set_target_properties(pnms_test_custom PROPERTIES POSITION_INDEPENDENT_CODE ON)
+target_link_libraries(pnms_test_custom PRIVATE PhysicsNeMoWorkflow::authoring nlohmann_json::nlohmann_json)

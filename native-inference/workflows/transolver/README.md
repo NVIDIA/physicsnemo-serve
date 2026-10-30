@@ -63,6 +63,11 @@ ctest --test-dir "$DEMO_ROOT/workflow-build" --output-on-failure
 ```
 
 `90` targets the H100; select the architecture of your build/deployment GPU.
+The persistent host is a shared library. Its SDK static archives must be built
+with position-independent code; the current SDK CMake enables this for its
+libraries. For an older SDK checkout, configure it with
+`-DCMAKE_POSITION_INDEPENDENT_CODE=ON` and rebuild before linking this workflow.
+
 The example is a standalone CMake consumer of
 `PhysicsNeMoInference::runtime`, `PhysicsNeMoInference::aoti` and
 `PhysicsNeMoInference::tensorrt`.
@@ -216,3 +221,129 @@ These are bounded real-data and coarsened-geometry checks. Original
 full-resolution CFD-case execution and TensorRT were not requalified for this
 port. Generated models, logs and parity evidence stay
 outside the source tree.
+
+## Embed a persistent workflow host
+
+`transolver_workflow/runner.hpp` exposes a metadata-only API for an embedding application.
+Construct, run and destroy `Runner` on the application's owning native thread.
+Its constructor loads the selected SDK backend, all full/tail model packages,
+and normalization statistics once. Request tensors and output files belong to
+individual calls; an internal mutex serializes calls on one host.
+
+```cpp
+#include <transolver_workflow/runner.hpp>
+
+transolver_workflow::RunnerConfig config;
+config.packages = {"/opt/workflow/models/full/backends/aoti",
+                   "/opt/workflow/models/tail/backends/aoti"};
+config.stats_path = "/opt/workflow/global_stats.json";
+config.block_size = 60000;
+config.startup_fixture_path = "/opt/workflow/startup/fixtures.json";
+transolver_workflow::Runner host(config);
+auto startup = host.self_test(transolver_workflow::CancellationToken{});
+
+transolver_workflow::RunnerRequest request;
+request.mesh_path = "/inputs/run_1/boundary_1.vtp";
+request.stl_path = "/inputs/run_1/drivaer_1.stl";
+request.permutation_seed = 1615895419752914611LL; // provider seed (42, run_1)
+request.physical_output = "/outputs/attempt-unique/physical.f32";
+request.metadata_path = "/outputs/attempt-unique/metadata.json";
+transolver_workflow::CancellationToken cancellation;
+auto result = host.run(request, cancellation);
+```
+
+The caller stages and verifies inputs and allocates attempt-specific output
+paths. The runner preflights every required block shape before inference, and
+rejects unsupported tails, including a one-point tail. It never pads, drops or
+regroups points. This does not make fixed packages compatible with arbitrary new
+meshes: every required tail needs a qualified package or a deliberately qualified
+dynamic package.
+
+`RunnerConfig.math_profile` defaults to `provider-default-v1`, which preserves
+LibTorch's initial process math settings. The CLI explicitly uses
+`strict-native-v1` to retain its historical deterministic settings. Mixing math
+profiles in one process is rejected. The runner restores the selected process
+settings after SDK model loading, including failed loads: the SDK's loading
+policy cannot silently replace the workflow's inference policy. Model export
+still uses its separately qualified compiler precision profile; runtime flags
+alone do not establish the precision of compiled kernels.
+
+Both profiles limit Torch intra/inter-op, OpenMP, MKL and VTK CPU pools to one
+thread, independently of CUDA math settings. Metadata records these CPU limits
+and the effective math flags;
+provider/native benchmark parity requires those flags to agree in the actual
+qualified image. The default alone does not establish parity.
+
+Cancellation is cooperative between preprocessing and inference blocks. A token
+may be cancelled from another thread, or constructed with a callback that reads
+an external atomic cancellation flag whose lifetime covers `run()`. Cancellation
+does not preempt an active CUDA kernel. The caller must retain the host and its
+execution gate until the native call returns, and decide how to discard outputs
+from cancelled requests.
+
+`self_test()` executes every resident full/tail model before the caller reports
+availability. A configured `startup_fixture_path` enables numerical admission:
+raw little-endian FP32 inputs and expected outputs come from independent
+Builder/Python parity fixtures. No mesh download or full 8.8-million-cell
+workflow is needed at startup. The file has this schema, with one entry for
+each distinct resident package point count:
+
+```json
+{
+  "schema_version": 1,
+  "models": [{
+    "point_count": 60000,
+    "inputs": {
+      "fx": {"path": "60000/fx.bin", "shape": [1,60000,2]},
+      "embedding": {"path": "60000/embedding.bin", "shape": [1,60000,6]}
+    },
+    "expected_output": {"path": "60000/output.bin", "shape": [1,60000,4]},
+    "rtol": 0.00001,
+    "atol": 0.000001
+  }]
+}
+```
+
+Add the corresponding 8095-point entry for the qualified full `run_1` package
+set. Tensor paths are relative to this file and cannot escape its directory or
+traverse symlinks. Shape, exact bytes, finite values and every numerical output
+are checked. A mismatch throws and must prevent readiness. The deployment
+inventory must hash these immutable fixtures together with the model packages.
+The report uses `policy: expected-fp32-v1` and records each package's numerical
+errors and tolerances. Do not replace expected values with candidate SDK outputs
+or silently widen tolerances when qualification fails.
+
+An empty fixture path retains an explicitly labelled legacy smoke check:
+`policy: finite-static-inputs-v1` executes fixed finite synthetic inputs through
+each model and verifies output shape/dtype/finiteness. It proves model execution,
+not numerical/scientific parity. The standalone CLI's historical invocation is
+unchanged. New production release configuration should supply the authored
+golden fixture inventory. The reusable [tensor/custom workflow host](../runtime/README.md)
+always requires authored numerical fixtures for every alias.
+
+`dump_input_dir` additionally writes `fx.f32`, `embedding.f32`,
+`permutation.i64` and `source_cell_ids.i64` for independent parity diagnostics.
+Field outputs remain little-endian FP32 rows in source mesh order. Metadata
+includes exact block boundaries, effective seed, resident session count, one-time
+initialization duration and request timings. `inference_ms` includes gathering,
+execution, physical decoding and CPU restoration; it is not a kernel-only timer.
+
+CPU-only request-contract tests do not need Torch, CUDA, VTK or Warp:
+
+```bash
+cmake -S native-inference/workflows/transolver/tests/cpu -B /tmp/transolver-contract
+cmake --build /tmp/transolver-contract
+ctest --test-dir /tmp/transolver-contract --output-on-failure
+```
+
+The full workflow CMake build also creates `physicsnemo-transolver-runner`. Its normal
+CTest invocation checks early validation and cancellation-token behavior without
+executing a model. To qualify resident reuse on the authorized GPU environment,
+run `physicsnemo-transolver-runner fixture.json` with an owned copy of packages and
+statistics. The fixture contains `packages`, `stats_path`, `block_size`,
+`mesh_path`, `stl_path`, `point_limit`, `output_dir` and optional
+`permutation_seed`/`math_profile`. This mode executes the same request twice,
+temporarily hides the copied package manifests and statistics between calls,
+compares the physical fields, and checks that a cancelled request publishes no
+fields. It restores the manifests and statistics on success and failure. Use a distinct fixture/output directory per
+run; this is a component residency check, separate from full CFD parity.

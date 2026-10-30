@@ -156,6 +156,13 @@ jobs:
           set -euo pipefail
           python3 -S -m unittest discover -s native-inference/workflows/transolver/tests -p 'test_cli_output_paths.py' -v \
             2>&1 | tee "$RUNNER_TEMP/inference-cpu-evidence/workflow-output-tests.log"
+      - name: Test native CFD seeds and exact block plans without CUDA
+        run: |
+          set -euo pipefail
+          cmake -S native-inference/workflows/transolver/tests/cpu -B "$RUNNER_TEMP/transolver-contract"
+          cmake --build "$RUNNER_TEMP/transolver-contract" --parallel 2
+          ctest --test-dir "$RUNNER_TEMP/transolver-contract" --output-on-failure --no-tests=error \
+            2>&1 | tee "$RUNNER_TEMP/inference-cpu-evidence/transolver-contract-tests.log"
       - name: Prepare isolated exact graph test environment
         run: |
           python3 -m venv "$RUNNER_TEMP/inference-graph-venv"
@@ -201,6 +208,32 @@ jobs:
           cmake --build "$RUNNER_TEMP/inference-core-build" --parallel 4
           ctest --test-dir "$RUNNER_TEMP/inference-core-build" --output-on-failure --no-tests=error \
             2>&1 | tee "$RUNNER_TEMP/inference-cpu-evidence/core-sdk-tests.log"
+      - name: Test reusable native tensor and custom workflow host on CPU
+        run: |
+          set -euo pipefail
+          cmake --install "$RUNNER_TEMP/inference-core-build" --prefix "$RUNNER_TEMP/inference-sdk"
+          cmake -S native-inference/workflows/runtime -B "$RUNNER_TEMP/workflow-host-build" \
+            -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON \
+            -DCMAKE_PREFIX_PATH="$RUNNER_TEMP/inference-sdk" \
+            -DPNMS_CUSTOM_WORKFLOW_SOURCE_DIR="$GITHUB_WORKSPACE/native-inference/workflows/runtime/tests/custom" \
+            -DPNMS_CUSTOM_WORKFLOW_TARGET=pnms_test_custom
+          cmake --build "$RUNNER_TEMP/workflow-host-build" --parallel 4
+          ctest --test-dir "$RUNNER_TEMP/workflow-host-build" --output-on-failure --no-tests=error \
+            2>&1 | tee "$RUNNER_TEMP/inference-cpu-evidence/workflow-host-tests.log"
+      - name: Test installed workflow consumer and standalone runner
+        run: |
+          set -euo pipefail
+          cmake --install "$RUNNER_TEMP/workflow-host-build" --prefix "$RUNNER_TEMP/workflow-host"
+          cmake -S native-inference/workflows/runtime/tests/install_consumer \
+            -B "$RUNNER_TEMP/workflow-consumer-build" \
+            -DCMAKE_PREFIX_PATH="$RUNNER_TEMP/workflow-host;$RUNNER_TEMP/inference-sdk"
+          cmake --build "$RUNNER_TEMP/workflow-consumer-build" --parallel 2
+          ctest --test-dir "$RUNNER_TEMP/workflow-consumer-build" --output-on-failure --no-tests=error \
+            2>&1 | tee "$RUNNER_TEMP/inference-cpu-evidence/workflow-consumer-tests.log"
+          python3 -S native-inference/workflows/runtime/tests/cli_test.py \
+            --runner "$RUNNER_TEMP/workflow-host/bin/pnms-native-run" \
+            --config "$RUNNER_TEMP/workflow-consumer-build/config.json" -v \
+            2>&1 | tee "$RUNNER_TEMP/inference-cpu-evidence/workflow-cli-tests.log"
       - name: Prepare ONNX Runtime CPU SDK
         run: |
           set -euo pipefail

@@ -128,6 +128,9 @@ elseif(MSVC)
   target_compile_options(pnmir PRIVATE /W4 /WX)
 endif()
 
+# Static SDK archives can be embedded in customer shared workflow libraries.
+set_property(TARGET pnmir PROPERTY POSITION_INDEPENDENT_CODE ON)
+
 add_executable(pnmir_cli app/main.cpp)
 set_target_properties(pnmir_cli PROPERTIES OUTPUT_NAME physicsnemo-infer EXPORT_NAME cli)
 target_link_libraries(pnmir_cli PRIVATE nlohmann_json::nlohmann_json)
@@ -192,6 +195,7 @@ if(PNMIR_ENABLE_AOTI)
   )
 
   add_library(pnmir_aoti src/aoti_backend.cpp)
+  set_property(TARGET pnmir_aoti PROPERTY POSITION_INDEPENDENT_CODE ON)
   add_library(PhysicsNeMoInference::aoti ALIAS pnmir_aoti)
   set_target_properties(pnmir_aoti PROPERTIES OUTPUT_NAME physicsnemo_inference_aoti EXPORT_NAME aoti)
   target_include_directories(pnmir_aoti
@@ -261,6 +265,7 @@ if(PNMIR_ENABLE_ONNXRUNTIME)
   )
 
   add_library(pnmir_onnxruntime src/onnxruntime_backend.cpp)
+  set_property(TARGET pnmir_onnxruntime PROPERTY POSITION_INDEPENDENT_CODE ON)
   add_library(PhysicsNeMoInference::onnxruntime ALIAS pnmir_onnxruntime)
   set_target_properties(pnmir_onnxruntime PROPERTIES OUTPUT_NAME physicsnemo_inference_onnxruntime EXPORT_NAME onnxruntime)
   target_include_directories(pnmir_onnxruntime
@@ -327,6 +332,7 @@ if(PNMIR_ENABLE_TENSORRT)
   )
 
   add_library(pnmir_tensorrt src/tensorrt/tensorrt_backend.cpp)
+  set_property(TARGET pnmir_tensorrt PROPERTY POSITION_INDEPENDENT_CODE ON)
   add_library(PhysicsNeMoInference::tensorrt ALIAS pnmir_tensorrt)
   set_target_properties(pnmir_tensorrt PROPERTIES OUTPUT_NAME physicsnemo_inference_tensorrt EXPORT_NAME tensorrt)
   target_include_directories(pnmir_tensorrt

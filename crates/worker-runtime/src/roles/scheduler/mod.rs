@@ -648,6 +648,12 @@ impl SchedulerRole {
                 );
                 return Ok(ScheduleDecision::Blocked);
             }
+            if self.reservations.tracked_worker_count().await == 0 {
+                // A draining or absent native generation is a temporary restart
+                // gap. Reject malformed resource profiles before retaining work.
+                reservation::resolve_resource_config(&mut pending.payload)?;
+                return Ok(ScheduleDecision::Blocked);
+            }
         }
 
         let held_parent_slot =
@@ -3904,6 +3910,86 @@ mod tests {
             sink.writes().iter().all(|row| row.stage != "dlq"),
             "recovery replay must not consume the DLQ retry budget"
         );
+        assert_eq!(role.queued_request_count().await, 0);
+        set_env_var("SCHEDULER_DISCOVERY_JSON", prev_discovery.as_deref());
+    }
+
+    #[tokio::test]
+    async fn native_restart_registry_gap_keeps_requests_queued_until_replacement() {
+        let _guard = test_env::env_lock().lock().await;
+        let prev_discovery = std::env::var("SCHEDULER_DISCOVERY_JSON").ok();
+        let mut worker = json!([{"resource_id":0,"stream_name":"execute.native.demo.owned.0.0","total_memory_mb":16000,"used_memory_mb":0,"device_kind":"gpu","executor_class":"native.demo","status":"available"}]);
+        set_env_var("SCHEDULER_DISCOVERY_JSON", Some(&worker.to_string()));
+        let (_redis_server, qm) = spawn_test_queue_manager("native-restart-registry-gap").await;
+        let max_retries = 2;
+        let (role, tasks) = SchedulerRole::from_env(
+            &scheduler_env("test:"),
+            qm.clone(),
+            retry_dlq_policy(max_retries),
+            None,
+        )
+        .unwrap();
+        seed_registry_from_discovery_json(&qm, &role.config.gpu_registry_key, "generation").await;
+        let sink = RecordingSink::new();
+        run_gpu_discovery(&tasks, &sink).await;
+        assert_eq!(role.reservations.tracked_worker_count().await, 1);
+        let mut payload: JsonValue = serde_json::from_str(&basic_schedule_payload(
+            "demo-plugin",
+            "native.demo",
+            1,
+            2_048,
+        ))
+        .unwrap();
+        payload["runtime"] = json!({"kind":"cpp","executor_class":"native.demo"});
+        queue_schedule(
+            &role,
+            &schedule_msg("native-registry-gap", &payload.to_string()),
+            "schedule",
+            &sink,
+        )
+        .await;
+
+        // Graceful shutdown first marks the old generation draining, then
+        // removes its row before the supervised replacement registers.
+        worker[0]["status"] = json!("draining");
+        set_env_var("SCHEDULER_DISCOVERY_JSON", Some(&worker.to_string()));
+        seed_registry_from_discovery_json(&qm, &role.config.gpu_registry_key, "generation").await;
+        for registered in [true, false] {
+            if !registered {
+                let mut connection = qm.connection();
+                scicomp_rq::hash_ops::hdel(
+                    &mut connection,
+                    &role.config.gpu_registry_key,
+                    "generation:0",
+                )
+                .await
+                .unwrap();
+            }
+            for _ in 0..max_retries + 2 {
+                run_scheduler_task(&tasks, &sink).await;
+                assert_eq!(role.reservations.tracked_worker_count().await, 0);
+                assert!(sink.writes().is_empty());
+                assert!(
+                    sink.handoffs().is_empty(),
+                    "a native restart gap must not consume the request's DLQ budget"
+                );
+                assert!(sink.acked_ids().is_empty());
+                assert!(sink.failed_run_ids().is_empty());
+                assert_eq!(role.queued_request_count().await, 1);
+            }
+        }
+
+        worker[0]["status"] = json!("available");
+        set_env_var("SCHEDULER_DISCOVERY_JSON", Some(&worker.to_string()));
+        seed_registry_from_discovery_json(&qm, &role.config.gpu_registry_key, "generation").await;
+        run_scheduler_task(&tasks, &sink).await;
+        run_scheduler_task(&tasks, &sink).await;
+        assert_eq!(sink.writes().len(), 1);
+        assert_eq!(sink.writes()[0].run_id, "native-registry-gap");
+        assert_eq!(sink.writes()[0].stream_key, "execute.native.demo.owned.0.0");
+        assert_eq!(sink.acked_ids(), vec!["1-0".to_string()]);
+        assert!(sink.handoffs().is_empty());
+        assert!(sink.failed_run_ids().is_empty());
         assert_eq!(role.queued_request_count().await, 0);
         set_env_var("SCHEDULER_DISCOVERY_JSON", prev_discovery.as_deref());
     }

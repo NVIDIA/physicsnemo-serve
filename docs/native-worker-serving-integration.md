@@ -107,7 +107,7 @@ source with the current worker source.
 
 ## Readiness and worker restart
 
-Authenticated `/readyz` reads the live native registry row and owner lease in one
+`/readyz` reads the live native registry row and owner lease in one
 Redis execution. It checks the deployment configuration hash, workflow, backend,
 execution identity, current owner and successful startup proof. Declared workflow
 startup cases and custom initialization must also have passed. A healthy busy

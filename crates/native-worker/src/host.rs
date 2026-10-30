@@ -589,20 +589,38 @@ mod tests {
     }
 
     #[cfg(unix)]
-    #[tokio::test]
-    async fn native_factory_has_stack_space_for_cuda_initialization() {
+    #[test]
+    fn native_factory_has_stack_space_for_cuda_initialization() {
         const CHILD: &str = "NATIVE_HOST_STACK_PROBE_CHILD";
         if std::env::var_os(CHILD).is_some() {
-            let client = HostClient::spawn(|| {
-                assert_eq!(touch_native_startup_stack(48), 3 * 1024 * 1024);
-                Ok(Fake {
-                    events: Arc::default(),
-                    calls: Arc::default(),
+            // Full Torch/VTK linkage can exhaust the libtest thread before a
+            // Tokio runtime reaches the native factory. Give only the test
+            // driver its own stack; RUST_MIN_STACK remains 2 MiB, so removing
+            // the native thread's explicit stack size still fails this probe.
+            std::thread::Builder::new()
+                .name("native-stack-probe-driver".into())
+                .stack_size(16 * 1024 * 1024)
+                .spawn(|| {
+                    tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .unwrap()
+                        .block_on(async {
+                            let client = HostClient::spawn(|| {
+                                assert_eq!(touch_native_startup_stack(48), 3 * 1024 * 1024);
+                                Ok(Fake {
+                                    events: Arc::default(),
+                                    calls: Arc::default(),
+                                })
+                            })
+                            .await
+                            .unwrap();
+                            assert!(client.shutdown(Duration::from_secs(1)).await);
+                        });
                 })
-            })
-            .await
-            .unwrap();
-            assert!(client.shutdown(Duration::from_secs(1)).await);
+                .unwrap()
+                .join()
+                .unwrap();
             return;
         }
 

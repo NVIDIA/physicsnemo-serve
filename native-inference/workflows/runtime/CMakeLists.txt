@@ -77,6 +77,7 @@ endif()
 target_link_libraries(pnms_native_run PRIVATE PhysicsNeMoWorkflow::host)
 install(TARGETS physicsnemo_workflow physicsnemo_workflow_authoring
   EXPORT PhysicsNeMoWorkflowTargets
+  ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
   LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
   RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 install(TARGETS pnms_native_run RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})

@@ -140,6 +140,7 @@ int main() {
     std::ifstream produced(root / "raw-output/output.f32",std::ios::binary);
     std::vector<float> roundtrip(4);
     produced.read(reinterpret_cast<char*>(roundtrip.data()),16);
+    produced.close();
     check(roundtrip == floats, "raw tensor round trip changed values");
     rejects([&] { raw.run(request.dump()); }, "already exists");
     request["output_dir"] = (root / "raw-output-2").string();

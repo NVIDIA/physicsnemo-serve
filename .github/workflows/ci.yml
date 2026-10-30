@@ -302,12 +302,70 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $env:CMAKE_GENERATOR = (Select-String -Path "$env:RUNNER_TEMP/inference-windows-build/CMakeCache.txt" `
             -Pattern '^CMAKE_GENERATOR:INTERNAL=').Line -replace '^CMAKE_GENERATOR:INTERNAL=', ''
+          "CMAKE_GENERATOR=$env:CMAKE_GENERATOR" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           cmake --build "$env:RUNNER_TEMP/inference-windows-build" --config Release --parallel 4 2>&1 |
             Tee-Object "$env:RUNNER_TEMP/inference-windows-evidence/build.log"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           ctest --test-dir "$env:RUNNER_TEMP/inference-windows-build" -C Release `
             --output-on-failure --no-tests=error 2>&1 |
             Tee-Object "$env:RUNNER_TEMP/inference-windows-evidence/core-sdk-tests.log"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Test reusable native tensor and custom workflow host on Windows
+        run: |
+          cmake --install "$env:RUNNER_TEMP/inference-windows-build" --config Release `
+            --prefix "$env:RUNNER_TEMP/inference-windows-sdk" 2>&1 |
+            Tee-Object "$env:RUNNER_TEMP/inference-windows-evidence/sdk-install.log"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cmake -S native-inference/workflows/runtime -B "$env:RUNNER_TEMP/workflow-host-windows-build" `
+            -A x64 -DBUILD_TESTING=ON -DPNMS_ENABLE_MOCK_BACKEND=ON `
+            "-DCMAKE_PREFIX_PATH=$env:RUNNER_TEMP/inference-windows-sdk" `
+            "-DPNMS_CUSTOM_WORKFLOW_SOURCE_DIR=$env:GITHUB_WORKSPACE/native-inference/workflows/runtime/tests/custom" `
+            -DPNMS_CUSTOM_WORKFLOW_TARGET=pnms_test_custom 2>&1 |
+            Tee-Object "$env:RUNNER_TEMP/inference-windows-evidence/workflow-host-configure.log"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cmake --build "$env:RUNNER_TEMP/workflow-host-windows-build" --config Release --parallel 4 2>&1 |
+            Tee-Object "$env:RUNNER_TEMP/inference-windows-evidence/workflow-host-build.log"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ctest --test-dir "$env:RUNNER_TEMP/workflow-host-windows-build" -C Release `
+            --output-on-failure --no-tests=error 2>&1 |
+            Tee-Object "$env:RUNNER_TEMP/inference-windows-evidence/workflow-host-tests.log"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Test installed Windows workflow consumer and standalone runner
+        run: |
+          cmake --install "$env:RUNNER_TEMP/workflow-host-windows-build" --config Release `
+            --prefix "$env:RUNNER_TEMP/workflow-host-windows" 2>&1 |
+            Tee-Object "$env:RUNNER_TEMP/inference-windows-evidence/workflow-host-install.log"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cmake -S native-inference/workflows/runtime/tests/install_consumer `
+            -B "$env:RUNNER_TEMP/workflow-consumer-windows-build" -A x64 `
+            "-DCMAKE_PREFIX_PATH=$env:RUNNER_TEMP/workflow-host-windows;$env:RUNNER_TEMP/inference-windows-sdk" 2>&1 |
+            Tee-Object "$env:RUNNER_TEMP/inference-windows-evidence/workflow-consumer-configure.log"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cmake --build "$env:RUNNER_TEMP/workflow-consumer-windows-build" --config Release --parallel 2 2>&1 |
+            Tee-Object "$env:RUNNER_TEMP/inference-windows-evidence/workflow-consumer-build.log"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $env:PATH = "$env:RUNNER_TEMP/workflow-host-windows/bin;$env:RUNNER_TEMP/inference-windows-sdk/bin;$env:PATH"
+          ctest --test-dir "$env:RUNNER_TEMP/workflow-consumer-windows-build" -C Release `
+            --output-on-failure --no-tests=error 2>&1 |
+            Tee-Object "$env:RUNNER_TEMP/inference-windows-evidence/workflow-consumer-tests.log"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -S native-inference/workflows/runtime/tests/cli_test.py `
+            --runner "$env:RUNNER_TEMP/workflow-host-windows/bin/pnms-native-run.exe" `
+            --config "$env:RUNNER_TEMP/workflow-consumer-windows-build/config.json" -v 2>&1 |
+            Tee-Object "$env:RUNNER_TEMP/inference-windows-evidence/workflow-cli-tests.log"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Test native CFD seeds and exact block plans on Windows
+        run: |
+          cmake -S native-inference/workflows/transolver/tests/cpu `
+            -B "$env:RUNNER_TEMP/transolver-windows-contract" -A x64 2>&1 |
+            Tee-Object "$env:RUNNER_TEMP/inference-windows-evidence/transolver-contract-configure.log"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cmake --build "$env:RUNNER_TEMP/transolver-windows-contract" --config Release --parallel 2 2>&1 |
+            Tee-Object "$env:RUNNER_TEMP/inference-windows-evidence/transolver-contract-build.log"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ctest --test-dir "$env:RUNNER_TEMP/transolver-windows-contract" -C Release `
+            --output-on-failure --no-tests=error 2>&1 |
+            Tee-Object "$env:RUNNER_TEMP/inference-windows-evidence/transolver-contract-tests.log"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Preserve Windows qualification evidence
         if: always()
@@ -317,6 +375,9 @@ jobs:
           path: |
             ${{ runner.temp }}/inference-windows-evidence/
             ${{ runner.temp }}/inference-windows-build/Testing/Temporary/LastTest.log
+            ${{ runner.temp }}/workflow-host-windows-build/Testing/Temporary/LastTest.log
+            ${{ runner.temp }}/workflow-consumer-windows-build/Testing/Temporary/LastTest.log
+            ${{ runner.temp }}/transolver-windows-contract/Testing/Temporary/LastTest.log
 
   inference-windows-aoti:
     name: Native SDK Windows AOTI CPU

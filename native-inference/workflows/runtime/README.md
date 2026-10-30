@@ -33,6 +33,15 @@ This installs `pnms-native-run`, `libphysicsnemo_workflow`, headers under
 The facade in `host.hpp` exposes only strings and a cancellation callback.
 SDK objects and tensors remain in C++.
 
+On Windows, use an x64 MSVC toolchain and a matching SDK installation. With a
+Visual Studio generator, add `--config Release` to build/install commands and
+`-C Release` to CTest commands. The workflow installation includes the DLL in
+`bin/` and its import library in `lib/`. Add the installed workflow `bin/` and
+any shared SDK/backend DLL directories to `PATH` before running an external
+consumer. Windows CPU CI covers the tensor/custom host, installed consumer and
+standalone runner; this does not qualify the separate Linux Transolver runtime
+or a GPU backend on Windows.
+
 The standalone runner calls the same host on one OS thread. It performs the
 authored startup self-test before executing the request and never compiles a
 model at startup:

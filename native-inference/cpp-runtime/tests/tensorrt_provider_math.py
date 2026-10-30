@@ -5,6 +5,7 @@ import ctypes
 import hashlib
 import json
 from pathlib import Path
+import uuid
 
 
 # TensorRT retains a process-global logger pointer. Keep its Python owner alive
@@ -16,6 +17,11 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--plugin-root", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument(
+        "--unique-output",
+        action="store_true",
+        help="Preserve prior CTest evidence in separate run directories.",
+    )
     args = parser.parse_args()
     import numpy as np
     import tensorrt as trt
@@ -26,7 +32,11 @@ def main():
     logger = _LOGGER
     if not torch.cuda.is_available():
         return 77
-    assert torch.cuda.get_device_capability() == (9, 0), "qualified H100 required"
+    if torch.cuda.get_device_capability() != (9, 0):
+        print("Provider math requires a qualified H100 (sm90); skipping this GPU.")
+        return 77
+    if args.unique_output:
+        args.output = args.output / uuid.uuid4().hex
     args.output.mkdir(parents=True, exist_ok=False)
     torch.backends.cuda.preferred_blas_library("cublas")
     generator = torch.Generator(device="cuda").manual_seed(27531)
@@ -98,6 +108,10 @@ def main():
                 expected = reference(*inputs).contiguous()
                 stream.synchronize()
                 expected_data = raw(expected)
+                stem = f"{name}-v{version}"
+                (args.output / f"{stem}-reference.bin").write_bytes(expected_data)
+                for index, value in enumerate(inputs):
+                    (args.output / f"{stem}-input-{index}.bin").write_bytes(raw(value))
                 creator = trt.get_plugin_registry().get_creator(
                     creator_name, version, ""
                 )
@@ -167,6 +181,9 @@ def main():
                     assert context.execute_async_v3(stream.cuda_stream)
                     stream.synchronize()
                     actual_data = raw(actual)
+                    (args.output / f"{stem}-actual-{repeat}.bin").write_bytes(
+                        actual_data
+                    )
                     assert actual_data == expected_data, (
                         f"{name} v{version} repeat{repeat}: byte parity failed"
                     )

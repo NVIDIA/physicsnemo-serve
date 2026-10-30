@@ -1,5 +1,6 @@
 #include "physicsnemo/inference/backends/tensorrt_exact.hpp"
 #include "exact_plugin_support.hpp"
+#include "exact_cublas_workspace.hpp"
 #include "exact_provider_policy.hpp"
 
 #include <NvInfer.h>
@@ -51,6 +52,7 @@ class ExactGemmPlugin final : public nvinfer1::IPluginV3,
 
   ~ExactGemmPlugin() override {
     if (handle_ != nullptr) cublasDestroy(handle_);
+    if (legacy_workspace_ != nullptr) cudaFree(legacy_workspace_);
   }
 
   nvinfer1::IPluginCapability* getCapabilityInterface(
@@ -142,11 +144,23 @@ class ExactGemmPlugin final : public nvinfer1::IPluginV3,
     if (handle_ == nullptr && cublasCreate(&handle_) != CUBLAS_STATUS_SUCCESS) {
       return 1;
     }
+    if (!policy_.enabled() && !legacy_workspace_ready_) {
+      if (!tensorrt_detail::gemm_workspace_size(&legacy_workspace_bytes_) ||
+          (legacy_workspace_bytes_ != 0 &&
+           cudaMalloc(&legacy_workspace_, legacy_workspace_bytes_) != cudaSuccess)) {
+        return 1;
+      }
+      legacy_workspace_ready_ = true;
+    }
+    void* blas_workspace = policy_.enabled() ? workspace : legacy_workspace_;
+    const auto blas_workspace_bytes = policy_.enabled() ? policy_.workspace_bytes()
+                                                       : legacy_workspace_bytes_;
+    if (policy_.enabled() && blas_workspace == nullptr) return 1;
+    // Match eager Torch's workspace policy; the default cuBLAS pool can select
+    // a different FP32 reduction. Setting the stream resets this binding.
     if (cublasSetStream(handle_, stream) != CUBLAS_STATUS_SUCCESS ||
-        (policy_.enabled() &&
-         (workspace == nullptr ||
-          cublasSetWorkspace(handle_, workspace, policy_.workspace_bytes()) !=
-              CUBLAS_STATUS_SUCCESS)) ||
+        cublasSetWorkspace(handle_, blas_workspace, blas_workspace_bytes) !=
+            CUBLAS_STATUS_SUCCESS ||
         cublasSetMathMode(handle_, policy_.enabled() ? CUBLAS_TF32_TENSOR_OP_MATH
                                                    : CUBLAS_DEFAULT_MATH) !=
             CUBLAS_STATUS_SUCCESS) {
@@ -181,6 +195,9 @@ class ExactGemmPlugin final : public nvinfer1::IPluginV3,
  private:
   tensorrt_detail::ProviderMathPolicy policy_;
   cublasHandle_t handle_{nullptr};
+  void* legacy_workspace_{nullptr};
+  std::size_t legacy_workspace_bytes_{0};
+  bool legacy_workspace_ready_{false};
   nvinfer1::PluginFieldCollection serialization_collection_{};
 };
 

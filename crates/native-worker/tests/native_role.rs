@@ -896,12 +896,33 @@ fn cpu_fixture_reaches_cpp_startup_with_small_ambient_worker_stacks() {
                             .any(|line| line.starts_with("cmdstat_hset:calls=")),
                         "worker never registered its warming state: {stats}"
                     );
-                    let registrations: u64 = redis::cmd("HLEN")
-                        .arg("gpu:registry")
+                    let registrations: std::collections::HashMap<String, String> =
+                        redis::cmd("HGETALL")
+                            .arg("gpu:registry")
+                            .query_async(&mut connection)
+                            .await
+                            .unwrap();
+                    assert_eq!(
+                        registrations.len(),
+                        1,
+                        "failed startup lost its logical slot"
+                    );
+                    let (field, raw) = registrations.into_iter().next().unwrap();
+                    let slot: Value = serde_json::from_str(&raw).unwrap();
+                    assert_eq!(slot["workflow_id"], config["workflow_id"]);
+                    assert_eq!(slot["status"], "warming");
+                    assert_eq!(slot["model_cache"]["entries"], json!([]));
+                    assert_eq!(slot["model_cache"]["warmup"]["status"], "warming");
+                    assert_eq!(slot["model_cache"]["warmup"]["reason"], "restart_pending");
+                    let lease: Option<String> = redis::cmd("GET")
+                        .arg(format!(
+                            "native:worker-lease:{:x}",
+                            Sha256::digest(field.as_bytes())
+                        ))
                         .query_async(&mut connection)
                         .await
                         .unwrap();
-                    assert_eq!(registrations, 0, "failed startup retained its registration");
+                    assert!(lease.is_none(), "failed startup left a live process lease");
                 });
         })
         .unwrap()

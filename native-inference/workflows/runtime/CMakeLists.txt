@@ -5,6 +5,8 @@ if(WIN32)
 endif()
 include(CTest)
 include(GNUInstallDirs)
+file(RELATIVE_PATH workflow_install_libdir
+  "${CMAKE_INSTALL_FULL_BINDIR}" "${CMAKE_INSTALL_FULL_LIBDIR}")
 option(PNMS_ENABLE_AOTI "Enable the installed AOTI SDK backend" OFF)
 option(PNMS_ENABLE_TENSORRT "Enable the installed TensorRT SDK backend" OFF)
 option(PNMS_ENABLE_ONNXRUNTIME "Enable the installed ONNX Runtime SDK backend" OFF)
@@ -67,10 +69,10 @@ if(PNMS_CUSTOM_WORKFLOW_SOURCE_DIR OR PNMS_CUSTOM_WORKFLOW_TARGET)
 endif()
 add_executable(pnms_native_run src/main.cpp)
 set_target_properties(pnms_native_run PROPERTIES OUTPUT_NAME pnms-native-run
-  INSTALL_RPATH "$ORIGIN/../${CMAKE_INSTALL_LIBDIR}" INSTALL_RPATH_USE_LINK_PATH TRUE)
+  INSTALL_RPATH "$ORIGIN/${workflow_install_libdir}" INSTALL_RPATH_USE_LINK_PATH TRUE)
 if(APPLE)
   set_target_properties(pnms_native_run PROPERTIES
-    INSTALL_RPATH "@loader_path/../${CMAKE_INSTALL_LIBDIR}")
+    INSTALL_RPATH "@loader_path/${workflow_install_libdir}")
 endif()
 target_link_libraries(pnms_native_run PRIVATE PhysicsNeMoWorkflow::host)
 install(TARGETS physicsnemo_workflow physicsnemo_workflow_authoring

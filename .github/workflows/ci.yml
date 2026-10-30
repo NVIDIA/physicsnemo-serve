@@ -151,10 +151,10 @@ jobs:
           set -euo pipefail
           python3 -S -m unittest discover -s native-inference/model-builder/tests -p 'test_*.py' -v \
             2>&1 | tee "$RUNNER_TEMP/inference-cpu-evidence/builder-tests.log"
-      - name: Test workflow output writers without CUDA
+      - name: Test workflow CLI and install contracts without CUDA
         run: |
           set -euo pipefail
-          python3 -S -m unittest discover -s native-inference/workflows/transolver/tests -p 'test_cli_output_paths.py' -v \
+          python3 -S -m unittest discover -s native-inference/workflows/transolver/tests -p 'test_*.py' -v \
             2>&1 | tee "$RUNNER_TEMP/inference-cpu-evidence/workflow-output-tests.log"
       - name: Test native CFD seeds and exact block plans without CUDA
         run: |

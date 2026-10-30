@@ -46,6 +46,8 @@ class Custom final : public Workflow {
         {"size_bytes",input.size_bytes},{"sha256",input.sha256},{"media_type",input.media_type},{"source",input.source}};
     }
     if (mode == "escape") context.output_path("../escape");
+    if (mode == "windows-root") context.output_path("\\escape.f32");
+    if (mode == "windows-drive") context.output_path("D:escape.f32");
     const auto values = parameters.at("values").get<std::vector<float>>();
     inference::TensorView input{"input", inference::DType::kFloat32,
         {inference::DeviceType::kCpu,0}, {4}, values.data(), values.size()*sizeof(float)};

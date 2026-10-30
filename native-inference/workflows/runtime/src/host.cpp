@@ -231,7 +231,9 @@ fs::path Context::asset(const std::string& name) const {
 }
 fs::path Context::output_path(const std::string& relative) const {
   fs::path path(relative);
-  require(!path.empty() && !path.is_absolute(), "output path must be relative");
+  require(!path.empty() && !path.has_root_path() && relative.front() != '\\' &&
+          (relative.size() < 2 || relative[1] != ':'),
+          "output path must be relative and have no root or drive prefix");
   for (const auto& part : path)
     require(part != ".." && part != ".", "output path must stay inside attempt directory");
   const auto full = impl_->root / path;

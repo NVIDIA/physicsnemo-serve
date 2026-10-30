@@ -26,6 +26,14 @@ template <typename F> void rejects(F&& f, const std::string& fragment) {
 int main() {
   using namespace transolver_workflow;
   try {
+    check(startup_fixture_points({60000, 8095}, 60000) ==
+              std::vector<std::int64_t>{60000, 8095}, "fixed startup shapes changed");
+    check(startup_fixture_points({-1}, 60000) == std::vector<std::int64_t>{60000},
+          "dynamic startup must use the full block size");
+    check(startup_fixture_points({60000, -1}, 60000) == std::vector<std::int64_t>{60000},
+          "fixed and dynamic sessions must share one authored full-block fixture");
+    check(startup_fixture_points({-1, 60000, 8095}, 60000) ==
+              std::vector<std::int64_t>{60000, 8095}, "startup fixture shapes must be distinct");
     const std::vector<std::int64_t> shape{1, 2, 4};
     std::vector<float> startup_values(8, 0.0F);
     validate_startup_output(shape, shape, startup_values);

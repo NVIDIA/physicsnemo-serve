@@ -157,6 +157,8 @@ model aliases through `infer`/`model`, admitted `input` files, configured immuta
 `infer` returns an SDK `Result` retaining owned CPU output storage; retain that
 result while reading its views. The hook returns JSON objects for payload and
 metadata. Redis, scheduler state and bridge details are not part of this API.
+Output paths must stay relative to the attempt directory and cannot have a root
+or drive prefix, including Windows root-relative and drive-relative forms.
 Registered artifact names use at most 128 ASCII letters, digits, underscores,
 hyphens or dots, excluding `.` and `..`; media types must exclude CR/LF.
 

@@ -46,11 +46,11 @@ int main() {
       throw std::runtime_error("source-linked custom workflow did not infer and postprocess");
     if (result.at("artifacts").at(0).at("path") != "custom.f32")
       throw std::runtime_error("custom output registration failed");
-    for (const auto& mode : {"escape","alias","artifact-space","artifact-long","media-newline"}) {
+    for (const auto& mode : {"escape","windows-root","windows-drive","alias","artifact-space","artifact-long","media-newline"}) {
       request["parameters"]["mode"] = mode;
       bool rejected = false;
       try { host.run(request.dump()); } catch (const std::invalid_argument&) { rejected = true; }
-      if (!rejected) throw std::runtime_error("unsafe custom context operation accepted");
+      if (!rejected) throw std::runtime_error("unsafe custom context operation accepted: " + std::string(mode));
     }
     request["parameters"].erase("mode");
     request["output_dir"] = (root / "cancelled").string();

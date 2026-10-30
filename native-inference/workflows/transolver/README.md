@@ -288,6 +288,12 @@ Builder/Python parity fixtures. No mesh download or full 8.8-million-cell
 workflow is needed at startup. The file has this schema, with one entry for
 each distinct resident package point count:
 
+When a fixed package and a dynamic package both test at the full block size,
+they share that point count's authored fixture. Both packages still execute and
+compare their own outputs. The CLI checks `--startup-fixture` even without
+`--startup-report`; the latter only requests a report file. `--startup-only true`
+continues to require `--startup-report`.
+
 ```json
 {
   "schema_version": 1,

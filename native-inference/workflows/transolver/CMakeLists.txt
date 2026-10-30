@@ -62,13 +62,15 @@ foreach(backend IN LISTS backends)
   target_compile_definitions(transolver_workflow PRIVATE PNMIR_HAS_${backend_upper}=1)
   target_link_libraries(transolver_workflow PRIVATE PhysicsNeMoInference::${backend})
 endforeach()
+include(GNUInstallDirs)
+file(RELATIVE_PATH transolver_install_libdir
+  "${CMAKE_INSTALL_FULL_BINDIR}" "${CMAKE_INSTALL_FULL_LIBDIR}")
 set_property(TARGET transolver_workflow physicsnemo-transolver APPEND PROPERTY
   BUILD_RPATH "${PNMIR_WARP_ROOT}/bin")
 set_property(TARGET transolver_workflow physicsnemo-transolver PROPERTY
-  INSTALL_RPATH "$ORIGIN;$ORIGIN/../lib")
+  INSTALL_RPATH "$ORIGIN;$ORIGIN/${transolver_install_libdir}")
 set_property(TARGET transolver_workflow physicsnemo-transolver PROPERTY
   INSTALL_RPATH_USE_LINK_PATH TRUE)
-include(GNUInstallDirs)
 install(TARGETS transolver_workflow physicsnemo-transolver
   LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
   ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
@@ -88,7 +90,7 @@ if(BUILD_TESTING)
   target_link_libraries(transolver_runner_tests PRIVATE transolver_workflow nlohmann_json::nlohmann_json)
   set_target_properties(transolver_runner_tests PROPERTIES
     OUTPUT_NAME physicsnemo-transolver-runner
-    INSTALL_RPATH "$ORIGIN/../lib"
+    INSTALL_RPATH "$ORIGIN/${transolver_install_libdir}"
     INSTALL_RPATH_USE_LINK_PATH TRUE)
   install(TARGETS transolver_runner_tests RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR} COMPONENT Tests)
   add_test(NAME transolver_runner_tests COMMAND transolver_runner_tests)

@@ -497,9 +497,13 @@ class Runner::Impl {
       fixture_root = path.parent_path();
       std::ifstream stream(path);
       const auto fixture = Json::parse(stream);
+      std::vector<std::int64_t> package_points;
+      for (const auto& selected : sessions)
+        package_points.push_back(selected.point_dimension);
+      const auto startup_points = startup_fixture_points(package_points, config.block_size);
       if (fixture.at("schema_version") != 1 || !fixture.at("models").is_array() ||
-          fixture.at("models").size() != sessions.size())
-        throw std::invalid_argument("startup fixtures must cover every resident package exactly");
+          fixture.at("models").size() != startup_points.size())
+        throw std::invalid_argument("startup fixtures must cover every distinct resident point count exactly");
       for (const auto& model : fixture.at("models")) {
         const auto points = model.at("point_count").get<std::int64_t>();
         const auto key = std::to_string(points);

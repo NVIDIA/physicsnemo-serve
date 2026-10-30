@@ -269,13 +269,17 @@ int main(int argc, char** argv) {
     if (check_only && startup_report.empty()) {
       throw std::invalid_argument("--startup-only requires --startup-report");
     }
+    const bool check_startup =
+        !config.startup_fixture_path.empty() || !startup_report.empty();
     transolver_workflow::Runner runner(std::move(config));
-    if (!startup_report.empty()) {
+    if (check_startup) {
       const auto report = runner.self_test(transolver_workflow::CancellationToken{});
-      std::ofstream stream(startup_report);
-      stream << report << '\n';
-      stream.close();
-      if (!stream) throw std::runtime_error("cannot write --startup-report");
+      if (!startup_report.empty()) {
+        std::ofstream stream(startup_report);
+        stream << report << '\n';
+        stream.close();
+        if (!stream) throw std::runtime_error("cannot write --startup-report");
+      }
     }
     if (check_only) return 0;
     transolver_workflow::RunnerRequest request;

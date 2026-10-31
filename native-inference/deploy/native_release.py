@@ -1424,7 +1424,7 @@ def _validate_cfd_joint(proof, identity):
     reference = receipt.get("reference", {})
     require(
         isinstance(reference.get("path"), str)
-        and Path(reference["path"]).is_absolute()
+        and PurePosixPath(reference["path"]).is_absolute()
         and re.fullmatch(r"[0-9a-f]{64}", reference.get("sha256", ""))
         and type(reference.get("size_bytes")) is int
         and reference["size_bytes"] > 0,

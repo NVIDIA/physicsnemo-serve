@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 import shutil
 import sys
 from types import SimpleNamespace
@@ -268,6 +268,39 @@ def test_cfd_staging_reuses_exact_packages_when_alias_labels_change(tmp_path):
     assert deployment["artifact_root"] == cfg["runtime"]["artifact_root"]
 
 
+@pytest.mark.parametrize(
+    ("reference", "valid"),
+    [
+        ("/node/qualified/fields.json", True),
+        ("node/qualified/fields.json", False),
+        (r"C:\node\qualified\fields.json", False),
+    ],
+)
+def test_cfd_joint_proof_uses_linux_reference_paths_on_windows_hosts(
+    tmp_path, monkeypatch, reference, valid
+):
+    cfg, candidates, proof = joint_fixture(tmp_path)
+    receipt = release.read_json(proof / "build-receipt.json")
+    receipt["reference"]["path"] = reference
+    release.write_json(proof / "build-receipt.json", receipt)
+
+    def controller_path(value):
+        return PureWindowsPath(value) if value == reference else Path(value)
+
+    monkeypatch.setattr(
+        release,
+        "verify_completed_build",
+        lambda *args, **kwargs: {"package": "backends/aoti"},
+    )
+    identity = release._cfd_joint_identity(cfg, candidates)
+    monkeypatch.setattr(release, "Path", controller_path)
+    if valid:
+        assert release._validate_cfd_joint(proof, identity) == receipt
+    else:
+        with pytest.raises(ValueError, match="CFD reference location or byte identity"):
+            release._validate_cfd_joint(proof, identity)
+
+
 def test_cfd_policy_inventory_covers_active_recovery_separately_from_tiny_workflows():
     cfd = release.required_http_cases({"adapter": "transolver_surface"})
     tensor = release.required_http_cases(
@@ -283,6 +316,10 @@ def test_cfd_policy_inventory_covers_active_recovery_separately_from_tiny_workfl
     assert "worker_restart" in cfd and "worker_restart" in tensor
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="Release-controller CFD cache publication uses POSIX file locks",
+)
 def test_cfd_joint_proof_requalifies_changed_reference_without_compiling_models(
     tmp_path,
 ):
@@ -322,6 +359,10 @@ def test_cfd_joint_proof_requalifies_changed_reference_without_compiling_models(
     ]
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="Release-controller CFD cache publication uses POSIX file locks",
+)
 def test_individually_valid_mixed_aliases_need_new_joint_proof(tmp_path):
     from unittest.mock import patch
 
@@ -429,6 +470,10 @@ def test_joint_requalification_handoff_reuses_both_model_bytes(tmp_path, monkeyp
     assert record["job"]["node_id"] == "node-new"
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="Release-controller CFD cache publication uses POSIX file locks",
+)
 def test_joint_proof_cache_reverifies_bytes_and_retains_invalid_entry(tmp_path):
     from unittest.mock import patch
 
@@ -453,6 +498,10 @@ def test_joint_proof_cache_reverifies_bytes_and_retains_invalid_entry(tmp_path):
     assert len(list((tmp_path / "cache/.cfd-qualified").glob(".invalid-*"))) == 1
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="Release-controller CFD cache publication uses POSIX file locks",
+)
 @pytest.mark.parametrize(
     ("field", "value"),
     [

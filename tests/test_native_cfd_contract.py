@@ -3,6 +3,8 @@ from __future__ import annotations
 import copy
 import json
 from pathlib import Path
+import sys
+from types import SimpleNamespace
 
 import pytest
 import numpy as np
@@ -347,8 +349,16 @@ def test_native_job_stages_only_aoti_and_changes_static_point_count(tmp_path):
     assert "POINT_COUNT = 8095" in (destination / "adapter.py").read_text()
 
 
-def test_gpu_job_records_container_limits_separately_from_host_memory(tmp_path):
-    from qa.scripts.run_native_cfd_job import resource_envelope
+def test_gpu_job_records_container_limits_separately_from_host_memory(
+    tmp_path, monkeypatch
+):
+    from qa.scripts import run_native_cfd_job as job
+
+    def statvfs(path):
+        assert path == tmp_path
+        return SimpleNamespace(f_blocks=16, f_bavail=8, f_frsize=4096)
+
+    monkeypatch.setattr(job.os, "statvfs", statvfs, raising=False)
 
     proc, cgroup = tmp_path / "proc", tmp_path / "cgroup"
     proc.mkdir()
@@ -356,12 +366,16 @@ def test_gpu_job_records_container_limits_separately_from_host_memory(tmp_path):
     (proc / "meminfo").write_text("MemTotal: 1000 kB\nMemAvailable: 600 kB\n")
     (cgroup / "memory.max").write_text("4096\n")
     (cgroup / "memory.current").write_text("2048\n")
-    observed = resource_envelope(proc_root=proc, cgroup_root=cgroup, shm_path=tmp_path)
+    observed = job.resource_envelope(
+        proc_root=proc, cgroup_root=cgroup, shm_path=tmp_path
+    )
     assert observed["host_memory_total_bytes"] == 1000 * 1024
     assert observed["host_memory_available_bytes"] == 600 * 1024
     assert observed["cgroup_memory_limit_bytes"] == 4096
     assert observed["cgroup_memory_current_bytes"] == 2048
     assert observed["cgroup_version"] == "v2"
+    assert observed["shm_total_bytes"] == 16 * 4096
+    assert observed["shm_free_bytes"] == 8 * 4096
     assert observed["shm_total_bytes"] >= observed["shm_free_bytes"] >= 0
 
 
@@ -390,7 +404,9 @@ def test_builder_runtime_argument_is_resolved_before_changing_to_job_output(
 
     sdk = tmp_path / "sdk-bin"
     sdk.mkdir()
-    runtime = sdk / "physicsnemo-infer"
+    runtime = sdk / (
+        "physicsnemo-infer.exe" if sys.platform == "win32" else "physicsnemo-infer"
+    )
     runtime.write_text("#!/bin/sh\nexit 0\n")
     runtime.chmod(0o755)
     output = tmp_path / "job-output"

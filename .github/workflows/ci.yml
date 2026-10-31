@@ -129,7 +129,10 @@ jobs:
       - name: Run tests
         env:
           PYTHONPATH: ${{ github.workspace }}:${{ github.workspace }}/python/e2s_tools
-        run: uv run pytest tests python/e2s_tools qa/scripts/test_rust_io_benchmark.py -v
+        # Backend compilation checks run in inference-cpu with CMake installed.
+        run: >-
+          uv run pytest tests python/e2s_tools qa/scripts/test_rust_io_benchmark.py
+          --ignore=tests/test_native_image_backends.py -v
 
   inference-cpu:
     name: Model Builder and Native SDK CPU

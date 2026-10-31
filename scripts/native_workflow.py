@@ -1339,7 +1339,7 @@ def run_native_service(resolved, *, image, workspace, port=0, dry_run=False):
         "--env",
         "REDIS_STREAM_PREFIX=physicsnemo:",
         "--env",
-        "WORKERS=all",
+        "WORKERS=server,scheduler,results,execute",
         image,
     ]
     plan = {

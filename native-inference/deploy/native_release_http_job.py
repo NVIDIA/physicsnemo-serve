@@ -529,6 +529,9 @@ def run(args):
     root = args.release_root
     release = verify_bundle(root)
     deployment = read_json(root / "deployment.json")
+    for name in ("startup_timeout", "request_timeout"):
+        if getattr(args, name, None) is None:
+            setattr(args, name, deployment.get(name + "_seconds", 300))
     args.output.mkdir(parents=True, exist_ok=False)
     job = ServiceJob(args, release, deployment)
     http, redis = HTTP("http://127.0.0.1:8080"), RedisProbe()
@@ -718,8 +721,8 @@ def main():
     parser.add_argument(
         "--entrypoint", type=Path, default=Path("/app/scripts/entrypoint.sh")
     )
-    parser.add_argument("--startup-timeout", type=int, default=300)
-    parser.add_argument("--request-timeout", type=int, default=300)
+    parser.add_argument("--startup-timeout", type=int)
+    parser.add_argument("--request-timeout", type=int)
     parser.add_argument("--shutdown-timeout", type=int, default=300)
     run(parser.parse_args())
 

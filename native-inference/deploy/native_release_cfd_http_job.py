@@ -207,6 +207,7 @@ def service_gates(job, http, redis, deployment, registry):
 def run(args):
     release_root = Path(os.environ["NATIVE_DEPLOYMENT_CONFIG"]).parent
     release = verify_bundle(release_root)
+    deployment = read_json(release_root / "deployment.json")
     orchestration = read_json(release_root / "orchestration.json")
     source = Path("/opt/native-release/source")
     cfg = scientific.parser().parse_args(
@@ -233,9 +234,9 @@ def run(args):
             "--input-root",
             orchestration["input_root"],
             "--startup-timeout",
-            "300",
+            str(deployment.get("startup_timeout_seconds", 300)),
             "--request-timeout",
-            "1200",
+            str(deployment.get("request_timeout_seconds", 1200)),
             "--shutdown-timeout",
             "300",
         ]

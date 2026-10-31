@@ -651,6 +651,9 @@ def test_native_run_local_plan_uses_real_packaged_worker_without_python_hooks(tm
     assert "--gpus" in plan["command"]
     assert "REDIS_STREAM_PREFIX=physicsnemo:" in plan["command"]
     assert "RELEASE_IMAGE_DIGEST=" + image in plan["command"]
+    assert [value for value in plan["command"] if value.startswith("WORKERS=")] == [
+        "WORKERS=server,scheduler,results,execute"
+    ]
     assert plan["execution"] == "not_run"
     assert "inference_worker.py" not in json.dumps(plan)
     assert (workspace / "service-plan.json").is_file()

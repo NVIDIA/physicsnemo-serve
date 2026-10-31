@@ -74,6 +74,7 @@ PYTHON_SUITES = (
     "tests/test_native_release_faults.py",
     "tests/test_native_release_orchestration.py",
     "tests/test_native_release_qa_imports.py",
+    "tests/test_native_release_timeouts.py",
     "tests/test_native_user_cli.py",
     "tests/test_native_user_release.py",
     "tests/test_native_workflow_release_ci.py",

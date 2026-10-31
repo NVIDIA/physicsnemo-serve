@@ -32,11 +32,21 @@ pub trait NativeHost: 'static {
     }
 }
 
+/// Infrastructure retirement requires delivery recovery, not a model failure.
+#[derive(Debug)]
+pub(crate) struct HostUnavailable;
+impl std::fmt::Display for HostUnavailable {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("native host is retired or unavailable")
+    }
+}
+impl std::error::Error for HostUnavailable {}
+
 struct Command {
     request: String,
     cancel: Cancellation,
     permit: OwnedSemaphorePermit,
-    reply: oneshot::Sender<Completion>,
+    reply: oneshot::Sender<Result<Completion>>,
 }
 
 /// Retains the execution gate until the caller has committed the outcome.
@@ -68,7 +78,7 @@ pub struct HostClient {
 }
 
 pub struct Execution {
-    reply: oneshot::Receiver<Completion>,
+    reply: oneshot::Receiver<Result<Completion>>,
     cancel: Cancellation,
     retired: Arc<AtomicBool>,
     finished: bool,
@@ -88,9 +98,11 @@ impl Execution {
         self.cancel.cancel();
     }
     pub async fn wait(&mut self) -> Result<Completion> {
-        let completion = (&mut self.reply).await?;
+        // Losing the host thread leaves execution uncertain; recover the
+        // delivery rather than publishing an invented model failure.
+        let completion = (&mut self.reply).await.map_err(|_| HostUnavailable)?;
         self.finished = true;
-        Ok(completion)
+        completion
     }
 }
 
@@ -222,17 +234,17 @@ impl HostClient {
                     return;
                 }
                 while let Some(Some(command)) = receiver.blocking_recv() {
-                    let result = if retired_thread.load(Ordering::Acquire) {
-                        Err(anyhow::anyhow!("native host retired before execution"))
-                    } else {
-                        host.run(&command.request, &command.cancel)
-                    };
-                    let _ = command.reply.send(Completion {
+                    if retired_thread.load(Ordering::Acquire) {
+                        let _ = command.reply.send(Err(HostUnavailable.into()));
+                        break;
+                    }
+                    let result = host.run(&command.request, &command.cancel);
+                    let _ = command.reply.send(Ok(Completion {
                         result,
                         _permit: command.permit,
                         retired: retired_thread.clone(),
                         committed: false,
-                    });
+                    }));
                     if retired_thread.load(Ordering::Acquire) {
                         break;
                     }
@@ -281,7 +293,7 @@ impl HostClient {
     pub async fn submit(&self, request: String) -> Result<Execution> {
         let permit = self.gate.clone().acquire_owned().await?;
         if self.is_retired() {
-            bail!("native host is retired");
+            return Err(HostUnavailable.into());
         }
         let cancel = Cancellation {
             requested: Arc::new(AtomicBool::new(false)),
@@ -295,7 +307,8 @@ impl HostClient {
                 permit,
                 reply,
             }))
-            .await?;
+            .await
+            .map_err(|_| HostUnavailable)?;
         Ok(Execution {
             reply: response,
             cancel,
@@ -539,6 +552,34 @@ mod tests {
         assert!(events.iter().all(|id| *id == events[0]));
         assert_ne!(events[0], std::thread::current().id());
     }
+    #[tokio::test]
+    async fn retirement_while_waiting_for_gate_rejects_submission() {
+        let (client, _events, calls) = setup().await;
+        let first = client
+            .submit("first".into())
+            .await
+            .unwrap()
+            .wait()
+            .await
+            .unwrap();
+        let pending = client.submit("second".into());
+        tokio::pin!(pending);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), &mut pending)
+                .await
+                .is_err()
+        );
+        client.retire();
+        first.committed();
+        let error = pending
+            .await
+            .err()
+            .expect("retired host accepted a second command");
+        assert!(error.is::<HostUnavailable>());
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(client.shutdown(Duration::from_secs(1)).await);
+    }
+
     #[tokio::test]
     async fn dropped_handler_cancels_drains_and_retires_host() {
         let (client, events, calls) = setup().await;

@@ -23,6 +23,7 @@ pub struct NativeExpectation {
     pub lease_key: String,
     pub workflow_cases: Vec<String>,
     pub requires_initialization: bool,
+    self_test_policy: &'static str,
     pub operation_id: Option<String>,
 }
 
@@ -120,8 +121,17 @@ impl NativeExpectation {
             workflow_cases,
             requires_initialization: config["workflow"]["schema_version"] == 2
                 && config["workflow"]["adapter"] == "custom.v1",
+            self_test_policy: required_self_test_policy(&config),
             operation_id: std::env::var("NATIVE_DEPLOYMENT_OPERATION_ID").ok(),
         })
+    }
+}
+
+fn required_self_test_policy(config: &Value) -> &'static str {
+    if config["schema_version"] == 1 && config["startup_fixture_path"].is_null() {
+        "finite-static-inputs-v1"
+    } else {
+        "expected-fp32-v1"
     }
 }
 
@@ -209,7 +219,7 @@ pub fn assess(expected: &NativeExpectation, metadata: &Value, owner: &str, ttl: 
         ensure!(
             warmup["status"] == "succeeded"
                 && report["status"] == "passed"
-                && report["policy"] == "expected-fp32-v1"
+                && report["policy"] == expected.self_test_policy
                 && report["models"]
                     .as_array()
                     .is_some_and(|models| !models.is_empty()),
@@ -311,6 +321,7 @@ mod tests {
             lease_key: "lease".into(),
             workflow_cases: vec!["affine".into()],
             requires_initialization: true,
+            self_test_policy: "expected-fp32-v1",
             operation_id: None,
         }
     }
@@ -321,6 +332,36 @@ mod tests {
             "model_cache":{"warmup":{"status":"succeeded","self_test":{"status":"passed","policy":"expected-fp32-v1","models":[{"status":"passed"}],
                 "initialization":{"status":"passed","calls":1},"workflow":{"status":"passed","cases":[{"name":"affine","status":"passed"}]}}}}})
     }
+    #[test]
+    fn readiness_uses_the_deployments_startup_policy() {
+        for (config, required) in [
+            (json!({"schema_version":1}), "finite-static-inputs-v1"),
+            (
+                json!({"schema_version":1,"startup_fixture_path":null}),
+                "finite-static-inputs-v1",
+            ),
+            (
+                json!({"schema_version":1,"startup_fixture_path":"/release/startup.json"}),
+                "expected-fp32-v1",
+            ),
+            (json!({"schema_version":2}), "expected-fp32-v1"),
+            (json!({"schema_version":3}), "expected-fp32-v1"),
+        ] {
+            let mut expected = expected();
+            expected.self_test_policy = required_self_test_policy(&config);
+            assert_eq!(expected.self_test_policy, required);
+            for policy in ["finite-static-inputs-v1", "expected-fp32-v1", "unknown"] {
+                let mut value = metadata();
+                value["model_cache"]["warmup"]["self_test"]["policy"] = json!(policy);
+                assert_eq!(
+                    assess(&expected, &value, "owner", 1000)["ready"],
+                    policy == required,
+                    "config={config}, policy={policy}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn healthy_busy_native_worker_remains_ready() {
         let mut value = metadata();

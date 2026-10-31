@@ -38,6 +38,8 @@ only success publishes `available` and enables execute polling. Generic models
 use authored numerical input/output goldens. New Transolver releases provide a
 hashed `startup_fixture_path` covering both full and tail sessions; old v1 configs
 without it report the weaker `finite-static-inputs-v1` check explicitly.
+Readiness requires the policy selected by the deployment; fixture-backed and
+schema-v2/v3 releases cannot become ready using the legacy check.
 Startup has a 300-second default deadline, supports shutdown cancellation, and
 leaves admission closed after a failure or abandoned startup future.
 
@@ -53,6 +55,9 @@ each bounded to ten seconds. Durable Redis markers resolve lost responses.
 If the claim or completion remains uncertain, the worker retires and leaves the
 original delivery pending for fenced recovery. Infrastructure uncertainty does
 not enter the generic dead-letter path or acknowledge an unreleased reservation.
+Retired or shutting-down hosts also defer deliveries, including retirement during
+submission and loss of the native reply channel, so replacement can recover them
+without publishing an infrastructure interruption as a terminal model failure.
 
 Schema-v2 passes schema-validated canonical parameters to its linked host.
 JSON-array FP32 inputs support bounded arbitrary values. Raw FP32 input artifacts

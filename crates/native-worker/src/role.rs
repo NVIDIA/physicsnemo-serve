@@ -1,6 +1,6 @@
 use crate::{
     deployment::RuntimeDeploymentConfig,
-    host::{Completion, HostClient},
+    host::{Completion, HostClient, HostUnavailable},
     inputs::materialize,
     request::{ExecutionRequest, NativeRequest, provider_case_seed},
 };
@@ -379,6 +379,11 @@ impl NativeRole {
         // Malformed dispatch cannot safely invent resource release information.
         // Leave it pending for the engine's quarantine policy.
         let reservation = reservation(&payload, self.config.device_index())?;
+        if self.host.is_retired() || *self.shutdown.borrow() {
+            return Err(worker_runtime::traits::message_deferred(
+                "native execution deferred: worker is retired or shutting down",
+            ));
+        }
         let attempt = uuid::Uuid::new_v4().to_string();
         let mut guard = AttemptGuard {
             host: self.host.clone(),
@@ -427,7 +432,7 @@ impl NativeRole {
                     Err(_) => { self.host.retire(); Err(anyhow!("native request deadline exceeded")) }
                 },
             _ = shutdown_requested(self.shutdown.clone()) => {
-                self.host.retire(); Err(anyhow!("native worker is shutting down"))
+                self.host.retire(); Err(anyhow::Error::new(HostUnavailable).context("native worker is shutting down"))
             }
         };
         let status = if result.is_ok() {
@@ -441,6 +446,15 @@ impl NativeRole {
                 .drain(Duration::from_secs(self.config.drain_timeout_seconds()))
                 .await;
             tracing::warn!(drained, "native host retired; admission remains closed");
+        }
+        if let Err(error) = &result
+            && error.is::<HostUnavailable>()
+        {
+            // Retirement can race with claiming, input preparation or host
+            // submission. Keep the delivery and reservation for replacement.
+            return Err(worker_runtime::traits::message_deferred(format!(
+                "native execution deferred: {error:#}"
+            )));
         }
         let mut outcome = json!({"run_id":msg.run_id(),"status":status,"workflow":self.config.workflow_id(),
             "completed_at":chrono::Utc::now().to_rfc3339(),"gpu_stream":msg.stream(),

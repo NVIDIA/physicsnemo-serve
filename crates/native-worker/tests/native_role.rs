@@ -25,6 +25,8 @@ struct Sink {
     begins: Mutex<Vec<String>>,
     begin_failures_left: AtomicUsize,
     fail_begin: bool,
+    retire_on_begin: Option<HostClient>,
+    shutdown_on_begin: Option<watch::Sender<bool>>,
 }
 impl MessageSink for Sink {
     fn enqueue<'a>(
@@ -62,6 +64,12 @@ impl MessageSink for Sink {
     ) -> BoxFuture<'a, Result<Option<Vec<String>>>> {
         Box::pin(async move {
             self.begins.lock().unwrap().push(attempt.to_owned());
+            if let Some(host) = &self.retire_on_begin {
+                host.retire();
+            }
+            if let Some(shutdown) = &self.shutdown_on_begin {
+                shutdown.send_replace(true);
+            }
             if self.fail_begin
                 || self
                     .begin_failures_left
@@ -533,7 +541,7 @@ async fn interrupted_native_call_keeps_admitted_bytes_outside_artifact_retention
 }
 
 #[tokio::test]
-async fn rejected_native_submission_removes_inputs_that_never_entered_cpp() {
+async fn retired_worker_defers_deliveries_before_claiming_or_copying_inputs() {
     let (_root, role, _shutdown, source, calls) = uploaded_fixture().await;
     role.host.retire();
     let cache = role
@@ -542,14 +550,95 @@ async fn rejected_native_submission_removes_inputs_that_never_entered_cpp() {
         .join(".cache/native-inputs")
         .join(format!("{:x}", Sha256::digest(b"generic-run")));
     let sink = Sink::default();
-    role.handle(&uploaded_message(&source, "1-0", [1.0, 2.0]), "gpu0", &sink)
+    let error = role
+        .handle(&uploaded_message(&source, "1-0", [1.0, 2.0]), "gpu0", &sink)
         .await
-        .unwrap();
+        .unwrap_err();
+    assert!(error.to_string().contains("deferred"));
     assert_eq!(calls.load(Ordering::SeqCst), 0);
+    assert!(sink.begins.lock().unwrap().is_empty());
+    assert!(sink.commits.lock().unwrap().is_empty());
+    assert!(sink.outputs.lock().unwrap().is_empty());
+    assert!(!cache.exists(), "retired admission copied input bytes");
+}
+
+#[tokio::test]
+async fn rejected_native_submission_removes_inputs_that_never_entered_cpp() {
+    let (_root, role, _shutdown, source, calls) = uploaded_fixture().await;
+    let cache = role
+        .config
+        .artifact_root()
+        .join(".cache/native-inputs")
+        .join(format!("{:x}", Sha256::digest(b"generic-run")));
+    let sink = Sink {
+        retire_on_begin: Some(role.host.clone()),
+        ..Default::default()
+    };
+    let error = role
+        .handle(&uploaded_message(&source, "1-0", [1.0, 2.0]), "gpu0", &sink)
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("deferred"));
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    assert!(sink.outputs.lock().unwrap().is_empty());
     assert!(
         std::fs::read_dir(cache).unwrap().next().is_none(),
         "rejected submission leaked its owned input copy"
     );
+}
+
+#[tokio::test]
+async fn native_thread_exit_defers_the_delivery_without_publishing_failure() {
+    struct Crashing;
+    impl NativeHost for Crashing {
+        fn run(&mut self, _: &str, _: &Cancellation) -> Result<String> {
+            panic!("simulated native thread failure")
+        }
+    }
+    let (_root, mut role, _shutdown, _calls) = generic_fixture(false).await;
+    role.host = HostClient::spawn(|| Ok(Crashing)).await.unwrap();
+    let sink = Sink::default();
+    let error = role
+        .handle(
+            &generic_message("1-0", json!({"x":[1.0,2.0]})),
+            "gpu0",
+            &sink,
+        )
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("deferred"));
+    assert!(role.host.is_retired());
+    assert!(sink.commits.lock().unwrap().is_empty());
+    assert!(sink.outputs.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn retirement_after_claim_defers_unexecuted_requests_without_release() {
+    for generic in [false, true] {
+        for shutdown_after_claim in [false, true] {
+            let (_root, role, shutdown, calls) = if generic {
+                generic_fixture(false).await
+            } else {
+                fixture().await
+            };
+            let sink = Sink {
+                retire_on_begin: Some(role.host.clone()),
+                shutdown_on_begin: shutdown_after_claim.then_some(shutdown),
+                ..Default::default()
+            };
+            let msg = if generic {
+                generic_message("1-0", json!({"x":[1.0,2.0]}))
+            } else {
+                message("1-0", json!({"case_id":"run_1"}))
+            };
+            let error = role.handle(&msg, "gpu0", &sink).await.unwrap_err();
+            assert!(error.to_string().contains("deferred"), "{error:#}");
+            assert_eq!(calls.load(Ordering::SeqCst), 0);
+            assert_eq!(sink.begins.lock().unwrap().len(), 1);
+            assert!(sink.commits.lock().unwrap().is_empty());
+            assert!(sink.outputs.lock().unwrap().is_empty());
+        }
+    }
 }
 
 #[tokio::test]
@@ -1136,6 +1225,153 @@ async fn invalid_case_is_terminal_failure_and_releases_original_reservation_with
         12345
     );
 }
+#[tokio::test]
+async fn retired_worker_preserves_queued_backlog_for_replacement() {
+    use worker_runtime::{
+        config::RuntimeConfig, engine::EngineBuilder, transport::redis::RedisTransport,
+    };
+    let (_redis, qm) = support::spawn_test_queue_manager("native-retired-backlog").await;
+    let (_root, role, _shutdown, calls) = generic_fixture(false).await;
+    let host = role.host.clone();
+    let config: RuntimeConfig = serde_json::from_value(json!({"stream_prefix":"test:","max_retries":1,"shared_dlq_stream":"dlq","streams":["gpu0","results","release","dlq"],"roles":{"native":{"inputs":[{"stream":"gpu0","max_dequeue_items":1,"poll_interval_ms":1,"block_ms":1,"reclaim_idle_ms":60000}],"outputs":["results","release"]}}})).unwrap();
+    let engine = EngineBuilder::new(&config, "native")
+        .role(Box::new(role))
+        .transport(Arc::new(RedisTransport::new(qm.clone(), "test:")))
+        .consumer("original-native")
+        .build()
+        .unwrap();
+    engine.ensure_consumer_groups().await.unwrap();
+    let payload: Value = generic_message("unused", json!({"x":[1.0,2.0]}))
+        .parse_payload()
+        .unwrap();
+    let mut ids = Vec::new();
+    for run in ["first-run", "queued-run"] {
+        ids.push(
+            qm.enqueue_to_stream(
+                &scicomp_rq::StreamKey::new("test:gpu0"),
+                run,
+                &payload.to_string(),
+                "execute",
+            )
+            .await
+            .unwrap(),
+        );
+    }
+    let group = "gpu0:grp";
+    let id = &ids[0];
+    let poison = format!(
+        "native-attempt:9:test:gpu0:{}:{group}:{}:{id}",
+        group.len(),
+        id.len()
+    );
+    let mut conn = qm.connection();
+    let _: () = redis::cmd("SET")
+        .arg(&poison)
+        .arg("wrong-type-sentinel")
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    let _ = engine.run_once().await.unwrap();
+    assert!(host.is_retired());
+    let second = engine.run_once().await.unwrap();
+    assert_eq!(
+        second.acked, 0,
+        "retired worker acknowledged a request it never ran"
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    let pending: Vec<(String, String, u64, u64)> = redis::cmd("XPENDING")
+        .arg("test:gpu0")
+        .arg(group)
+        .arg("-")
+        .arg("+")
+        .arg(10)
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    assert_eq!(
+        pending.iter().map(|item| &item.0).collect::<Vec<_>>(),
+        ids.iter().collect::<Vec<_>>()
+    );
+    for stream in ["test:results", "test:release", "test:dlq"] {
+        let count: u64 = redis::cmd("XLEN")
+            .arg(stream)
+            .query_async(&mut conn)
+            .await
+            .unwrap();
+        assert_eq!(count, 0, "retired worker published to {stream}");
+    }
+    let _: usize = redis::cmd("DEL")
+        .arg(&poison)
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    assert!(host.shutdown(std::time::Duration::from_secs(1)).await);
+    let (_replacement_root, replacement, _replacement_shutdown, replacement_calls) =
+        generic_fixture(false).await;
+    // Age the pending deliveries without shrinking the production lease.
+    for id in &ids {
+        let _: Vec<String> = redis::cmd("XCLAIM")
+            .arg("test:gpu0")
+            .arg(group)
+            .arg("original-native")
+            .arg(0)
+            .arg(id)
+            .arg("IDLE")
+            .arg(61000)
+            .arg("JUSTID")
+            .query_async(&mut conn)
+            .await
+            .unwrap();
+    }
+    let replacement = EngineBuilder::new(&config, "native")
+        .role(Box::new(replacement))
+        .transport(Arc::new(RedisTransport::new(qm.clone(), "test:")))
+        .consumer("replacement-native")
+        .build()
+        .unwrap();
+    replacement.ensure_consumer_groups().await.unwrap();
+    let _ = replacement.run_once().await.unwrap();
+    let _ = replacement.run_once().await.unwrap();
+    assert_eq!(replacement_calls.load(Ordering::SeqCst), 2);
+    let pending: Vec<(String, String, u64, u64)> = redis::cmd("XPENDING")
+        .arg("test:gpu0")
+        .arg(group)
+        .arg("-")
+        .arg("+")
+        .arg(10)
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    assert!(pending.is_empty());
+    for stream in ["test:results", "test:release"] {
+        let entries: Vec<(String, Vec<String>)> = redis::cmd("XRANGE")
+            .arg(stream)
+            .arg("-")
+            .arg("+")
+            .query_async(&mut conn)
+            .await
+            .unwrap();
+        assert_eq!(entries.len(), 2);
+        let mut runs = std::collections::BTreeSet::new();
+        for (_, fields) in entries {
+            let fields: std::collections::BTreeMap<_, _> = fields
+                .chunks_exact(2)
+                .map(|pair| (pair[0].as_str(), pair[1].as_str()))
+                .collect();
+            let output: Value = serde_json::from_str(fields["payload"]).unwrap();
+            assert_eq!(output["status"], "completed");
+            assert!(
+                runs.insert(output["run_id"].as_str().unwrap().to_owned()),
+                "duplicate completion"
+            );
+        }
+        assert_eq!(
+            runs,
+            std::collections::BTreeSet::from(["first-run".to_owned(), "queued-run".to_owned()])
+        );
+    }
+}
+
 #[tokio::test]
 async fn uncertain_commit_retires_host_and_does_not_use_unguarded_fallback() {
     let (_root, role, _shutdown, _) = fixture().await;

@@ -2,7 +2,7 @@
 
 import copy
 import json
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 import shlex
 from types import SimpleNamespace
 
@@ -193,7 +193,7 @@ def test_native_python_inventory_covers_existing_launcher_export_and_raw_variant
         "qa/scripts/test_create_native_raw_variant.py",
     }
     selected = {
-        str(Path(value).relative_to(components.REPO_ROOT))
+        Path(value).relative_to(components.REPO_ROOT).as_posix()
         for value in captured
         if value.endswith(".py") and Path(value).is_absolute()
     }
@@ -227,12 +227,13 @@ def test_native_rust_inventory_runs_worker_runtime_tests_explicitly(tmp_path):
 
 
 @pytest.mark.parametrize("missing_required_suite", [False, True])
+@pytest.mark.parametrize("relative_path_flavor", [Path, PureWindowsPath])
 def test_native_python_inventory_is_sealed_to_carried_suites(
-    tmp_path, monkeypatch, missing_required_suite
+    tmp_path, monkeypatch, missing_required_suite, relative_path_flavor
 ):
     source = tmp_path / "source"
     carried = {
-        str(path.relative_to(components.REPO_ROOT))
+        path.relative_to(components.REPO_ROOT).as_posix()
         for path in (components.REPO_ROOT / "tests").glob("test_native*.py")
     } | {
         "tests/test_run_lepton_native_inference_qa.py",
@@ -246,7 +247,12 @@ def test_native_python_inventory_is_sealed_to_carried_suites(
         path.write_text("# inventory fixture\n")
     if missing_required_suite:
         (source / "tests/test_native_release.py").unlink()
-    monkeypatch.setattr(components, "REPO_ROOT", source)
+
+    class InventoryPath(type(source)):
+        def relative_to(self, *args, **kwargs):
+            return relative_path_flavor(super().relative_to(*args, **kwargs))
+
+    monkeypatch.setattr(components, "REPO_ROOT", InventoryPath(source))
     reports = tmp_path / "reports"
     reports.mkdir()
     captured = []

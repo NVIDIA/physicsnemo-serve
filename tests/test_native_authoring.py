@@ -2,7 +2,7 @@
 
 import json
 import shutil
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 import subprocess
 import sys
 
@@ -328,6 +328,38 @@ def test_release_plan_tracks_model_bytes_but_not_acceptance_fixture_edits(tmp_pa
     third = cli("release", path, "--plan", "--cache-dir", tmp_path / "cache")
     assert third.returncode == 0, third.stderr
     assert json.loads(third.stdout)["models"]["primary"]["compilation_key"] != key
+
+
+def test_release_plan_normalizes_windows_qualification_fixture_paths(
+    tmp_path, monkeypatch
+):
+    import native_workflow
+
+    path, _ = scaffold(tmp_path)
+    configure_registry(path)
+    host_contained = native_workflow.contained
+
+    class WindowsRelativePath(type(path)):
+        def relative_to(self, *other):
+            return PureWindowsPath(super().relative_to(*other))
+
+    def contained_with_windows_fixture_paths(root, relative, label, **kwargs):
+        result = host_contained(root, relative, label, **kwargs)
+        if label in {"qualification.cases", "qualification.self_test"}:
+            return WindowsRelativePath(result)
+        return result
+
+    monkeypatch.setattr(
+        native_workflow, "contained", contained_with_windows_fixture_paths
+    )
+    resolved = native_workflow.resolve_release(path, require_output=True)
+    plan = native_workflow.release_module().plan_release(resolved, tmp_path / "cache")
+    assert plan["status"] == "planned"
+    assert plan["models"]["primary"]["action"] == "compile"
+    assert [item["path"] for item in resolved["qualification"]["fixtures"]] == [
+        "fixtures/cases.json",
+        "fixtures/self-test.json",
+    ]
 
 
 def test_raw_codec_cannot_use_array_schema(tmp_path):

@@ -33,6 +33,7 @@ RUN cargo fetch --locked --manifest-path /tmp/native-components-cargo/Cargo.toml
 FROM tooling AS components
 ARG SOURCE_SHA
 COPY source.bundle /tmp/native-component-source.bundle
+WORKDIR /tmp
 RUN rm -rf /workspace \
     && git clone /tmp/native-component-source.bundle /workspace \
     && test "$(git -C /workspace rev-parse HEAD)" = "${SOURCE_SHA}" \

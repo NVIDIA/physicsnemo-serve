@@ -442,7 +442,7 @@ def python_native(ctx):
     write_json(
         ctx.reports / "python-inventory.json",
         [
-            {"path": str(path.relative_to(REPO_ROOT)), **file_identity(path)}
+            {"path": path.relative_to(REPO_ROOT).as_posix(), **file_identity(path)}
             for path in files
         ],
     )

@@ -790,7 +790,7 @@ def resolve_release(
         "cases_path": str(cases_path),
         "cases_document": cases,
         "fixtures": [
-            {"path": str(p.relative_to(root)), **identity(p)}
+            {"path": p.relative_to(root).as_posix(), **identity(p)}
             for p in (cases_path, tests_path)
         ]
         + list(case_file_inventory.values()),

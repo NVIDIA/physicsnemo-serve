@@ -9,6 +9,7 @@ import re
 import shlex
 from string import Template
 import subprocess
+import sys
 
 import pytest
 
@@ -71,13 +72,25 @@ def configured_backends(tmp_path, image, source, prefix, backend, *, exact=False
     )
     build = tmp_path / "build"
     for argv in (
-        ["cmake", "-S", str(source_dir), "-B", str(build), *options],
-        ["cmake", "--build", str(build)],
+        [
+            "cmake",
+            "-S",
+            str(source_dir),
+            "-B",
+            str(build),
+            "-DCMAKE_BUILD_TYPE=Release",
+            *options,
+        ],
+        ["cmake", "--build", str(build), "--config", "Release"],
     ):
         result = subprocess.run(argv, capture_output=True, text=True)
         assert result.returncode == 0, result.stdout + result.stderr
+    executable = "consumer.exe" if sys.platform == "win32" else "consumer"
+    candidates = [build / "Release" / executable, build / executable]
+    consumer = next((path for path in candidates if path.is_file()), None)
+    assert consumer is not None, f"missing compiled consumer: {candidates}"
     result = subprocess.run(
-        [str(build / "consumer"), *(["--exact"] if exact else [])],
+        [str(consumer), *(["--exact"] if exact else [])],
         capture_output=True,
         text=True,
     )

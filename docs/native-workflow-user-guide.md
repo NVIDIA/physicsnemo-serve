@@ -22,6 +22,20 @@ uv sync --frozen
 uv run python scripts/plugin_dev.py init plugins/my-native \
   --runtime cpp --template tensor --backend aoti
 uv run python scripts/plugin_dev.py validate plugins/my-native
+```
+
+Set `output.repository` in `plugins/my-native/release.yaml` to your image
+registry/repository, without a tag or digest, before planning or building a
+release. For example:
+
+```yaml
+output:
+  repository: registry.example/team/my-native
+```
+
+Then inspect the release plan:
+
+```sh
 uv run python scripts/plugin_dev.py release plugins/my-native --plan
 ```
 
@@ -44,8 +58,7 @@ native/CMakeLists.txt        custom target, for --template cpp
 ```
 
 Replace the example affine model and its checkpoint, then update schemas,
-independent startup fixtures, and qualification cases together. Set
-`output.repository` in `release.yaml` before building a complete release.
+independent startup fixtures, and qualification cases together.
 Validation does not import the model or execute a Python inference hook.
 
 For `tensor.v1`, the release declares model aliases, tensor names, shapes and
@@ -83,6 +96,8 @@ authenticate Docker to the destination registry, and configure the existing
 Lepton workspace, node group, pull secret and shared-storage location. These are
 CI execution settings; credentials are supplied by the environment rather than
 embedded in the workflow project or release bundle.
+Cache publication on this control host uses POSIX file locks; it is not a native
+Windows construction path.
 
 ```sh
 python scripts/plugin_dev.py check-env plugins/my-native

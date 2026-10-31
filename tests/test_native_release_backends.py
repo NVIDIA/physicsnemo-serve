@@ -81,6 +81,9 @@ def test_tensorrt_stack_fingerprint_binds_runtime_plugins_and_transitive_librari
     nvinfer.write_bytes(b"TensorRT runtime")
     dependency = tmp_path / "libcublas.so.13"
     dependency.write_bytes(b"CUDA BLAS dependency")
+    # Mock Linux loader output with a rooted path on the fixture's current drive.
+    monkeypatch.chdir(tmp_path)
+    dependency_loader_path = dependency.as_posix().removeprefix(dependency.drive)
     monkeypatch.setitem(
         sys.modules,
         "torch",
@@ -107,12 +110,14 @@ def test_tensorrt_stack_fingerprint_binds_runtime_plugins_and_transitive_librari
             )
         return SimpleNamespace(
             returncode=0,
-            stdout=f"libcublas.so => {dependency} (0x00)\nlibcuda.so.1 => not found\n",
+            stdout=f"libcublas.so => {dependency_loader_path} (0x00)\nlibcuda.so.1 => not found\n",
             stderr="",
         )
 
     monkeypatch.setitem(sys.modules, "subprocess", SimpleNamespace(run=inspect))
-    probe = release.STACK_PROBE.replace("/opt/physicsnemo-inference/lib", str(sdk))
+    probe = release.STACK_PROBE.replace(
+        repr("/opt/physicsnemo-inference/lib"), repr(str(sdk))
+    )
     monkeypatch.setenv("PNMS_RELEASE_BACKEND", "tensorrt")
     exec(probe, {})
     first = json.loads(capsys.readouterr().out)
@@ -159,7 +164,9 @@ def test_tensorrt_stack_fingerprint_is_stable_across_python_hash_seeds(tmp_path)
     for alias in aliases:
         alias.symlink_to(runtime.name)
     listing = "\n".join(f"{alias.name} => {alias}" for alias in aliases)
-    probe = release.STACK_PROBE.replace("/opt/physicsnemo-inference/lib", str(sdk))
+    probe = release.STACK_PROBE.replace(
+        repr("/opt/physicsnemo-inference/lib"), repr(str(sdk))
+    )
     script = f"""
 import sys
 from types import SimpleNamespace

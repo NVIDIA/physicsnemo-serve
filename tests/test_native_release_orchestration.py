@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import importlib.util
+import os
 from pathlib import Path
 
 import pytest
@@ -276,6 +277,9 @@ def candidate(tmp_path):
     return out
 
 
+@pytest.mark.skipif(
+    os.name == "nt", reason="Release-controller cache publication uses POSIX file locks"
+)
 def test_verified_cache_reuse_rechecks_payload_and_first_publisher_wins(tmp_path):
     import shutil
 

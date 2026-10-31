@@ -16,6 +16,25 @@ ROOT = Path(__file__).resolve().parents[1]
 DEPLOY = ROOT / "native-inference/deploy"
 
 
+def test_portable_http_controller_import_does_not_require_posix_fcntl(tmp_path):
+    child = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import sys; sys.modules['fcntl'] = None; import native_release_http_job",
+        ],
+        cwd=tmp_path,
+        env={
+            **os.environ,
+            "PYTHONPATH": os.pathsep.join((str(DEPLOY), str(ROOT))),
+        },
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert child.returncode == 0, child.stdout + child.stderr
+
+
 def qa_trees(tmp_path):
     current, stale = tmp_path / "sealed-source", tmp_path / "old-base"
     for directory in ("native_inference", "scripts"):
@@ -47,9 +66,12 @@ def release_environment(current, stale):
         .split("FROM ${NATIVE_SERVER_IMAGE} AS release", 1)[1]
     )
     overrides = re.findall(r'^ENV PYTHONPATH="([^"]+)"$', release, flags=re.M)
-    value = overrides[-1] if overrides else str(stale)
-    value = value.replace("/opt/native-release/source", str(current)).replace(
-        "/opt/native-release", str(DEPLOY)
+    paths = overrides[-1].split(":") if overrides else [str(stale)]
+    value = os.pathsep.join(
+        path.replace("/opt/native-release/source", str(current)).replace(
+            "/opt/native-release", str(DEPLOY)
+        )
+        for path in paths
     )
     return {**os.environ, "PYTHONPATH": value}
 

@@ -13,20 +13,23 @@ class MockSession final : public BackendSession {
 
   std::vector<OwnedTensor> run(
       const std::vector<TensorView>& inputs) override {
-    if (inputs.size() != 1 || outputs_.size() != 1) {
-      throw std::runtime_error("mock backend supports one input and one output");
+    if (inputs.size() != 1 || outputs_.empty()) {
+      throw std::runtime_error("mock backend requires one input and at least one output");
     }
     const auto& input = inputs.front();
-    const auto& output = outputs_.front();
-    if (input.dtype != output.dtype || input.shape.size() != output.shape.size()) {
-      throw std::runtime_error("mock identity input/output schemas differ");
+    std::vector<OwnedTensor> outputs;
+    outputs.reserve(outputs_.size());
+    for (const auto& output : outputs_) {
+      if (input.dtype != output.dtype || input.shape.size() != output.shape.size()) {
+        throw std::runtime_error("mock identity input/output schemas differ");
+      }
+      std::vector<std::byte> storage(input.byte_size);
+      const auto* source = static_cast<const std::byte*>(input.data);
+      std::copy(source, source + input.byte_size, storage.begin());
+      outputs.emplace_back(output.name, output.dtype, input.device, input.shape,
+                           std::move(storage));
     }
-
-    std::vector<std::byte> storage(input.byte_size);
-    const auto* source = static_cast<const std::byte*>(input.data);
-    std::copy(source, source + input.byte_size, storage.begin());
-    return {OwnedTensor(output.name, output.dtype, input.device, input.shape,
-                        std::move(storage))};
+    return outputs;
   }
 
  private:

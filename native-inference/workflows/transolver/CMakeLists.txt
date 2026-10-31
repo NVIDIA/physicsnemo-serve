@@ -43,7 +43,8 @@ add_library(warp_runtime INTERFACE)
 target_link_directories(warp_runtime INTERFACE "${PNMIR_WARP_ROOT}/bin")
 target_link_libraries(warp_runtime INTERFACE "-l:warp.so")
 
-add_library(transolver_workflow src/workflow.cpp src/warp_sdf.cu)
+add_library(transolver_workflow SHARED
+  src/workflow.cpp src/warp_sdf.cu src/runner.cpp src/request_plan.cpp)
 target_include_directories(transolver_workflow PUBLIC include PRIVATE "${warp_include}")
 target_link_libraries(transolver_workflow
   PUBLIC PhysicsNeMoInference::runtime torch
@@ -58,14 +59,41 @@ target_link_libraries(physicsnemo-transolver
   PRIVATE transolver_workflow nlohmann_json::nlohmann_json VTK::CommonCore)
 foreach(backend IN LISTS backends)
   string(TOUPPER "${backend}" backend_upper)
-  target_compile_definitions(physicsnemo-transolver PRIVATE PNMIR_HAS_${backend_upper}=1)
-  target_link_libraries(physicsnemo-transolver PRIVATE PhysicsNeMoInference::${backend})
+  target_compile_definitions(transolver_workflow PRIVATE PNMIR_HAS_${backend_upper}=1)
+  target_link_libraries(transolver_workflow PRIVATE PhysicsNeMoInference::${backend})
 endforeach()
-set_property(TARGET physicsnemo-transolver APPEND PROPERTY
+include(GNUInstallDirs)
+file(RELATIVE_PATH transolver_install_libdir
+  "${CMAKE_INSTALL_FULL_BINDIR}" "${CMAKE_INSTALL_FULL_LIBDIR}")
+set_property(TARGET transolver_workflow physicsnemo-transolver APPEND PROPERTY
   BUILD_RPATH "${PNMIR_WARP_ROOT}/bin")
+set_property(TARGET transolver_workflow physicsnemo-transolver PROPERTY
+  INSTALL_RPATH "$ORIGIN;$ORIGIN/${transolver_install_libdir}")
+set_property(TARGET transolver_workflow physicsnemo-transolver PROPERTY
+  INSTALL_RPATH_USE_LINK_PATH TRUE)
+install(TARGETS transolver_workflow physicsnemo-transolver
+  LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+  ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+  RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+install(DIRECTORY include/transolver_workflow DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
 
 include(CTest)
 if(BUILD_TESTING)
+  add_executable(transolver_request_plan_tests tests/request_plan_test.cpp src/request_plan.cpp)
+  target_include_directories(transolver_request_plan_tests PRIVATE include)
+  target_link_libraries(transolver_request_plan_tests PRIVATE PhysicsNeMoInference::runtime)
+  add_test(NAME transolver_request_plan_tests COMMAND transolver_request_plan_tests)
+  add_executable(transolver_runtime_init_tests tests/runtime_init_test.cpp)
+  target_link_libraries(transolver_runtime_init_tests PRIVATE transolver_workflow)
+  add_test(NAME transolver_runtime_init_tests COMMAND transolver_runtime_init_tests)
+  add_executable(transolver_runner_tests tests/runner_test.cpp)
+  target_link_libraries(transolver_runner_tests PRIVATE transolver_workflow nlohmann_json::nlohmann_json)
+  set_target_properties(transolver_runner_tests PROPERTIES
+    OUTPUT_NAME physicsnemo-transolver-runner
+    INSTALL_RPATH "$ORIGIN/${transolver_install_libdir}"
+    INSTALL_RPATH_USE_LINK_PATH TRUE)
+  install(TARGETS transolver_runner_tests RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR} COMPONENT Tests)
+  add_test(NAME transolver_runner_tests COMMAND transolver_runner_tests)
   add_executable(transolver_workflow_tests tests/workflow_test.cpp)
   target_link_libraries(transolver_workflow_tests PRIVATE transolver_workflow)
   add_test(NAME transolver_workflow_tests COMMAND transolver_workflow_tests)

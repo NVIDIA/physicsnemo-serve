@@ -4513,6 +4513,99 @@ def test_plugin_dev_validate_accepts_shipped_plugins():
         assert proc.returncode == 0, f"{plugin_root.name}: {proc.stderr}"
 
 
+def test_native_plugin_validation_and_checks_do_not_import_python_workflows(
+    tmp_path, monkeypatch
+):
+    module = load_plugin_dev_module()
+    plugin_root = repo_root() / "plugins" / "physicsnemo-cfd-transolver-native"
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("native validation must not import a Python workflow")
+
+    monkeypatch.setattr(module, "load_plugin_module", forbidden)
+    validation = module.validate_plugin(plugin_root)
+    assert validation["status"] == "valid"
+    assert validation["phases"] == ["execute"]
+    config = tmp_path / "deployment.json"
+    config.write_text("{}")
+    monkeypatch.setenv("NATIVE_DEPLOYMENT_CONFIG", str(config))
+    checked = module.check_plugin(plugin_root)
+    assert checked["status"] == "ready"
+    assert checked["example_run"] is None
+    assert checked["execution"] == "requires_native_deployment"
+    manifest, _, native_module = module._load_plugin_contract(plugin_root)
+    assert native_module is None
+    payload = module.build_example_payload(plugin_root, manifest)
+    assert payload["request"]["raw_fields"]["case_id"] == "run_1"
+    with pytest.raises(ValueError, match="packaged native-worker"):
+        module.run_example_plugin(plugin_root)
+    with pytest.raises(ValueError, match="packaged native-worker"):
+        module.build_run_local_plan(
+            plugin_root, workspace=tmp_path / "local", port=0, redis_port=0
+        )
+    assert not (tmp_path / "local").exists()
+
+
+@pytest.mark.parametrize("missing", ["request_schema", "result_schema"])
+def test_native_plugin_requires_explicit_schemas(tmp_path, missing):
+    import shutil
+
+    module = load_plugin_dev_module()
+    plugin_root = tmp_path / "native"
+    shutil.copytree(
+        repo_root() / "plugins" / "physicsnemo-cfd-transolver-native", plugin_root
+    )
+    path = plugin_root / "plugin.yaml"
+    manifest = yaml.safe_load(path.read_text())
+    if missing == "request_schema":
+        manifest["ingress"].pop("json_schema_inline")
+    else:
+        manifest["outputs"].pop("result_schema_inline")
+    path.write_text(yaml.safe_dump(manifest))
+    with pytest.raises(ValueError, match="explicit.*schema"):
+        module.validate_plugin(plugin_root)
+
+
+@pytest.mark.parametrize(
+    "mutation", ["python_handler", "python_readiness", "python_phase", "python_kind"]
+)
+def test_native_manifest_rejects_python_hooks_and_cross_runtime_handlers(
+    tmp_path, mutation
+):
+    module = load_plugin_dev_module()
+    manifest = yaml.safe_load(
+        (
+            repo_root() / "plugins/physicsnemo-cfd-transolver-native/plugin.yaml"
+        ).read_text()
+    )
+    if mutation == "python_handler":
+        manifest["pipeline"]["stages"][1]["handler"] = "plugin_phase"
+    elif mutation == "python_readiness":
+        manifest["developer"]["readiness"]["python_modules"] = ["torch"]
+    elif mutation == "python_phase":
+        manifest["runtime"]["prepare_executor_class"] = "python.test"
+    else:
+        manifest["runtime"]["kind"] = "python"
+    path = tmp_path / "plugin.yaml"
+    path.write_text(yaml.safe_dump(manifest))
+    with pytest.raises(ValueError, match="native_workflow|Python phase|cpp runtime"):
+        module.load_plugin_manifest(path)
+
+
+def _assert_native_shipped_contract(plugin_root, manifest):
+    assert manifest["runtime"]["kind"] == "cpp"
+    assert not manifest["runtime"]["entrypoint"].endswith(".py")
+    assert not (plugin_root / "workflow.py").exists()
+    assert [stage["handler"] for stage in manifest["pipeline"]["stages"]] == [
+        "schedule",
+        "native_workflow",
+        "persist_results",
+    ]
+    validation = load_plugin_dev_module().validate_plugin(plugin_root)
+    assert validation["status"] == "valid"
+    assert validation["phases"] == ["execute"]
+
+
 def test_plugin_dev_build_example_payload_omits_empty_resource_profile_for_scheduler_fallback():
     module = load_plugin_dev_module()
     plugin_root = repo_root() / "plugins" / "e2s-deterministic"
@@ -4627,10 +4720,13 @@ def test_shipped_plugins_have_local_docs_and_example_fixtures():
 
         manifest = load_plugin_manifest(plugin_root / "plugin.yaml")
         content_types = manifest.get("ingress", {}).get("content_types", [])
-        assert manifest.get("runtime", {}).get("entrypoint") == "workflow.py"
-        assert (plugin_root / "workflow.py").is_file(), (
-            f"{plugin_root.name} is missing workflow.py"
-        )
+        if manifest["runtime"]["kind"] == "cpp":
+            _assert_native_shipped_contract(plugin_root, manifest)
+        else:
+            assert manifest.get("runtime", {}).get("entrypoint") == "workflow.py"
+            assert (plugin_root / "workflow.py").is_file(), (
+                f"{plugin_root.name} is missing workflow.py"
+            )
         assert not (plugin_root / "plugin.py").exists(), (
             f"{plugin_root.name} still uses plugin.py"
         )
@@ -4694,6 +4790,9 @@ def test_shipped_plugins_expose_workflow_objects():
         if not _plugin_deps_available(plugin_root):
             continue
         manifest = load_plugin_manifest(plugin_root / "plugin.yaml")
+        if manifest["runtime"]["kind"] == "cpp":
+            _assert_native_shipped_contract(plugin_root, manifest)
+            continue
         workflow_id = manifest["metadata"]["id"]
         entrypoint = plugin_root / manifest["runtime"]["entrypoint"]
         module = load_plugin_module(
@@ -4724,6 +4823,9 @@ def test_shipped_plugins_opt_into_process_cache():
         if not _plugin_deps_available(plugin_root):
             continue
         manifest = load_plugin_manifest(plugin_root / "plugin.yaml")
+        if manifest["runtime"]["kind"] == "cpp":
+            _assert_native_shipped_contract(plugin_root, manifest)
+            continue
         workflow_id = manifest["metadata"]["id"]
         entrypoint = plugin_root / manifest["runtime"]["entrypoint"]
         module = load_plugin_module(

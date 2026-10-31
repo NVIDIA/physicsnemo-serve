@@ -26,6 +26,8 @@
 #   SERVER_PORT      - HTTP server listen port (default: 8080)
 #   WORKERS_PER_GPU  - Number of execute workers per GPU when launch config omits workers_per_device (default: 1)
 #   RUNTIME_ENV_LAUNCHER_SCRIPT - Runtime-env-based execute launcher (default: /app/scripts/runtime_env_launcher.py)
+#   NATIVE_DEPLOYMENT_CONFIG - Compiled native deployment JSON; selects the Rust execute worker
+#   NATIVE_WORKER_BIN - Native execute binary (default: /app/bin/native-worker)
 #   HEALTH_STUB_PORT - Port for health stub proxy (default: 8001, set as Lepton endpoint port)
 #   HEALTH_STUB_ENABLED - Enable/disable health stub (default: true)
 #
@@ -75,6 +77,8 @@ SUPERVISORD_CONF="/tmp/supervisord.conf"
 # Worker binary paths
 INFERENCE_SERVER_BIN="${INFERENCE_SERVER_BIN:-/app/bin/inference-server}"
 WORKER_RUNTIME_BIN="${WORKER_RUNTIME_BIN:-/app/bin/worker-runtime}"
+NATIVE_WORKER_BIN="${NATIVE_WORKER_BIN:-/app/bin/native-worker}"
+NATIVE_DEPLOYMENT_CONFIG="${NATIVE_DEPLOYMENT_CONFIG:-}"
 RUNTIME_ENV_LAUNCHER_SCRIPT="${RUNTIME_ENV_LAUNCHER_SCRIPT:-${GPU_LAUNCHER_SCRIPT:-/app/scripts/runtime_env_launcher.py}}"
 SERVER_PORT="${SERVER_PORT:-8080}"
 SCHEDULER_METRICS_PORT="${SCHEDULER_METRICS_PORT:-9101}"
@@ -125,12 +129,35 @@ check_binary() {
     return 0
 }
 
+native_stop_wait_seconds() {
+    # Startup-only configuration parsing; native requests never enter Python.
+    python3 - "$NATIVE_DEPLOYMENT_CONFIG" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as source:
+    drain = json.load(source)["drain_timeout_seconds"]
+if type(drain) is not int or not 0 < drain <= 2**64 - 1:
+    raise ValueError("native drain_timeout_seconds must be a positive u64")
+# Role drain + final host destruction, with BEGIN/completion retries and
+# allowance for registry/engine cleanup. Supervisord bounds the child lifetime.
+print(2 * drain + 90)
+PY
+}
+
 # =============================================================================
 # Redis Startup
 # =============================================================================
 
 start_redis() {
     log "Starting Redis server..."
+
+    # Native completion markers must survive memory pressure until the delivery
+    # retry horizon ends. Preserve the existing Python image policy.
+    local memory_policy="allkeys-lru"
+    if [[ -n "$NATIVE_DEPLOYMENT_CONFIG" ]]; then
+        memory_policy="noeviction"
+    fi
     
     # Start Redis with configuration
     redis-server \
@@ -138,7 +165,7 @@ start_redis() {
         --bind 127.0.0.1 \
         --port 6379 \
         --maxmemory "$REDIS_MAXMEMORY" \
-        --maxmemory-policy allkeys-lru \
+        --maxmemory-policy "$memory_policy" \
         --appendonly no \
         --save "" \
         --loglevel notice
@@ -270,6 +297,11 @@ EOF
                 cat > /tmp/scheduler-wrapper.sh << 'WRAPPER_EOF'
 #!/bin/bash
 # Wrapper script that waits for execute worker registration before starting scheduler
+if [[ -n "${NATIVE_DEPLOYMENT_CONFIG:-}" ]]; then
+    echo "[scheduler-wrapper] Waiting for this native deployment's live registration..."
+    "${NATIVE_WORKER_BIN:-/app/bin/native-worker}" wait-registration "$NATIVE_DEPLOYMENT_CONFIG" || exit $?
+    exec "$@"
+fi
 WAIT_TIMEOUT="${GPU_WAIT_TIMEOUT:-15}"
 echo "[scheduler-wrapper] Waiting for execute worker registration (timeout: ${WAIT_TIMEOUT}s)..."
 for i in $(seq 1 $WAIT_TIMEOUT); do
@@ -305,7 +337,7 @@ priority=$scheduler_priority
 redirect_stderr=true
 stdout_logfile=/dev/stdout
 stdout_logfile_maxbytes=0
-environment=RUST_LOG="$LOG_LEVEL",REDIS_URL="$REDIS_URL",QUEUE_CONFIG="$QUEUE_CONFIG",REDIS_STREAM_PREFIX="$REDIS_STREAM_PREFIX",WORKER_RUNTIME_CONFIG="$WORKER_RUNTIME_CONFIG",GPU_WAIT_TIMEOUT="15",HEALTH_PORT="$SCHEDULER_METRICS_PORT"
+environment=RUST_LOG="$LOG_LEVEL",REDIS_URL="$REDIS_URL",QUEUE_CONFIG="$QUEUE_CONFIG",REDIS_STREAM_PREFIX="$REDIS_STREAM_PREFIX",WORKER_RUNTIME_CONFIG="$WORKER_RUNTIME_CONFIG",GPU_WAIT_TIMEOUT="15",HEALTH_PORT="$SCHEDULER_METRICS_PORT",NATIVE_DEPLOYMENT_CONFIG="$NATIVE_DEPLOYMENT_CONFIG",NATIVE_WORKER_BIN="$NATIVE_WORKER_BIN"
 EOF
             programs_added=$((programs_added + 1))
         else
@@ -589,7 +621,38 @@ EOF
     
     # Add execute launcher if requested (priority 10 = starts first)
     if is_worker_requested "execute" || is_worker_requested "gpu"; then
-        if [[ -f "$RUNTIME_ENV_LAUNCHER_SCRIPT" ]]; then
+        if [[ -n "$NATIVE_DEPLOYMENT_CONFIG" ]]; then
+            [[ -x "$NATIVE_WORKER_BIN" ]] || die "native-worker binary not found at $NATIVE_WORKER_BIN"
+            [[ -f "$NATIVE_DEPLOYMENT_CONFIG" ]] || die "native deployment config not found at $NATIVE_DEPLOYMENT_CONFIG"
+            [[ "$WORKERS_PER_GPU" == "1" ]] || die "native deployments require WORKERS_PER_GPU=1"
+            local native_stop_wait
+            native_stop_wait=$(native_stop_wait_seconds) || die "invalid native shutdown configuration"
+            cat > /tmp/native-worker-wrapper.sh << EOF
+#!/bin/bash
+set -euo pipefail
+exec "$NATIVE_WORKER_BIN" "$NATIVE_DEPLOYMENT_CONFIG"
+EOF
+            chmod +x /tmp/native-worker-wrapper.sh
+            cat >> "$SUPERVISORD_CONF" << EOF
+
+[program:native-worker]
+command=/tmp/native-worker-wrapper.sh
+directory=/app
+autostart=true
+autorestart=true
+startsecs=10
+startretries=3
+stopwaitsecs=$native_stop_wait
+stopsignal=TERM
+priority=10
+redirect_stderr=true
+stdout_logfile=/dev/stdout
+stdout_logfile_maxbytes=0
+environment=RUST_LOG="$LOG_LEVEL",REDIS_URL="$REDIS_URL",REDIS_STREAM_PREFIX="$REDIS_STREAM_PREFIX",NATIVE_DEPLOYMENT_CONFIG="$NATIVE_DEPLOYMENT_CONFIG"
+EOF
+            programs_added=$((programs_added + 1))
+            log "  + native-worker (one worker for the deployment's configured GPU, priority=10)"
+        elif [[ -f "$RUNTIME_ENV_LAUNCHER_SCRIPT" ]]; then
             cat >> "$SUPERVISORD_CONF" << EOF
 
 [program:runtime-env-launcher]
@@ -658,18 +721,33 @@ shutdown_handler() {
     log "!!!! Timestamp: $(date -u '+%Y-%m-%dT%H:%M:%SZ') !!!!"
     log "Stopping workers..."
     
-    # Stop supervisord gracefully
-    if [[ -f /tmp/supervisord.pid ]]; then
+    # Stop supervisord gracefully. Prefer our child PID over a stale pidfile.
+    if [[ -n "${SUPERVISORD_PID:-}" ]] || [[ -f /tmp/supervisord.pid ]]; then
         local pid
-        pid=$(cat /tmp/supervisord.pid)
+        pid=${SUPERVISORD_PID:-$(cat /tmp/supervisord.pid)}
         if kill -0 "$pid" 2>/dev/null; then
+            if [[ -n "$NATIVE_DEPLOYMENT_CONFIG" ]]; then
+                # Repeated termination signals must not interrupt the child wait.
+                trap '' SIGTERM SIGINT SIGHUP
+            fi
             kill -TERM "$pid"
-            # Wait for supervisord to stop (max 60 seconds)
-            local timeout=60
-            while kill -0 "$pid" 2>/dev/null && [[ $timeout -gt 0 ]]; do
-                sleep 1
-                timeout=$((timeout - 1))
-            done
+            if [[ -n "$NATIVE_DEPLOYMENT_CONFIG" ]]; then
+                # Scheduler/results stop before the native worker. Keep embedded
+                # Redis available until all supervisor stop budgets have elapsed,
+                # so the owned terminal result and release can still commit.
+                # wait reaps our child (including an already exited zombie).
+                if ! wait "$pid" 2>/dev/null; then
+                    # A sourced/manual invocation may only have a non-child PID.
+                    while kill -0 "$pid" 2>/dev/null; do sleep 1; done
+                fi
+            else
+                # Preserve the existing Python deployment's 60 second wait.
+                local timeout=60
+                while kill -0 "$pid" 2>/dev/null && [[ $timeout -gt 0 ]]; do
+                    sleep 1
+                    timeout=$((timeout - 1))
+                done
+            fi
         fi
     fi
     

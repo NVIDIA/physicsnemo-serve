@@ -139,6 +139,30 @@ Trait dispatch contract:
 - If you need `tokio::spawn`, prefer a concrete call path where the future is
   known `Send` (for example, direct `QueueManager` method calls).
 
+## Native execution completion
+
+Rust native workers can use `begin_attempt(message, consumer, attempt_token)` and
+`complete_attempt(message, outputs, consumer, attempt_token)` on `QueueManager`.
+Use a unique consumer identity per worker process and preserve the attempt token
+through completion retries. `begin_attempt` returns `None` for an owned active
+attempt and `Some(output_ids)` if the delivery already committed. In that case,
+do not execute inference again.
+
+`complete_attempt` checks the pending consumer and active attempt, emits all
+outputs, acknowledges the source, and records the output IDs in one Lua call.
+Pass the terminal outcome and the exact original reservation release as outputs.
+A retry after a lost successful reply returns the original IDs without emitting
+another outcome or release. Wrong key types, aliased destinations/run hashes,
+and invalid metadata fail before writes. This fences publication; it does not
+guarantee inference runs only once across process crashes.
+
+The completion state key derives from the source stream, group, and message ID.
+It deliberately has no expiry: deleting it before the source identity can no
+longer be retried would break deduplication. Operational retention must respect
+that horizon, and durability follows the deployment's Redis persistence policy.
+After reclaim, a new consumer can claim a new attempt; the old consumer cannot
+commit. A single consumer cannot replace its active token with a different one.
+
 ## Feature Flags
 
 - `python` - enables PyO3-based Python bindings

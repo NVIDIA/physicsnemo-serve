@@ -44,6 +44,8 @@ pub struct ArtifactRef {
     pub size_bytes: u64,
     pub storage_path: String,
     pub original_filename: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -104,6 +106,11 @@ impl RunEnvelope {
         use_prefetch: bool,
         output_publication: Option<ResolvedOutputPublication>,
     ) -> Result<Self> {
+        if plugin.manifest.runtime.kind == "cpp" && output_publication.is_some() {
+            return Err(anyhow!(
+                "native workflow currently supports local artifacts only; cloud publication is not qualified"
+            ));
+        }
         let pipeline = build_stage_pipeline(plugin, use_prefetch, output_publication.as_ref())?;
         let first_stage = pipeline.first().ok_or_else(|| {
             anyhow!(

@@ -94,22 +94,33 @@ def test_component_image_replaces_inherited_qa_from_sealed_source(
         "native_inference/assets.py": "current assets\n",
         "scripts/run_native_cfd_job.py": "current controller\n",
     }
+    for name in (
+        "native_inference/contract.py",
+        "scripts/run_lepton_native_inference_qa.py",
+    ):
+        current_qa[name] = (ROOT / "qa" / name).read_text()
     for name, content in current_qa.items():
         path = source / "qa" / name
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content)
+    config = source / "deploy/config.py"
+    config.parent.mkdir()
+    config.write_text(
+        "def load_deploy_config():\n    return {'marker': 'current deploy config'}\n"
+    )
 
     installed = tmp_path / "opt/native-release"
     installed.mkdir(parents=True)
-    preserved = installed / (
-        "source/plugins/base.py" if inherited_qa else "base-deploy.py"
-    )
+    preserved = installed / "plugins/base.py"
     preserved.parent.mkdir(parents=True, exist_ok=True)
     preserved.write_text("preserved base file\n")
     installed_qa = installed / "source/qa"
     if inherited_qa:
         installed_qa.mkdir(parents=True)
         (installed_qa / "obsolete.py").write_text("stale QA\n")
+        stale_config = installed / "source/deploy/config.py"
+        stale_config.parent.mkdir()
+        stale_config.write_text("raise RuntimeError('stale deploy config')\n")
     dockerfile = (ROOT / "qa/native_inference/components.Dockerfile").read_text()
     install = dockerfile.split("WORKDIR /workspace\nRUN ", 1)[1].split("\nENV ", 1)[0]
     install = install.replace("/opt/native-release", shlex.quote(str(installed)))
@@ -128,6 +139,28 @@ def test_component_image_replaces_inherited_qa_from_sealed_source(
         if path.is_file()
     } == current_qa
     assert preserved.read_text() == "preserved base file\n"
+    assert (installed / "native_release.py").read_text() == "current deploy\n"
+    probe = subprocess.run(
+        [
+            sys.executable,
+            "-I",
+            "-c",
+            "import json, runpy, sys; "
+            "module = runpy.run_path(sys.argv[1]); "
+            "print(json.dumps({'root': str(module['REPO_ROOT']), "
+            "'config': module['load_deploy_config']()}))",
+            str(installed_qa / "scripts/run_lepton_native_inference_qa.py"),
+        ],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert probe.returncode == 0, probe.stdout + probe.stderr
+    assert json.loads(probe.stdout) == {
+        "root": str(source),
+        "config": {"marker": "current deploy config"},
+    }
 
 
 def test_release_image_is_qualified_before_optional_exact_digest_promotion():

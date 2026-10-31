@@ -599,6 +599,81 @@ def test_cfd_builder_launcher_propagates_real_cli_failure(tmp_path):
     )
 
 
+def test_cfd_compile_keeps_reference_assets_on_configured_shared_mount(
+    tmp_path, monkeypatch
+):
+    from qa.native_inference import cfd_reference
+
+    mount = tmp_path / "other-outputs"
+    ephemeral = tmp_path / "compile-container"
+    inputs = ephemeral / "input"
+    inputs.mkdir(parents=True)
+    config = resolved()
+    config.update(
+        source_sha="a" * 40,
+        paths={"repository_root": str(ephemeral)},
+        lepton={"mount_target": str(mount)},
+    )
+    release.write_json(
+        inputs / "request.json",
+        {
+            "resolved": config,
+            "build_aliases": {
+                "primary": {"action": "compile", "compilation_key": "c" * 64}
+            },
+            "stack_fingerprint": "d" * 64,
+        },
+    )
+    monkeypatch.setenv("SOURCE_SHA", config["source_sha"])
+    monkeypatch.setattr(driver, "environment", lambda *args, **kwargs: {})
+    monkeypatch.setattr(driver, "qualify_stack", lambda *args, **kwargs: None)
+    monkeypatch.setattr(driver, "compilation_key", lambda *args: "c" * 64)
+    monkeypatch.setattr(
+        driver, "collect_builds", lambda root, handoff, *args, **kwargs: handoff.mkdir()
+    )
+    monkeypatch.setattr(driver, "seal", lambda *args, **kwargs: {})
+
+    def capture(cfg):
+        assert cfg.asset_cache.is_relative_to(mount), (
+            "captured model assets must survive compile-container cleanup"
+        )
+        assert cfg.asset_cache == mount / "assets/transolver"
+        asset_root = cfg.asset_cache / "verified"
+        asset_root.mkdir(parents=True)
+        paths = []
+        for name, pin in cfd_reference.ASSET_PINS.items():
+            path = asset_root / pin["filename"]
+            path.write_text(name)
+            monkeypatch.setitem(
+                cfd_reference.ASSET_PINS,
+                name,
+                {"filename": path.name, **release.file_identity(path)},
+            )
+            paths.append(path)
+        release.write_json(
+            cfg.output / "reference/fields.json",
+            {"local_model_assets": cfd_reference.local_model_assets(*paths)},
+        )
+        release.write_json(cfg.output / "summary.json", {"cases": []})
+        return 0
+
+    monkeypatch.setattr(driver.full, "run", capture)
+    output = mount / "native-inference/build"
+    driver.run(
+        SimpleNamespace(
+            output=output,
+            input_root=inputs,
+            run_id="build",
+            image=config["images"]["builder"],
+        )
+    )
+    shutil.rmtree(ephemeral)
+    asset_arguments = cfd_reference.reference_model_asset_arguments(
+        output / "full/reference/fields.json"
+    )
+    assert all(Path(path).is_relative_to(mount) for path in asset_arguments[1::2])
+
+
 def test_cfd_http_environment_identifies_selected_tensorrt_stack(tmp_path, monkeypatch):
     import native_release_cfd_http_job as http_job
 

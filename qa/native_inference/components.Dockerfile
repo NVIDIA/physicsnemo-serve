@@ -40,7 +40,10 @@ RUN rm -rf /workspace \
     && git -C /workspace remote remove origin \
     && rm /tmp/native-component-source.bundle
 WORKDIR /workspace
-RUN cp -a native-inference/deploy/. /opt/native-release/
+RUN cp -a native-inference/deploy/. /opt/native-release/ \
+    && mkdir -p /opt/native-release/source \
+    && rm -rf /opt/native-release/source/qa \
+    && cp -a /workspace/qa /opt/native-release/source/
 ENV SOURCE_SHA=${SOURCE_SHA} \
     NVIDIA_VISIBLE_DEVICES=void CUDA_VISIBLE_DEVICES="" \
     PYTHONPATH="/workspace:/workspace/scripts:/workspace/python:/workspace/python/e2s_tools:/usr/lib/python3/dist-packages" \

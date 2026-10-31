@@ -189,6 +189,8 @@ def run(args):
                 "/opt/physicsnemo-inference/bin/physicsnemo-infer",
                 "--source-metadata",
                 str(args.output / "source.json"),
+                "--asset-cache",
+                str(Path(resolved["lepton"]["mount_target"]) / "assets/transolver"),
                 "--command-timeout",
                 "7000",
                 *reuse,

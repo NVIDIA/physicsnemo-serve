@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import subprocess
 import sys
 
@@ -78,6 +79,55 @@ def test_component_image_is_built_from_sealed_source_and_locked_dependencies():
         "containerimage.digest",
     ):
         assert value in build["run"]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Linux Docker RUN shell contract")
+@pytest.mark.parametrize("inherited_qa", [False, True])
+def test_component_image_replaces_inherited_qa_from_sealed_source(
+    tmp_path, inherited_qa
+):
+    source = tmp_path / "workspace"
+    deploy = source / "native-inference/deploy"
+    deploy.mkdir(parents=True)
+    (deploy / "native_release.py").write_text("current deploy\n")
+    current_qa = {
+        "native_inference/assets.py": "current assets\n",
+        "scripts/run_native_cfd_job.py": "current controller\n",
+    }
+    for name, content in current_qa.items():
+        path = source / "qa" / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content)
+
+    installed = tmp_path / "opt/native-release"
+    installed.mkdir(parents=True)
+    preserved = installed / (
+        "source/plugins/base.py" if inherited_qa else "base-deploy.py"
+    )
+    preserved.parent.mkdir(parents=True, exist_ok=True)
+    preserved.write_text("preserved base file\n")
+    installed_qa = installed / "source/qa"
+    if inherited_qa:
+        installed_qa.mkdir(parents=True)
+        (installed_qa / "obsolete.py").write_text("stale QA\n")
+    dockerfile = (ROOT / "qa/native_inference/components.Dockerfile").read_text()
+    install = dockerfile.split("WORKDIR /workspace\nRUN ", 1)[1].split("\nENV ", 1)[0]
+    install = install.replace("/opt/native-release", shlex.quote(str(installed)))
+    install = install.replace("/workspace", shlex.quote(str(source)))
+    child = subprocess.run(
+        ["/bin/sh", "-c", install],
+        cwd=source,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert child.returncode == 0, child.stdout + child.stderr
+    assert {
+        path.relative_to(installed_qa).as_posix(): path.read_text()
+        for path in installed_qa.rglob("*")
+        if path.is_file()
+    } == current_qa
+    assert preserved.read_text() == "preserved base file\n"
 
 
 def test_release_image_is_qualified_before_optional_exact_digest_promotion():

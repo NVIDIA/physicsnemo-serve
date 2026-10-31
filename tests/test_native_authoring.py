@@ -56,6 +56,55 @@ def test_tensor_scaffold_validates_without_python_or_compiled_packages(tmp_path)
     assert validation["native"]["configuration_required"] == ["output.repository"]
 
 
+@pytest.mark.parametrize("model_alias", [None, "primary", "surrogate"])
+def test_tensor_release_stages_canonical_model_alias(
+    tmp_path, monkeypatch, model_alias
+):
+    import native_workflow
+    from test_native_release_orchestration import candidate
+
+    path, _ = scaffold(tmp_path)
+    manifest_path = path / "plugin.yaml"
+    manifest = yaml.safe_load(manifest_path.read_text())
+    mapping = manifest["configuration"]["native"]["tensor_adapter"]
+    if model_alias is None:
+        mapping.pop("model_alias")
+    else:
+        mapping["model_alias"] = model_alias
+    manifest_path.write_text(yaml.safe_dump(manifest))
+    original = manifest_path.read_bytes()
+    expected_alias = model_alias or "primary"
+    if expected_alias != "primary":
+        profile_path = path / "release.yaml"
+        profile = yaml.safe_load(profile_path.read_text())
+        profile["models"] = {expected_alias: {"project": profile.pop("model_project")}}
+        profile_path.write_text(yaml.safe_dump(profile))
+        fixtures_path = path / "fixtures/self-test.json"
+        fixtures = json.loads(fixtures_path.read_text())
+        fixtures[expected_alias] = fixtures.pop("primary")
+        fixtures_path.write_text(json.dumps(fixtures))
+
+    resolved = native_workflow.resolve_release(path)
+    release = native_workflow.release_module()
+    # The candidate is synthetic Builder evidence; staging still verifies its
+    # package, parity receipts, startup fixtures and sealed bundle inventory.
+    monkeypatch.setattr(release, "model_input_identity", lambda *_: None)
+    bundle = tmp_path / "bundle"
+    release.stage_release(
+        resolved,
+        {expected_alias: candidate(tmp_path)},
+        bundle,
+        sources=[{"path": "unit-only", "sha256": "f" * 64, "size_bytes": 1}],
+    )
+    deployment = release.read_json(bundle / "deployment.json")
+    adapter = deployment["workflow"]["tensor_adapter"]
+    assert adapter["model_alias"] == expected_alias
+    assert adapter == {"model_alias": expected_alias, **mapping}
+    assert expected_alias in deployment["workflow"]["models"]
+    assert manifest_path.read_bytes() == original
+    release.verify_bundle(bundle)
+
+
 def test_custom_scaffold_links_factory_without_core_source_changes(tmp_path):
     path, _ = scaffold(tmp_path, "cpp")
     manifest = yaml.safe_load((path / "plugin.yaml").read_text())

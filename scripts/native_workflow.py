@@ -657,6 +657,7 @@ def resolve_release(
     )
     if adapter == "tensor.v1":
         _mapping(mapping, projects, request_schema, result_schema)
+        mapping = {"model_alias": "primary", **mapping}
     resolved.update(model_aliases=projects, adapter_config=mapping)
     if adapter == "custom.v1":
         selection = release.get("native_workflow", {})

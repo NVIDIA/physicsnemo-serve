@@ -4,13 +4,15 @@ from pathlib import Path, PurePosixPath
 import re
 import shlex
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[1]
 RECIPE = ROOT / "native-inference/deploy/Dockerfile.native"
 
 
-def instructions():
-    recipe = RECIPE.read_text().replace("\\\n", " ")
+def instructions(path=RECIPE):
+    recipe = path.read_text().replace("\\\n", " ")
     return [
         line.split(None, 1)
         for line in recipe.splitlines()
@@ -24,6 +26,43 @@ def environment(stage):
         for instruction, command in stage
         if instruction == "ENV"
         for value in shlex.split(command)
+    )
+
+
+@pytest.mark.parametrize("name", ["Dockerfile.native", "Dockerfile.workflow"])
+def test_release_copies_current_cargo_outputs_with_inherited_target_dir(name):
+    recipe = instructions(RECIPE.with_name(name))
+    stages = [index for index, (op, _) in enumerate(recipe) if op == "FROM"]
+    build = recipe[stages[0] : stages[1]]
+    release = recipe[stages[-1] :]
+    cargo_index, cargo_command = next(
+        (index, command)
+        for index, (op, command) in enumerate(build)
+        if op == "RUN" and "cargo build" in command
+    )
+    # The qualified SDK base has this setting and stale /src/target binaries.
+    build_env = {"CARGO_TARGET_DIR": "/tmp/pnms-service-target"}
+    build_env.update(environment(build[:cargo_index]))
+    cargo_args = shlex.split(cargo_command.split("cargo build", 1)[1])
+    target = build_env["CARGO_TARGET_DIR"]
+    for index, argument in enumerate(cargo_args):
+        if argument == "--target-dir":
+            target = cargo_args[index + 1]
+        elif argument.startswith("--target-dir="):
+            target = argument.split("=", 1)[1]
+    target = PurePosixPath(target)
+    assert target.is_absolute(), "Cargo release outputs need an absolute directory"
+    binaries = ("inference_server", "native-worker", "worker-runtime")
+    copied = {
+        PurePosixPath(source).name: PurePosixPath(source)
+        for op, command in release
+        if op == "COPY"
+        if (fields := shlex.split(command))[0] == "--from=native-build"
+        for source in fields[1:-1]
+        if PurePosixPath(source).name in binaries
+    }
+    assert copied == {name: target / "release" / name for name in binaries}, (
+        "release binaries must come from the current Cargo build, not stale base outputs"
     )
 
 

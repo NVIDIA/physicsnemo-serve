@@ -58,7 +58,7 @@ COPY --from=release-source /crates/ /src/crates/
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     export CXXFLAGS="${CXXFLAGS:-} -D_GLIBCXX_USE_CXX11_ABI=$(python3 -c 'import torch;print(int(torch._C._GLIBCXX_USE_CXX11_ABI))')" \
-    && cargo build --release --locked -p native-worker --features cpp -p inference_server -p worker-runtime
+    && cargo build --release --locked --target-dir /tmp/pnms-release-target -p native-worker --features cpp -p inference_server -p worker-runtime
 
 FROM native-build AS compiler
 ARG SOURCE_SHA
@@ -83,8 +83,8 @@ LABEL org.opencontainers.image.revision="${SOURCE_SHA}"
 WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends redis-server supervisor \
     && rm -rf /var/lib/apt/lists/*
-COPY --from=native-build /src/target/release/inference_server /app/bin/inference-server
-COPY --from=native-build /src/target/release/native-worker /src/target/release/worker-runtime /app/bin/
+COPY --from=native-build /tmp/pnms-release-target/release/inference_server /app/bin/inference-server
+COPY --from=native-build /tmp/pnms-release-target/release/native-worker /tmp/pnms-release-target/release/worker-runtime /app/bin/
 COPY --from=native-build /opt/physicsnemo-native-runner /opt/physicsnemo-native-runner
 COPY --from=native-build /opt/physicsnemo-workflow /opt/physicsnemo-workflow
 COPY --from=compiled-release / ${RELEASE_ROOT}/

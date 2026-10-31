@@ -54,6 +54,7 @@ PYTHON_SUITES = (
     "tests/test_native_http_negative_transport.py",
     "tests/test_native_http_startup_acceptance.py",
     "tests/test_native_image_backends.py",
+    "tests/test_native_image_build.py",
     "tests/test_native_inference_provider_qa.py",
     "tests/test_native_inference_qa_assets.py",
     "tests/test_native_inference_qa_consumer.py",

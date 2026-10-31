@@ -179,6 +179,7 @@ jobs:
             tests/test_native_authoring.py tests/test_native_user_cli.py tests/test_native_user_release.py \
             tests/test_native_release*.py tests/test_native_lepton_components.py \
             tests/test_native_workflow_release_ci.py tests/test_native_image_backends.py \
+            tests/test_native_image_build.py \
             tests/test_native_http*.py tests/test_native_cfd*.py \
             tests/test_run_lepton_native_cfd.py tests/test_export_native_cfd_release.py \
             qa/scripts/test_create_native_raw_variant.py \

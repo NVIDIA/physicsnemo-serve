@@ -1,0 +1,68 @@
+# syntax=docker/dockerfile:1
+# Build from the repository root, with a prepared release-assets named context.
+# Both compilation and serving retain the GPU-qualified native library stack.
+ARG NATIVE_BUILDER_IMAGE
+FROM ${NATIVE_BUILDER_IMAGE} AS native-build
+ARG NATIVE_BUILDER_IMAGE
+ARG SOURCE_SHA
+ARG MODEL_BUILD_SOURCE_SHA
+ARG RUST_TOOLCHAIN=1.94.1
+ARG RUSTUP_VERSION=1.28.2
+ENV RUSTUP_HOME=/usr/local/rustup CARGO_HOME=/usr/local/cargo
+ENV PATH="/usr/local/cargo/bin:${PATH}"
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential pkg-config cmake libssl-dev curl ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error \
+        -o /tmp/rustup-init "https://static.rust-lang.org/rustup/archive/${RUSTUP_VERSION}/x86_64-unknown-linux-gnu/rustup-init" \
+    && echo '20a06e644b0d9bd2fbdbfd52d42540bdde820ea7df86e92e533c073da0cdd43c  /tmp/rustup-init' | sha256sum -c - \
+    && chmod +x /tmp/rustup-init \
+    && /tmp/rustup-init -y --profile minimal --default-toolchain "${RUST_TOOLCHAIN}" \
+    && rm /tmp/rustup-init
+WORKDIR /src
+COPY --from=release-assets /release-inventory.json /tmp/native-release-inventory.json
+RUN python3 -c 'import json,sys; v=json.load(open("/tmp/native-release-inventory.json")); assert v["builder_image"] == sys.argv[1], "builder image differs from qualified release"; assert v["source_sha"] == sys.argv[2], "source SHA differs from selected release"; assert v["compilation_source_sha"] == sys.argv[3], "model compilation SHA differs from qualified receipt"' "${NATIVE_BUILDER_IMAGE}" "${SOURCE_SHA}" "${MODEL_BUILD_SOURCE_SHA}"
+COPY Cargo.toml Cargo.lock ./
+COPY .cargo .cargo
+COPY crates crates
+ENV NATIVE_RUNNER_INCLUDE=/opt/physicsnemo-native-runner/include \
+    NATIVE_RUNNER_LIB_DIR=/opt/physicsnemo-native-runner/lib
+ENV LD_LIBRARY_PATH="/opt/physicsnemo-native-runner/lib:/opt/physicsnemo-inference/lib:/usr/local/lib/python3.12/dist-packages/torch/lib:/usr/local/lib/python3.12/dist-packages/warp/bin:${LD_LIBRARY_PATH}"
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    export CXXFLAGS="${CXXFLAGS:-} -D_GLIBCXX_USE_CXX11_ABI=$(python3 -c 'import torch; print(int(torch._C._GLIBCXX_USE_CXX11_ABI))')" \
+    && cargo build --release --locked -p native-worker --features cpp -p inference_server -p worker-runtime
+
+FROM ${NATIVE_BUILDER_IMAGE} AS native-release
+ARG SOURCE_SHA
+ARG MODEL_BUILD_SOURCE_SHA
+LABEL org.opencontainers.image.revision="${SOURCE_SHA}"
+WORKDIR /app
+RUN apt-get update && apt-get install -y --no-install-recommends redis-server supervisor \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=native-build /src/target/release/inference_server /app/bin/inference-server
+COPY --from=native-build /src/target/release/native-worker /src/target/release/worker-runtime /app/bin/
+COPY --from=release-assets / /opt/physicsnemo-native/
+COPY scripts/entrypoint.sh scripts/health_stub.py /app/scripts/
+COPY plugins/physicsnemo-cfd-transolver-native /app/plugins/physicsnemo-cfd-transolver-native
+COPY crates/worker-runtime/config/profiles.json /app/config/profiles.json
+COPY qa/native_inference/cfd_native.py /opt/native-cfd-qa/qa/native_inference/cfd_native.py
+COPY qa/scripts/run_native_cfd_http_job.py qa/scripts/benchmark_native_cfd.py /opt/native-cfd-qa/qa/scripts/
+ENV NATIVE_DEPLOYMENT_CONFIG=/opt/physicsnemo-native/deployment.json \
+    WORKER_RUNTIME_CONFIG=/opt/physicsnemo-native/worker_runtime_config.json \
+    QUEUE_CONFIG=/opt/physicsnemo-native/worker_runtime_config.json \
+    PHYSICSNEMO_SERVE_RUNTIME_ENVS_CONFIG=/opt/physicsnemo-native/worker_runtime_config.json \
+    PLUGIN_DIR=/app/plugins \
+    PHYSICSNEMO_SERVE_ENABLED_PLUGIN_ID=physicsnemo-cfd-transolver-native \
+    ARTIFACT_DIR=/outputs/native-cfd \
+    DEFAULT_OUTPUT_DIR=/outputs/native-cfd \
+    USE_PREFETCH=false \
+    WORKERS=server,scheduler,results,execute \
+    WORKERS_PER_GPU=1 \
+    SOURCE_SHA=${SOURCE_SHA} \
+    MODEL_BUILD_SOURCE_SHA=${MODEL_BUILD_SOURCE_SHA}
+ENV LD_LIBRARY_PATH="/opt/physicsnemo-native-runner/lib:/opt/physicsnemo-inference/lib:/usr/local/lib/python3.12/dist-packages/torch/lib:/usr/local/lib/python3.12/dist-packages/warp/bin:${LD_LIBRARY_PATH}"
+RUN chmod +x /app/scripts/entrypoint.sh
+EXPOSE 8080 8001
+# Keep NVIDIA's CUDA compatibility and HPCX entrypoint initialization.
+ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh", "/app/scripts/entrypoint.sh"]

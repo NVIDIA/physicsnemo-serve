@@ -67,6 +67,7 @@ INIT_PIPELINE_PROFILES = (
 INIT_RUNTIME_PROFILES = (
     "python-test",
     "custom",
+    "cpp",
 )
 INIT_PHASE_NAMES = ("prepare", "postprocess", "readiness")
 ENV_RUNTIME_CONFIG = "PHYSICSNEMO_SERVE_RUNTIME_ENVS_CONFIG"
@@ -104,6 +105,23 @@ def main() -> int:
         help="Runtime family for the scaffolded plugin",
     )
     init_parser.add_argument(
+        "--template",
+        choices=("tensor", "cpp"),
+        default=None,
+        help="Native authoring template (requires --runtime cpp)",
+    )
+    init_parser.add_argument(
+        "--backend",
+        choices=("aoti", "tensorrt"),
+        default=None,
+        help="Compiled model backend (requires --runtime cpp; default: aoti)",
+    )
+    init_parser.add_argument(
+        "--native-image",
+        default=None,
+        help="Matched immutable builder/server stack image (requires --runtime cpp)",
+    )
+    init_parser.add_argument(
         "--phase-runtime",
         action="append",
         default=[],
@@ -127,12 +145,22 @@ def main() -> int:
         "validate", help="Validate a plugin directory"
     )
     validate_parser.add_argument("plugin_root")
+    validate_parser.add_argument("--release-profile", default=None)
 
     check_parser = subparsers.add_parser(
         "check",
         help="Run the recommended local plugin check flow",
     )
     check_parser.add_argument("plugin_root")
+    check_parser.add_argument("--release-profile", default=None)
+    check_parser.add_argument("--workspace", default=None)
+    check_parser.add_argument("--cache-dir", default=None)
+    check_parser.add_argument("--plan", action="store_true")
+    check_parser.add_argument(
+        "--model-only",
+        action="store_true",
+        help="Verify native model packages without requiring a complete HTTP workflow",
+    )
     check_parser.add_argument("--run-id", default=None)
     check_parser.add_argument(
         "--through-phase",
@@ -157,6 +185,7 @@ def main() -> int:
         help="Check plugin-specific environment and dependency readiness",
     )
     check_env_parser.add_argument("plugin_root")
+    check_env_parser.add_argument("--release-profile", default=None)
 
     bootstrap_parser = subparsers.add_parser(
         "bootstrap-python",
@@ -173,6 +202,10 @@ def main() -> int:
         help="Stand up a local single-plugin server + worker stack",
     )
     run_local_parser.add_argument("plugin_root")
+    run_local_parser.add_argument("--release-profile", default=None)
+    run_local_parser.add_argument(
+        "--image", default=None, help="Qualified native image digest"
+    )
     run_local_parser.add_argument(
         "--workspace",
         default=None,
@@ -206,6 +239,17 @@ def main() -> int:
         help="Write the workspace and print the launch plan without starting processes",
     )
 
+    release_parser = subparsers.add_parser(
+        "release",
+        help="Build/reuse native models, assemble and qualify a release image",
+    )
+    release_parser.add_argument("plugin_root")
+    release_parser.add_argument("--release-profile", default="release.yaml")
+    release_parser.add_argument("--workspace", default=None)
+    release_parser.add_argument("--cache-dir", default=None)
+    release_parser.add_argument("--plan", action="store_true")
+    release_parser.add_argument("--promote", default=None, metavar="TAG")
+
     args = parser.parse_args()
 
     try:
@@ -214,7 +258,22 @@ def main() -> int:
             if hasattr(args, "plugin_root")
             else None
         )
-        if args.command == "init":
+        native_command = (
+            plugin_root is not None
+            and args.command in ("release", "check", "check-env", "run-local")
+            and (plugin_root / "plugin.yaml").is_file()
+            and load_plugin_manifest(plugin_root / "plugin.yaml")["runtime"]["kind"]
+            == "cpp"
+            and (
+                getattr(args, "release_profile", None)
+                or (plugin_root / "release.yaml").is_file()
+            )
+        )
+        if native_command:
+            from native_workflow import run_command
+
+            result = run_command(args, plugin_root)
+        elif args.command == "init":
             result = init_plugin(
                 plugin_root,
                 content_type=args.content_type,
@@ -224,10 +283,15 @@ def main() -> int:
                 executor_class=args.executor_class,
                 phase_executor_overrides=args.phase_executor,
                 force=args.force,
+                native_template=args.template,
+                native_backend=args.backend,
+                native_image=args.native_image,
             )
         elif args.command == "validate":
-            result = validate_plugin(plugin_root)
+            result = validate_plugin(plugin_root, release_profile=args.release_profile)
         elif args.command == "check":
+            if args.model_only:
+                raise ValueError("--model-only requires a native C++ workflow")
             result = check_plugin(
                 plugin_root,
                 run_id=args.run_id,
@@ -276,7 +340,27 @@ def init_plugin(
     executor_class: str | None = None,
     phase_executor_overrides: list[str] | None = None,
     force: bool = False,
+    native_template: str | None = None,
+    native_backend: str | None = None,
+    native_image: str | None = None,
 ) -> dict[str, Any]:
+    if runtime_profile == "cpp":
+        if phase_runtime_overrides or phase_executor_overrides:
+            raise ValueError("Native templates do not use Python phase overrides")
+        from native_workflow import init_native
+
+        return init_native(
+            plugin_root,
+            template=native_template or "tensor",
+            backend=native_backend or "aoti",
+            stack_image=native_image,
+            content_type=content_type,
+            force=force,
+        )
+    if native_template is not None:
+        raise ValueError("--template requires --runtime cpp")
+    if native_backend is not None or native_image is not None:
+        raise ValueError("--backend and --native-image require --runtime cpp")
     workflow_id = _derive_workflow_id(plugin_root.name)
     display_name = _display_name(workflow_id)
     manifest = _scaffold_manifest(
@@ -346,7 +430,9 @@ def init_plugin(
     }
 
 
-def validate_plugin(plugin_root: Path) -> dict[str, Any]:
+def validate_plugin(
+    plugin_root: Path, *, release_profile: str | None = None
+) -> dict[str, Any]:
     manifest, workflow_id, module = _load_plugin_contract(plugin_root)
     request_schemas, result_schema = _load_schema_documents(
         plugin_root,
@@ -371,12 +457,23 @@ def validate_plugin(plugin_root: Path) -> dict[str, Any]:
     # and malformed multipart fixture structure early.
     build_example_payload(plugin_root, manifest)
 
-    return {
+    report = {
         "plugin_root": str(plugin_root),
         "workflow_id": workflow_id,
         "status": "valid",
         "phases": phases,
     }
+    if manifest["runtime"]["kind"] == "cpp" and (
+        release_profile is not None or (plugin_root / "release.yaml").is_file()
+    ):
+        from native_workflow import validate_native
+
+        report["native"] = validate_native(
+            plugin_root, release_profile or "release.yaml"
+        )
+    elif release_profile is not None:
+        raise ValueError("--release-profile requires a native workflow")
+    return report
 
 
 def check_plugin(

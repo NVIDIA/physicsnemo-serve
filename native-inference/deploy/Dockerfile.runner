@@ -1,0 +1,41 @@
+# Build this GPU-independent compiler image on Linux x86_64. The input image is
+# the immutable native-qa target from model-builder/images/Dockerfile.builder.
+# Model compilation and qualification subsequently run on Lepton H100.
+ARG NATIVE_SDK_IMAGE
+FROM ${NATIVE_SDK_IMAGE}
+ARG SOURCE_SHA
+ARG CMAKE_BUILD_PARALLEL_LEVEL=4
+ARG ENABLE_AOTI=ON
+ARG ENABLE_TENSORRT=OFF
+COPY native-inference /opt/physicsnemo/native-inference
+ENV LD_LIBRARY_PATH="/opt/hpcx/ucx/lib:/opt/hpcx/ucc/lib:${LD_LIBRARY_PATH}"
+RUN python3 -c 'import re,sys; assert re.fullmatch(r"[0-9a-f]{40}", sys.argv[1]), "SOURCE_SHA must be a full Git revision"' "${SOURCE_SHA}" \
+    && cmake -S /opt/physicsnemo/native-inference/cpp-runtime -B /tmp/native-sdk \
+        -DCMAKE_BUILD_TYPE=Release -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+        -DCMAKE_INSTALL_PREFIX=/opt/physicsnemo-inference -DPNMIR_BUILD_TESTS=OFF \
+        -DPNMIR_ENABLE_AOTI=${ENABLE_AOTI} -DPNMIR_ENABLE_TENSORRT=${ENABLE_TENSORRT} \
+        -DPNMIR_ENABLE_TENSORRT_EXACT=${ENABLE_TENSORRT} \
+        -DCMAKE_CUDA_ARCHITECTURES=90 -DTORCH_CUDA_ARCH_LIST=9.0 \
+        -DPNMIR_PYTORCH_SOURCE_ROOT=/opt/pytorch/pytorch \
+        -DPNMIR_CUTLASS_INCLUDE_DIR=/opt/pytorch/pytorch/third_party/cutlass/include \
+        -DPNMIR_TORCH_INCLUDE_DIR="$(python3 -c 'import pathlib,torch;print(pathlib.Path(torch.__file__).parent/"include")')" \
+        -DCMAKE_EXE_LINKER_FLAGS=-Wl,-rpath-link,/opt/hpcx/ucx/lib \
+    && cmake --build /tmp/native-sdk --parallel ${CMAKE_BUILD_PARALLEL_LEVEL} \
+    && cmake --install /tmp/native-sdk \
+    && cmake -S /opt/physicsnemo/native-inference/workflows/transolver -B /tmp/native-runner \
+        -DCMAKE_BUILD_TYPE=Release -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+        -DCMAKE_INSTALL_PREFIX=/opt/physicsnemo-native-runner -DBUILD_TESTING=ON \
+        -DPNMIR_ENABLE_AOTI=${ENABLE_AOTI} -DPNMIR_ENABLE_TENSORRT=${ENABLE_TENSORRT} \
+        -DCMAKE_CUDA_ARCHITECTURES=90 -DTORCH_CUDA_ARCH_LIST=9.0 \
+        -DCMAKE_EXE_LINKER_FLAGS=-Wl,-rpath-link,/opt/hpcx/ucx/lib \
+        -DCMAKE_PREFIX_PATH="/opt/physicsnemo-inference;$(python3 -c 'import pathlib, torch; print(pathlib.Path(torch.__file__).parent)')" \
+        -DPNMIR_WARP_ROOT="$(python3 -c 'import pathlib, warp; print(pathlib.Path(warp.__file__).parent)')" \
+    && cmake --build /tmp/native-runner --parallel ${CMAKE_BUILD_PARALLEL_LEVEL} \
+    && ctest --test-dir /tmp/native-runner --output-on-failure \
+    && cmake --install /tmp/native-runner \
+    && ln -sfn /opt/physicsnemo-native-runner/bin/physicsnemo-transolver /opt/physicsnemo-inference/bin/physicsnemo-transolver
+ENV PATH="/opt/physicsnemo-native-runner/bin:${PATH}"
+ENV LD_LIBRARY_PATH="/opt/physicsnemo-native-runner/lib:/opt/physicsnemo-inference/lib:/usr/local/lib/python3.12/dist-packages/torch/lib:/usr/local/lib/python3.12/dist-packages/warp/bin:${LD_LIBRARY_PATH}"
+LABEL org.opencontainers.image.revision="${SOURCE_SHA}"
+ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
+CMD ["physicsnemo-transolver", "--help"]

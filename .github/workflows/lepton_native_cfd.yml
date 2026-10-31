@@ -1,0 +1,96 @@
+name: Native CFD Full Lepton Qualification
+
+on:
+  workflow_dispatch:
+    inputs:
+      image:
+        description: "Published CFD qualification or final release image, registry/repository@sha256:<digest>"
+        required: true
+        type: string
+      source_sha:
+        description: "Full source SHA baked into the selected image (release source for HTTP mode)"
+        required: true
+        type: string
+      mode:
+        description: "Compile full/tail and qualify fields, or test the self-contained final HTTP image"
+        type: choice
+        options: [compile, http]
+        default: compile
+      reference:
+        description: "HTTP only: qualified Python reference fields.json under /outputs"
+        required: false
+        type: string
+      input_root:
+        description: "HTTP only: verified dataset root containing run_1 under /outputs"
+        required: false
+        type: string
+      resource_shape:
+        description: "One Lepton H100 shape"
+        required: true
+        type: string
+        default: gpu.h100-sxm
+      job_timeout:
+        description: "Deadline in seconds, greater than 60 and at most 7200; retries are disabled"
+        required: true
+        type: number
+        default: 7200
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-cfd-qualification-${{ github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  qualify:
+    name: Full native CFD (${{ inputs.mode }})
+    runs-on: linux-amd64-cpu4
+    timeout-minutes: 150
+    steps:
+      # The controller follows this workflow revision; the image's independent
+      # source identity is checked inside the job and its returned evidence.
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+      - name: Install Lepton CLI
+        run: |
+          uv tool install leptonai
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: Qualify full native CFD
+        env:
+          CFD_IMAGE: ${{ inputs.image }}
+          CFD_SOURCE_SHA: ${{ inputs.source_sha }}
+          CFD_MODE: ${{ inputs.mode }}
+          CFD_REFERENCE: ${{ inputs.reference }}
+          CFD_INPUT_ROOT: ${{ inputs.input_root }}
+          CFD_RESOURCE_SHAPE: ${{ inputs.resource_shape }}
+          CFD_TIMEOUT: ${{ inputs.job_timeout }}
+          CFD_RUN_ID: cfd-${{ inputs.mode }}-${{ github.run_id }}-${{ github.run_attempt }}
+          LEPTON_WORKSPACE_TOKEN: ${{ secrets.LEPTON_WORKSPACE_TOKEN }}
+          LEPTON_WORKSPACE_ID: ${{ secrets.LEPTON_WORKSPACE_ID }}
+          LEPTON_NODE_GROUP: ${{ secrets.LEPTON_NODE_GROUP }}
+          LEPTON_PULL_SECRET: ${{ secrets.PULL_SECRET }}
+          NFS_MOUNT_BASE: ${{ vars.NFS_MOUNT_BASE }}
+          QA_LUSTRE_DIR: ${{ vars.QA_LUSTRE_DIR || 'qa' }}
+        run: |
+          set -euo pipefail
+          args=(
+            --image "$CFD_IMAGE"
+            --expected-source-sha "$CFD_SOURCE_SHA"
+            --mode "$CFD_MODE"
+            --resource-shape "$CFD_RESOURCE_SHAPE"
+            --job-timeout "$CFD_TIMEOUT"
+            --run-id "$CFD_RUN_ID"
+            --artifact-dir qa/artifacts/native-cfd
+          )
+          if [[ "$CFD_MODE" == http ]]; then
+            args+=(--reference "$CFD_REFERENCE" --input-root "$CFD_INPUT_ROOT")
+          fi
+          uv run --frozen python qa/scripts/run_lepton_native_cfd.py "${args[@]}"
+      - name: Preserve controller evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-cfd-${{ inputs.mode }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: qa/artifacts/native-cfd/
+          if-no-files-found: warn

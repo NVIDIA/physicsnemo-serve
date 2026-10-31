@@ -1,0 +1,20 @@
+schema_version: 1
+workflow: physicsnemo-cfd-transolver-native
+provider_profile: physicsnemo-cfd-surface-transolver-run1-v1
+models:
+  full: {preset: transolver-surface, points: 60000}
+  tail: {preset: transolver-surface, points: 8095}
+backend: tensorrt
+target_profile: h100-sxm-80gb-linux-amd64-v1
+images:
+  builder: nvcr.io/dycvht5ows21/physicsnemo-serve@sha256:70c372c4eb3bc4b5468621ec0fe942514216229bf8bf49a96a32c6305dad8f00
+  server: nvcr.io/dycvht5ows21/physicsnemo-serve@sha256:70c372c4eb3bc4b5468621ec0fe942514216229bf8bf49a96a32c6305dad8f00
+runtime:
+  executor_class: native.transolver.tensorrt
+  request_timeout_seconds: 600
+  drain_timeout_seconds: 60
+  startup_timeout_seconds: 300
+  artifact_root: /outputs/native-transolver
+  input_cache: /outputs/.cache/native-transolver
+output:
+  repository: nvcr.io/dycvht5ows21/physicsnemo-serve

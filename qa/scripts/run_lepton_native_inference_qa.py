@@ -92,7 +92,9 @@ def lep(command: list[str], *, env: dict, timeout: float) -> tuple[int, str]:
     return code, output
 
 
-def build_parser() -> argparse.ArgumentParser:
+def build_parser(
+    *, profile_flag="--profile", profile_choices=("smoke", "full", "provider")
+) -> argparse.ArgumentParser:
     config = load_deploy_config()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -100,7 +102,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--expected-source-sha", required=True)
     parser.add_argument(
-        "--profile", choices=("smoke", "full", "provider"), default="smoke"
+        profile_flag,
+        dest="profile",
+        choices=profile_choices,
+        default=profile_choices[0],
     )
     parser.add_argument(
         "--assets",
@@ -251,7 +256,19 @@ def build_job_command(args, job_name: str) -> list[str]:
     ]
 
 
-def run(args) -> int:
+def run(
+    args,
+    *,
+    command_builder=None,
+    summary_extractor=None,
+    summary_validator=None,
+    historical_first=False,
+) -> int:
+    # Full CFD qualification reuses this lifecycle with its own driver and
+    # scientific gate inventory. Component QA keeps its existing defaults.
+    command_builder = command_builder or build_job_command
+    summary_extractor = summary_extractor or extract_summary
+    summary_validator = summary_validator or validate_summary
     validate_args(args)
     started = datetime.now(timezone.utc)
     artifacts = args.artifact_dir.resolve() / args.run_id
@@ -266,7 +283,7 @@ def run(args) -> int:
         },
     )
     job_name = f"pn-native-{args.run_id[:16]}-{secrets.token_hex(3)}"
-    command = build_job_command(args, job_name)
+    command = command_builder(args, job_name)
     summary = {
         "run_id": args.run_id,
         "source_sha": args.expected_source_sha,
@@ -312,12 +329,14 @@ def run(args) -> int:
         return code, output
 
     def collect_logs(job_id):
-        _, output = call(["job", "log", "-i", job_id], "job.log")
-        try:
-            extract_summary(output)
-            return output
-        except ValueError:
-            pass
+        output = ""
+        if not historical_first:
+            _, output = call(["job", "log", "-i", job_id], "job.log")
+            try:
+                summary_extractor(output)
+                return output
+            except ValueError:
+                pass
         # Completed pods can have no live log stream. Historical ingestion can
         # also lag job completion, so retry within a fixed, small budget.
         start = (started - timedelta(seconds=60)).strftime("%Y-%m-%d %H:%M:%S.%f")
@@ -341,12 +360,20 @@ def run(args) -> int:
             decoded = decode_historical_logs(historical)
             (artifacts / "job-history.log").write_text(decoded)
             try:
-                extract_summary(decoded)
+                summary_extractor(decoded)
                 return decoded
             except ValueError:
                 if attempt < 3:
                     time.sleep(5)
-        return decoded or output
+        if historical_first:
+            # `job log` may wait forever on a completed pod. CFD first uses
+            # retained logs and bounds the last-resort live stream to 10s.
+            _, output = call(
+                ["job", "log", "-i", job_id],
+                "job.log",
+                min(args.command_timeout, 10),
+            )
+        return (output or decoded) if historical_first else (decoded or output)
 
     try:
         for signum in (signal.SIGINT, signal.SIGTERM):
@@ -398,11 +425,11 @@ def run(args) -> int:
 
         output = collect_logs(job_id)
         logs_captured = True
-        report = extract_summary(output)
+        report = summary_extractor(output)
         write_json(artifacts / "job-summary.json", report)
         if state not in SUCCESS_STATES:
             raise RuntimeError(f"Lepton native QA job ended in {state}")
-        validate_summary(
+        summary_validator(
             report,
             run_id=args.run_id,
             source_sha=args.expected_source_sha,

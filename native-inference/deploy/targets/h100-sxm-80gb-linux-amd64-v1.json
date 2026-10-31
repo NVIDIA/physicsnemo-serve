@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "id": "h100-sxm-80gb-linux-amd64-v1",
+  "native_stack_contract": "nv26.01-cuda13.1-cfd-r3",
+  "compilation": {
+    "platform": "linux/amd64",
+    "gpu_product": "NVIDIA H100 80GB HBM3",
+    "compute_capability": [9, 0],
+    "cuda_architecture": "sm90",
+    "precision": "fp32",
+    "mig": "disabled",
+    "hardware_compatibility": "qualified-product-only"
+  },
+  "deployment": {
+    "minimum_available_memory_mb": 70000,
+    "mig": "disabled",
+    "driver_requirements": {
+      "minimum_driver_version": "570.195.03",
+      "maximum_driver_version": "570.195.03"
+    }
+  }
+}

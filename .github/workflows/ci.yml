@@ -129,7 +129,10 @@ jobs:
       - name: Run tests
         env:
           PYTHONPATH: ${{ github.workspace }}:${{ github.workspace }}/python/e2s_tools
-        run: uv run pytest tests python/e2s_tools qa/scripts/test_rust_io_benchmark.py -v
+        # Backend compilation checks run in inference-cpu with CMake installed.
+        run: >-
+          uv run pytest tests python/e2s_tools qa/scripts/test_rust_io_benchmark.py
+          --ignore=tests/test_native_image_backends.py -v
 
   inference-cpu:
     name: Model Builder and Native SDK CPU
@@ -171,6 +174,21 @@ jobs:
         run: |
           python3 -m venv "$RUNNER_TEMP/inference-graph-venv"
           "$RUNNER_TEMP/inference-graph-venv/bin/python" -m pip install numpy==2.1.0 onnx==1.18.0 pytest==8.3.5
+      - name: Test native authoring and sealed release CPU contracts
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/inference-graph-venv/bin/python" -m pip install PyYAML==6.0.3 jsonschema==4.26.0
+          "$RUNNER_TEMP/inference-graph-venv/bin/python" -m pytest \
+            tests/test_native_authoring.py tests/test_native_user_cli.py tests/test_native_user_release.py \
+            tests/test_native_release*.py tests/test_native_lepton_components.py \
+            tests/test_native_workflow_release_ci.py tests/test_native_image_backends.py \
+            tests/test_native_image_build.py \
+            tests/test_native_http*.py tests/test_native_cfd*.py \
+            tests/test_run_lepton_native_cfd.py tests/test_export_native_cfd_release.py \
+            qa/scripts/test_create_native_raw_variant.py \
+            -q -o xfail_strict=true \
+            --junitxml="$RUNNER_TEMP/inference-cpu-evidence/native-release-contract-tests.xml" \
+            2>&1 | tee "$RUNNER_TEMP/inference-cpu-evidence/native-release-contract-tests.log"
       - name: Test Python image Cargo planner
         run: |
           set -euo pipefail

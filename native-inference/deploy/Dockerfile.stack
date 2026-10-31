@@ -1,0 +1,36 @@
+# syntax=docker/dockerfile:1
+# Build on the Linux bridge with the ordinary runc runtime; no GPU is needed.
+# NATIVE_STACK_IMAGE must be the immutable qualified CFD/provider image whose
+# Torch binaries and /opt/pytorch source/CUTLASS headers are a matched stack.
+# This prepares both SDK backends; each workflow release selects exactly one.
+ARG NATIVE_STACK_IMAGE
+FROM ${NATIVE_STACK_IMAGE}
+ARG SOURCE_SHA
+ARG CMAKE_BUILD_PARALLEL_LEVEL=4
+ARG CMAKE_CUDA_ARCHITECTURES=90
+ARG TORCH_CUDA_ARCH_LIST=9.0
+COPY native-inference/cpp-runtime /opt/physicsnemo/native-inference/cpp-runtime
+COPY native-inference/model-builder/src /opt/physicsnemo/native-inference/model-builder/src
+ENV LD_LIBRARY_PATH="/opt/physicsnemo-inference/lib:/opt/hpcx/ucx/lib:/opt/hpcx/ucc/lib:${LD_LIBRARY_PATH}"
+RUN python3 -c 'import re,sys; assert re.fullmatch(r"[0-9a-f]{40}", sys.argv[1]), "SOURCE_SHA must be a full Git revision"' "${SOURCE_SHA}" \
+    && cmake -S /opt/physicsnemo/native-inference/cpp-runtime -B /tmp/native-dual-sdk \
+        -DCMAKE_BUILD_TYPE=Release -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+        -DCMAKE_INSTALL_PREFIX=/opt/physicsnemo-inference -DPNMIR_BUILD_TESTS=OFF \
+        -DPNMIR_ENABLE_AOTI=ON -DPNMIR_ENABLE_TENSORRT=ON \
+        -DPNMIR_ENABLE_TENSORRT_EXACT=ON \
+        -DCMAKE_CUDA_ARCHITECTURES="${CMAKE_CUDA_ARCHITECTURES}" \
+        -DTORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST}" \
+        -DCMAKE_EXE_LINKER_FLAGS=-Wl,-rpath-link,/opt/hpcx/ucx/lib \
+        -DPNMIR_PYTORCH_SOURCE_ROOT=/opt/pytorch/pytorch \
+        -DPNMIR_CUTLASS_INCLUDE_DIR=/opt/pytorch/pytorch/third_party/cutlass/include \
+        -DPNMIR_TORCH_INCLUDE_DIR="$(python3 -c 'import pathlib,torch;print(pathlib.Path(torch.__file__).parent/"include")')" \
+    && cmake --build /tmp/native-dual-sdk --parallel ${CMAKE_BUILD_PARALLEL_LEVEL} \
+    && cmake --install /tmp/native-dual-sdk \
+    && ldconfig \
+    && /opt/physicsnemo-inference/bin/physicsnemo-infer run /opt/physicsnemo/native-inference/cpp-runtime/tests/fixtures/identity --values 1,2,3 \
+    && PYTHONPATH="/opt/physicsnemo/native-inference/model-builder/src:${PYTHONPATH}" \
+        python3 -c 'from pathlib import Path; import tensorrt as trt; from model_builder.export.tensorrt_profiles import plugin_names, load_exact_plugins; profile="layout-order-exact-v2"; names=plugin_names(profile); libraries={name:Path("/opt/physicsnemo-inference/lib")/f"libpnmir_tensorrt_{name}_plugin.so" for name in names}; handles,records=load_exact_plugins(trt,libraries,profile); assert len(records)==9; print("Transolver exact TensorRT plugins verified:", ", ".join(records))' \
+    && python3 /opt/physicsnemo/native-inference/cpp-runtime/tests/tensorrt_provider_policy.py --plugin-root /opt/physicsnemo-inference/lib \
+    && rm -rf /tmp/native-dual-sdk
+LABEL org.opencontainers.image.revision="${SOURCE_SHA}"
+ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]

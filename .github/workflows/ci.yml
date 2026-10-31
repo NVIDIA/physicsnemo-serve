@@ -171,6 +171,13 @@ jobs:
         run: |
           python3 -m venv "$RUNNER_TEMP/inference-graph-venv"
           "$RUNNER_TEMP/inference-graph-venv/bin/python" -m pip install numpy==2.1.0 onnx==1.18.0 pytest==8.3.5
+      - name: Test Python image Cargo planner
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/inference-graph-venv/bin/python" -m pytest \
+            native-inference/tests/test_python_image_planner.py \
+            -v --junitxml="$RUNNER_TEMP/inference-cpu-evidence/python-image-planner-tests.xml" \
+            2>&1 | tee "$RUNNER_TEMP/inference-cpu-evidence/python-image-planner-tests.log"
       - name: Run exact TensorRT graph tests on CPU
         env:
           PYTHONPATH: ${{ github.workspace }}/native-inference/model-builder/src

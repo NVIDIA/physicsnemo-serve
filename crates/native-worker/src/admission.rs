@@ -2,23 +2,78 @@ use crate::deployment::{DeviceSnapshot, RuntimeDeploymentConfig};
 use anyhow::{Context, Result, ensure};
 use serde::Serialize;
 
-#[derive(Debug, PartialEq, Eq)]
-enum DeviceSelector {
-    Index(u32),
-    Uuid(String),
+#[repr(C)]
+struct CudaUuid {
+    bytes: [u8; 16],
 }
-fn device_selector(index: u32, uuid: Option<&str>) -> Result<DeviceSelector> {
-    if let Some(value) = uuid {
+type CudaInit = unsafe extern "system" fn(u32) -> i32;
+type CudaDeviceGet = unsafe extern "system" fn(*mut i32, i32) -> i32;
+type CudaDeviceGetUuid = unsafe extern "system" fn(*mut CudaUuid, i32) -> i32;
+
+fn cuda_device_uuid_with(
+    index: u32,
+    init: CudaInit,
+    get_device: CudaDeviceGet,
+    get_uuid: CudaDeviceGetUuid,
+) -> Result<[u8; 16]> {
+    let ordinal = i32::try_from(index).context("CUDA logical device index exceeds i32")?;
+    // Driver API queries create no inference context. CUDA applies its own
+    // visibility/order rules; NVML physical indices need not follow that order.
+    let status = unsafe { init(0) };
+    ensure!(status == 0, "cuInit failed with CUDA status {status}");
+    let mut device = 0;
+    let status = unsafe { get_device(&mut device, ordinal) };
+    ensure!(
+        status == 0,
+        "CUDA logical device {index} is unavailable (status {status})"
+    );
+    let mut uuid = CudaUuid { bytes: [0; 16] };
+    let status = unsafe { get_uuid(&mut uuid, device) };
+    ensure!(
+        status == 0,
+        "CUDA logical device {index} UUID query failed (status {status})"
+    );
+    Ok(uuid.bytes)
+}
+
+fn cuda_device_uuid(index: u32) -> Result<[u8; 16]> {
+    #[cfg(target_os = "windows")]
+    const LIBRARY: &str = "nvcuda.dll";
+    #[cfg(not(target_os = "windows"))]
+    const LIBRARY: &str = "libcuda.so.1";
+    // These symbols use the CUDA driver ABI; the library remains loaded while
+    // they are called, and every output buffer has the corresponding C layout.
+    unsafe {
+        let library =
+            libloading::Library::new(LIBRARY).context("load CUDA driver for device admission")?;
+        cuda_device_uuid_with(
+            index,
+            *library.get::<CudaInit>(b"cuInit\0")?,
+            *library.get::<CudaDeviceGet>(b"cuDeviceGet\0")?,
+            // v2 preserves MIG instance identity instead of substituting a parent.
+            *library.get::<CudaDeviceGetUuid>(b"cuDeviceGetUuid_v2\0")?,
+        )
+    }
+}
+
+fn verified_device_uuid(cuda_uuid: &str, asserted_uuid: Option<&str>) -> Result<String> {
+    let parse = |value: &str| -> Result<uuid::Uuid> {
         let raw = value
             .strip_prefix("GPU-")
-            .context("PNMS_DEVICE_UUID must be an NVML GPU UUID")?;
+            .context("device UUID must be a full NVML GPU UUID; MIG targets are unsupported")?;
+        ensure!(raw.len() == 36, "device UUID must be a full NVML GPU UUID");
+        let uuid = uuid::Uuid::parse_str(raw).context("invalid NVML GPU UUID")?;
+        ensure!(!uuid.is_nil(), "CUDA device UUID cannot be nil");
+        Ok(uuid)
+    };
+    let actual = parse(cuda_uuid).context("invalid CUDA device UUID")?;
+    if let Some(value) = asserted_uuid {
         ensure!(
-            raw.len() == 36 && uuid::Uuid::parse_str(raw).is_ok(),
-            "PNMS_DEVICE_UUID must be a full NVML GPU UUID; MIG targets are unsupported"
+            parse(value).context("invalid PNMS_DEVICE_UUID")? == actual,
+            "PNMS_DEVICE_UUID differs from CUDA selected device {cuda_uuid}"
         );
-        return Ok(DeviceSelector::Uuid(value.into()));
     }
-    Ok(DeviceSelector::Index(index))
+    Ok(format!("GPU-{actual}"))
 }
 
 fn mig_mode(status: u32, current: u32, pending: u32, user_build: bool) -> Result<bool> {
@@ -100,16 +155,20 @@ pub fn admit(config: &RuntimeDeploymentConfig) -> Result<AdmittedDevice> {
                 .map_err(|_| anyhow::anyhow!("PNMS_DEVICE_UUID must be Unicode"))
         })
         .transpose()?;
-    let selector = device_selector(config.device_index(), allocated_uuid.as_deref())?;
+    let cuda_uuid = uuid::Uuid::from_bytes(cuda_device_uuid(config.device_index())?);
+    let selected_uuid =
+        verified_device_uuid(&format!("GPU-{cuda_uuid}"), allocated_uuid.as_deref())?;
     let nvml = nvml_wrapper::Nvml::init().or_else(|_| {
         nvml_wrapper::Nvml::builder()
             .lib_path(std::ffi::OsStr::new("libnvidia-ml.so.1"))
             .init()
     })?;
-    let device = match selector {
-        DeviceSelector::Uuid(uuid) => nvml.device_by_uuid(uuid)?,
-        DeviceSelector::Index(index) => nvml.device_by_index(index)?,
-    };
+    let device = nvml.device_by_uuid(selected_uuid.as_str())?;
+    let physical_uuid = device.uuid()?;
+    ensure!(
+        physical_uuid == selected_uuid,
+        "CUDA selected UUID must identify the same physical NVML GPU; MIG targets are unsupported"
+    );
     let capability = device.cuda_compute_capability()?;
     let product = device.name()?;
     let memory = device.memory_info()?;
@@ -164,7 +223,7 @@ pub fn admit(config: &RuntimeDeploymentConfig) -> Result<AdmittedDevice> {
         physical_device_kind: "gpu".into(),
         qualification: "hardware-policy-admitted".into(),
         device_name: product,
-        device_uuid: device.uuid()?,
+        device_uuid: physical_uuid,
         memory_mb: memory.total / (1024 * 1024),
         available_memory_mb: snapshot.available_memory_mb,
         driver_version: driver,
@@ -178,25 +237,82 @@ mod tests {
     use super::*;
 
     #[test]
-    fn allocated_device_uuid_overrides_physical_index_for_nvml() {
-        let uuid = "GPU-12345678-1234-5678-9abc-123456789abc";
+    fn cuda_logical_ordinal_uses_the_resolved_uuid_for_nvml() {
+        let physical_one = "GPU-12345678-1234-5678-9abc-123456789abc";
         assert_eq!(
-            device_selector(0, Some(uuid)).unwrap(),
-            DeviceSelector::Uuid(uuid.into()),
-            "CUDA logical device zero must retain the allocated physical GPU identity"
+            verified_device_uuid(physical_one, None).unwrap(),
+            physical_one,
+            "CUDA logical zero may refer to physical GPU one"
         );
-        assert_eq!(device_selector(2, None).unwrap(), DeviceSelector::Index(2));
+    }
+
+    #[test]
+    fn explicit_uuid_must_match_the_cuda_selected_device() {
+        let actual = "GPU-12345678-1234-5678-9abc-123456789abc";
+        let other = "GPU-87654321-4321-8765-abcd-cba987654321";
+        assert!(
+            verified_device_uuid(actual, Some(other)).is_err(),
+            "an override admitted a different GPU"
+        );
+        assert_eq!(verified_device_uuid(actual, Some(actual)).unwrap(), actual);
         for invalid in [
             "",
             "0",
             "GPU-not-a-uuid",
             "MIG-12345678-1234-5678-9abc-123456789abc",
         ] {
-            assert!(
-                device_selector(0, Some(invalid)).is_err(),
-                "invalid UUID: {invalid}"
-            );
+            assert!(verified_device_uuid(actual, Some(invalid)).is_err());
         }
+    }
+
+    unsafe extern "system" fn init_ok(flags: u32) -> i32 {
+        assert_eq!(flags, 0);
+        0
+    }
+    unsafe extern "system" fn device_ok(device: *mut i32, ordinal: i32) -> i32 {
+        assert_eq!(ordinal, 2);
+        unsafe { *device = 77 };
+        0
+    }
+    unsafe extern "system" fn uuid_ok(uuid: *mut CudaUuid, device: i32) -> i32 {
+        assert_eq!(device, 77);
+        unsafe { (*uuid).bytes = [42; 16] };
+        0
+    }
+    unsafe extern "system" fn init_failed(_: u32) -> i32 {
+        100
+    }
+    unsafe extern "system" fn device_failed(_: *mut i32, _: i32) -> i32 {
+        101
+    }
+    unsafe extern "system" fn uuid_failed(_: *mut CudaUuid, _: i32) -> i32 {
+        999
+    }
+
+    #[test]
+    fn cuda_driver_resolves_the_configured_logical_ordinal_and_returned_handle() {
+        assert_eq!(
+            cuda_device_uuid_with(2, init_ok, device_ok, uuid_ok).unwrap(),
+            [42; 16]
+        );
+    }
+
+    #[test]
+    fn cuda_driver_errors_never_fall_back_to_a_physical_index() {
+        for (index, init, device, uuid) in [
+            (
+                2,
+                init_failed as CudaInit,
+                device_ok as CudaDeviceGet,
+                uuid_ok as CudaDeviceGetUuid,
+            ),
+            (2, init_ok, device_failed, uuid_ok),
+            (2, init_ok, device_ok, uuid_failed),
+            (u32::MAX, init_ok, device_ok, uuid_ok),
+        ] {
+            assert!(cuda_device_uuid_with(index, init, device, uuid).is_err());
+        }
+        assert!(verified_device_uuid("GPU-00000000-0000-0000-0000-000000000000", None).is_err());
     }
 
     #[test]

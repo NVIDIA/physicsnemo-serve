@@ -92,18 +92,10 @@ pub async fn execute_workflow(
     let mut admitted =
         crate::request_inputs::admit_inputs(config, payload, run_id, &output_dir).await?;
     let request = json!({"request_id":run_id,"parameters":parameters,"output_dir":output_dir,"inputs":admitted.paths,"input_metadata":admitted.metadata});
-    admitted.begin_native_call();
-    let mut active = match host.submit(request.to_string()).await {
-        Ok(active) => active,
-        Err(error) => {
-            // A returned submit error means no command was enqueued. A dropped
-            // submit future is uncertain and deliberately keeps its input bytes.
-            admitted.native_call_finished();
-            return Err(error);
-        }
-    };
+    let mut active = host
+        .submit_with_inputs(request.to_string(), admitted.take_owned())
+        .await?;
     let done = active.wait().await?;
-    admitted.native_call_finished();
     let raw = done
         .result
         .as_ref()

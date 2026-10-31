@@ -475,7 +475,7 @@ async fn request_input_names_cannot_override_release_assets() {
 }
 
 #[tokio::test]
-async fn interrupted_native_call_keeps_admitted_bytes_outside_artifact_retention() {
+async fn interrupted_native_call_keeps_admitted_bytes_until_drain_then_reclaims_them() {
     use std::sync::atomic::AtomicBool;
     struct HoldingUpload {
         entered: Option<tokio::sync::oneshot::Sender<std::path::PathBuf>>,
@@ -538,6 +538,107 @@ async fn interrupted_native_call_keeps_admitted_bytes_outside_artifact_retention
         survived.load(Ordering::SeqCst),
         "native call lost its owned input bytes"
     );
+    assert!(
+        !pinned.parent().unwrap().exists(),
+        "completed native drain leaked the owned attempt inputs"
+    );
+}
+
+#[tokio::test]
+async fn native_thread_failure_reclaims_its_owned_input_copy() {
+    struct CrashingUpload {
+        entered: Option<tokio::sync::oneshot::Sender<std::path::PathBuf>>,
+    }
+    impl NativeHost for CrashingUpload {
+        fn run(&mut self, text: &str, _: &Cancellation) -> Result<String> {
+            let request: Value = serde_json::from_str(text)?;
+            self.entered
+                .take()
+                .unwrap()
+                .send(std::path::PathBuf::from(
+                    request["inputs"]["features"].as_str().unwrap(),
+                ))
+                .unwrap();
+            panic!("simulated native upload failure")
+        }
+    }
+    let (_root, mut role, _shutdown, source, _calls) = uploaded_fixture().await;
+    let (entered, ready) = tokio::sync::oneshot::channel();
+    role.host = HostClient::spawn(move || {
+        Ok(CrashingUpload {
+            entered: Some(entered),
+        })
+    })
+    .await
+    .unwrap();
+    let host = role.host.clone();
+    let msg = uploaded_message(&source, "1-0", [1.0, 2.0]);
+    let task = tokio::spawn(async move { role.handle(&msg, "gpu0", &Sink::default()).await });
+    let pinned = ready.await.unwrap();
+    assert!(
+        task.await
+            .unwrap()
+            .unwrap_err()
+            .to_string()
+            .contains("deferred")
+    );
+    assert!(host.shutdown(std::time::Duration::from_secs(2)).await);
+    assert!(
+        !pinned.parent().unwrap().exists(),
+        "exited native thread leaked its input copy"
+    );
+    assert!(source.is_file(), "native cleanup removed API staging input");
+}
+
+#[tokio::test]
+async fn cancelled_submission_reclaims_inputs_that_never_entered_cpp() {
+    struct Ready;
+    impl NativeHost for Ready {
+        fn run(&mut self, _: &str, _: &Cancellation) -> Result<String> {
+            Ok("{}".into())
+        }
+    }
+    let (_root, mut role, _shutdown, source, _calls) = uploaded_fixture().await;
+    role.host = HostClient::spawn(|| Ok(Ready)).await.unwrap();
+    let host = role.host.clone();
+    let first = host
+        .submit("{}".into())
+        .await
+        .unwrap()
+        .wait()
+        .await
+        .unwrap();
+    let cache = role
+        .config
+        .artifact_root()
+        .join(".cache/native-inputs")
+        .join(format!("{:x}", Sha256::digest(b"generic-run")));
+    let msg = uploaded_message(&source, "1-0", [1.0, 2.0]);
+    let task = tokio::spawn(async move { role.handle(&msg, "gpu0", &Sink::default()).await });
+    let pinned = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            if let Ok(entries) = std::fs::read_dir(&cache) {
+                for entry in entries {
+                    let path = entry.unwrap().path().join("features");
+                    if std::fs::metadata(&path).is_ok_and(|m| m.len() == 8) {
+                        return path;
+                    }
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        }
+    })
+    .await
+    .unwrap();
+    task.abort();
+    let _ = task.await;
+    assert!(
+        !pinned.parent().unwrap().exists(),
+        "cancelled submission leaked its unqueued input copy"
+    );
+    assert!(source.is_file(), "cleanup removed the API's staging input");
+    first.committed();
+    assert!(host.shutdown(std::time::Duration::from_secs(2)).await);
 }
 
 #[tokio::test]

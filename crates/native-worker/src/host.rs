@@ -45,6 +45,8 @@ impl std::error::Error for HostUnavailable {}
 struct Command {
     request: String,
     cancel: Cancellation,
+    // Field order also releases input ownership before the gate on unwind.
+    inputs: Option<crate::request_inputs::OwnedInputs>,
     permit: OwnedSemaphorePermit,
     reply: oneshot::Sender<Result<Completion>>,
 }
@@ -239,6 +241,7 @@ impl HostClient {
                         break;
                     }
                     let result = host.run(&command.request, &command.cancel);
+                    drop(command.inputs);
                     let _ = command.reply.send(Ok(Completion {
                         result,
                         _permit: command.permit,
@@ -291,6 +294,14 @@ impl HostClient {
     }
 
     pub async fn submit(&self, request: String) -> Result<Execution> {
+        self.submit_with_inputs(request, None).await
+    }
+
+    pub(crate) async fn submit_with_inputs(
+        &self,
+        request: String,
+        inputs: Option<crate::request_inputs::OwnedInputs>,
+    ) -> Result<Execution> {
         let permit = self.gate.clone().acquire_owned().await?;
         if self.is_retired() {
             return Err(HostUnavailable.into());
@@ -304,6 +315,7 @@ impl HostClient {
             .send(Some(Command {
                 request,
                 cancel: cancel.clone(),
+                inputs,
                 permit,
                 reply,
             }))

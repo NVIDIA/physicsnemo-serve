@@ -27,9 +27,11 @@ User bundles use the separate `build-product-v1` target with
 product, compute capability and CUDA architecture, disabled MIG, available
 memory and driver bounds. This admission does not claim Lepton QA qualification
 or portability to a different GPU product. Existing qualified H100 profiles
-retain their original restrictions. `PNMS_DEVICE_UUID=GPU-<uuid>` binds NVML
-admission to the allocated physical device when CUDA visibility maps that GPU
-to logical device zero.
+retain their original restrictions. Admission resolves the configured CUDA logical
+ordinal through the driver, then selects that exact physical GPU in NVML by UUID.
+This honors `CUDA_VISIBLE_DEVICES` and `CUDA_DEVICE_ORDER` without treating a CUDA
+ordinal as an NVML index. Optional `PNMS_DEVICE_UUID=GPU-<uuid>` asserts the resolved
+identity; a mismatched assertion fails startup instead of selecting another GPU.
 New v1 CFD releases also include this full `target` policy. Legacy v1 configs
 without it retain their original exact H100/sm90 and disabled-MIG checks; they
 do not acquire a driver or available-memory qualification retroactively.
@@ -58,6 +60,11 @@ not enter the generic dead-letter path or acknowledge an unreleased reservation.
 Retired or shutting-down hosts also defer deliveries, including retirement during
 submission and loss of the native reply channel, so replacement can recover them
 without publishing an infrastructure interruption as a terminal model failure.
+Admitted multipart copies move with the native command: cancellation during
+submission discards unqueued copies; cancellation during C++ execution retains
+those bytes until the real call returns. Normal completion, rejected commands and
+native-thread unwind reclaim the owned copies before releasing the execution gate.
+API staging inputs remain under the API's own retention policy.
 
 Schema-v2 passes schema-validated canonical parameters to its linked host.
 JSON-array FP32 inputs support bounded arbitrary values. Raw FP32 input artifacts

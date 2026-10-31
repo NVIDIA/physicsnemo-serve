@@ -13,24 +13,23 @@ use tokio::{
 pub struct AdmittedInputs {
     pub paths: Map<String, Value>,
     pub metadata: Map<String, Value>,
-    owned_root: Option<std::path::PathBuf>,
-    cleanup: bool,
+    owned: Option<OwnedInputs>,
 }
 impl AdmittedInputs {
-    pub fn begin_native_call(&mut self) {
-        self.cleanup = false;
-    }
-    pub fn native_call_finished(&mut self) {
-        self.cleanup = true;
+    pub(crate) fn take_owned(&mut self) -> Option<OwnedInputs> {
+        self.owned.take()
     }
 }
-impl Drop for AdmittedInputs {
+
+/// Ownership moves from admission into the queued native command. Dropping a
+/// request future cannot remove inputs while C++ is still using them.
+pub(crate) struct OwnedInputs {
+    root: std::path::PathBuf,
+}
+impl Drop for OwnedInputs {
     fn drop(&mut self) {
-        if self.cleanup
-            && let Some(root) = &self.owned_root
-            && let Err(error) = std::fs::remove_dir_all(root)
-        {
-            tracing::warn!(path=%root.display(),%error,"failed to remove admitted attempt inputs");
+        if let Err(error) = std::fs::remove_dir_all(&self.root) {
+            tracing::warn!(path=%self.root.display(),%error,"failed to remove admitted attempt inputs");
         }
     }
 }
@@ -65,8 +64,8 @@ async fn no_symlinks(path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Owned attempt copies deliberately survive cancellation and asynchronous C++ drain.
-/// Known-completed calls remove them; uncertain calls retain them for post-drain cleanup.
+/// Attempt copies remain owned during admission, queued submission and C++ use.
+/// Their owner removes them once the actual native call finishes or is discarded.
 pub async fn admit_inputs(
     config: &WorkflowDeploymentConfig,
     payload: &Value,
@@ -82,8 +81,7 @@ pub async fn admit_inputs(
     let mut admitted = AdmittedInputs {
         paths: Map::new(),
         metadata: Map::new(),
-        owned_root: None,
-        cleanup: true,
+        owned: None,
     };
     for (name, input) in &config.input_artifacts {
         let (path, size, digest) = match input {
@@ -133,7 +131,7 @@ pub async fn admit_inputs(
             .join(output_dir.file_name().context("attempt input directory")?);
         fs::create_dir_all(root.parent().context("attempt input parent")?).await?;
         fs::create_dir(&root).await?;
-        admitted.owned_root = Some(root);
+        admitted.owned = Some(OwnedInputs { root });
     }
     let mut names = BTreeSet::new();
     for artifact in artifacts {
@@ -189,9 +187,10 @@ pub async fn admit_inputs(
             "request artifact size differs"
         );
         let owned = admitted
-            .owned_root
+            .owned
             .as_ref()
             .expect("upload input root")
+            .root
             .join(name);
         let mut input = fs::File::open(&source).await?;
         let mut output = fs::OpenOptions::new()

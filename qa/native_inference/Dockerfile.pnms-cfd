@@ -1,0 +1,137 @@
+# syntax=docker/dockerfile:1
+# CPU image preparation only; execute CFD acceptance and timing on Lepton.
+# Reuse the freshly source-bound generic image and its exact Python/CUDA stack.
+ARG PNMS_QA_IMAGE
+FROM nvcr.io/dycvht5ows21/physicsnemo-serve@sha256:ca6b0dad6380316e09ce063de67f768b6284f2192c76bed86d647a11c6689195 AS aoti-import
+FROM nvcr.io/dycvht5ows21/physicsnemo-serve@sha256:5c02cba080871d4db26a5909e055b86997cc4fdaf3dc90ea063937f1f665c4d1 AS trt-import
+FROM ${PNMS_QA_IMAGE} AS pnms-cfd
+ARG CMAKE_BUILD_PARALLEL_LEVEL=4
+ARG CMAKE_CUDA_ARCHITECTURES=90
+USER root
+COPY --from=aoti-import /opt/physicsnemo-native/ /opt/pnms-qa/cfd-imports/aoti/
+COPY --from=trt-import /opt/physicsnemo-native/ /opt/pnms-qa/cfd-imports/tensorrt/
+# Keep the selected Torch/CUDA/provider stack intact while supplying the
+# unchanged Python CFD workflow's numerical and readiness dependencies.
+RUN python3 - <<'PY'
+import hashlib
+import json
+from pathlib import Path
+import runpy
+import warp
+import vtkmodules
+
+guard = runpy.run_path("/workspace/native-inference/model-builder/images/verify_builder_environment.py")
+snapshot = guard["capture_environment"]()
+snapshot["geometry_files"] = {
+    str(path): hashlib.file_digest(path.open("rb"), "sha256").hexdigest()
+    for module in (warp, vtkmodules)
+    for path in sorted(Path(module.__file__).parent.rglob("*"))
+    if path.is_file() and (path.suffix == ".py" or ".so" in path.name)
+}
+root = Path("/opt/pnms-qa/cfd-python")
+root.mkdir()
+(root / "before.json").write_text(json.dumps(snapshot, indent=2, sort_keys=True) + "\n")
+PY
+RUN python3 -m pip install --no-deps --require-hashes \
+        -r /workspace/qa/native_inference/pnms-cfd-python-requirements.lock \
+    && python3 /workspace/qa/native_inference/build_python_rest_scatter.py \
+    && python3 -m pip install --no-deps /opt/python-cfd-rest-scatter/*.whl \
+    && CARGO_TARGET_DIR=/tmp/pnms-cfd-python-bindings python3 -m pip install \
+        --no-deps --no-build-isolation --config-settings=maturin.build-args=--locked \
+        /workspace/crates/scicomp-rq \
+    && rm -rf /tmp/pnms-cfd-python-bindings
+RUN PYTHONPATH=/workspace/application-cli/src:/workspace/scripts:/workspace/python:/workspace \
+    NVIDIA_VISIBLE_DEVICES=void CUDA_VISIBLE_DEVICES= python3 - <<'PY'
+import hashlib
+import importlib.metadata
+import json
+from pathlib import Path
+import runpy
+import subprocess
+import torch
+import torch_scatter
+import scicomp_rq
+import warp
+import vtkmodules
+from plugin_dev import check_env_plugin, ensure_run_local_prerequisites
+
+root = Path("/opt/pnms-qa/cfd-python")
+before = json.loads((root / "before.json").read_text())
+guard = runpy.run_path("/workspace/native-inference/model-builder/images/verify_builder_environment.py")
+after = guard["capture_environment"]()
+assert before["protected"] == after["protected"], "protected Torch/CUDA/provider stack changed"
+for key in ("python", "system", "machine", "torch_cuda", "torch_module_version"):
+    assert before[key] == after[key], key
+for name, package in before["packages"].items():
+    if name != "numpy":
+        assert package == after["packages"].get(name), name
+assert importlib.metadata.version("numpy") == "2.2.6"
+assert importlib.metadata.version("torch-scatter") == "2.1.2"
+assert importlib.metadata.version("maturin") == "1.16.0"
+assert importlib.metadata.version("scicomp-rq") == "0.1.0"
+for filename, digest in before["geometry_files"].items():
+    path = Path(filename)
+    assert path.is_file() and hashlib.file_digest(path.open("rb"), "sha256").hexdigest() == digest, filename
+readiness = check_env_plugin(Path("/workspace/plugins/physicsnemo-cfd-surface-benchmark"))
+assert readiness["status"] == "ready", json.dumps(readiness, sort_keys=True)
+ensure_run_local_prerequisites(skip_build=False)
+cuda_version = torch.ops.torch_scatter.cuda_version()
+assert (cuda_version // 1000, cuda_version % 1000 // 10) == tuple(map(int, torch.version.cuda.split(".")))
+binaries = {}
+for path in sorted(Path(torch_scatter.__file__).parent.glob("*_cuda.so")):
+    if path.name == "_version_cuda.so":
+        continue
+    architectures = subprocess.check_output(["cuobjdump", "--list-elf", str(path)], text=True)
+    assert "sm_90" in architectures, path
+    binaries[path.name] = {"sha256": hashlib.file_digest(path.open("rb"), "sha256").hexdigest(), "architectures": architectures}
+assert len(binaries) == 3
+binding_distribution = importlib.metadata.distribution("scicomp-rq")
+binding_files = {}
+for relative in binding_distribution.files or ():
+    path = Path(binding_distribution.locate_file(relative))
+    if path.is_file() and path.suffix != ".pyc":
+        binding_files[str(relative)] = {
+            "sha256": hashlib.file_digest(path.open("rb"), "sha256").hexdigest(),
+            "size_bytes": path.stat().st_size,
+        }
+assert any(".so" in Path(name).name for name in binding_files)
+report = {
+    "status": "passed", "gpu_execution": False, "readiness": readiness,
+    "numpy": importlib.metadata.version("numpy"),
+    "numba": importlib.metadata.version("numba"),
+    "scatter_build": json.loads(Path("/opt/python-cfd-rest-scatter/build-receipt.json").read_text()),
+    "scatter_cuda_version": cuda_version, "scatter_cuda_binaries": binaries,
+    "local_service_prerequisites": "passed",
+    "maturin": importlib.metadata.version("maturin"),
+    "scicomp_rq": {
+        "version": importlib.metadata.version("scicomp-rq"),
+        "module": str(Path(scicomp_rq.__file__)),
+        "sha256": hashlib.file_digest(Path(scicomp_rq.__file__).open("rb"), "sha256").hexdigest(),
+        "files": binding_files,
+        "source_inventory_sha256": json.loads(Path("/opt/physicsnemo-qa/source.json").read_text())["source_inventory_sha256"],
+    },
+    "protected_stack_unchanged": True, "geometry_files_unchanged": len(before["geometry_files"]),
+}
+(root / "verification.json").write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
+print(json.dumps(report, sort_keys=True))
+PY
+RUN test "${CMAKE_CUDA_ARCHITECTURES}" = 90 \
+    && PYTHONPATH=/workspace:/workspace/application-cli/src python3 -c 'from pathlib import Path; from qa.native_inference.pnms_cfd_job import relocate_import; root=Path("/opt/pnms-qa/cfd-imports"); [relocate_import(root/b/"deployment.json",root/b,Path("/tmp/pnms-cfd-import-check")/b/"deployment.json",backend=b) for b in ("aoti","tensorrt")]' \
+    && rm -rf /tmp/pnms-cfd-import-check \
+    && python3 -c 'import torch, warp, vtkmodules.all; print(torch.__version__)' \
+    && cmake -S /workspace/native-inference/cpp-runtime -B /tmp/pnms-cfd-sdk \
+        -DCMAKE_BUILD_TYPE=Release -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+        -DCMAKE_INSTALL_PREFIX=/opt/physicsnemo-inference -DPNMIR_BUILD_TESTS=OFF \
+        -DPNMIR_ENABLE_AOTI=ON -DPNMIR_ENABLE_TENSORRT=ON \
+        -DPNMIR_ENABLE_TENSORRT_EXACT=ON -DPNMIR_TENSORRT_ROOT=/usr \
+        -DCMAKE_CUDA_ARCHITECTURES="${CMAKE_CUDA_ARCHITECTURES}" \
+        -DTORCH_CUDA_ARCH_LIST=9.0 \
+        -DPNMIR_PYTORCH_SOURCE_ROOT=/opt/pytorch/pytorch \
+        -DPNMIR_CUTLASS_INCLUDE_DIR=/opt/pytorch/pytorch/third_party/cutlass/include \
+        -DPNMIR_TORCH_INCLUDE_DIR="$(python3 -c 'import pathlib,torch; print(pathlib.Path(torch.__file__).parent / "include")')" \
+        -DCMAKE_EXE_LINKER_FLAGS=-Wl,-rpath-link,/opt/hpcx/ucx/lib \
+    && cmake --build /tmp/pnms-cfd-sdk --parallel ${CMAKE_BUILD_PARALLEL_LEVEL} \
+    && cmake --install /tmp/pnms-cfd-sdk \
+    && ldconfig \
+    && python3 -c 'from pathlib import Path; import sys; sys.path.insert(0,"/workspace/native-inference/model-builder/src"); import tensorrt as trt; from model_builder.export.tensorrt_profiles import plugin_names,load_exact_plugins; profile="provider-default-exact-v1"; names=plugin_names(profile); handles,records=load_exact_plugins(trt,{name:Path("/opt/physicsnemo-inference/lib")/f"libpnmir_tensorrt_{name}_plugin.so" for name in names},profile); assert len(records)==9; print("Loaded all nine exact TensorRT plugins")' \
+    && rm -rf /tmp/pnms-cfd-sdk

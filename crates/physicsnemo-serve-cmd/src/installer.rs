@@ -690,6 +690,27 @@ mod tests {
 
     use super::*;
 
+    fn write_executable_script(path: &Path, script: &str) {
+        // A child writes the script so concurrent test processes cannot inherit
+        // a writable descriptor and make executing the fixture fail with ETXTBSY.
+        let status = Command::new("/bin/sh")
+            .args([
+                "-c",
+                "printf '%s' \"$2\" > \"$1\" && chmod 755 \"$1\"",
+                "sh",
+            ])
+            .arg(path)
+            .arg(script)
+            .stdin(Stdio::null())
+            .status()
+            .unwrap();
+        assert!(
+            status.success(),
+            "failed to write {}: {status}",
+            path.display()
+        );
+    }
+
     #[test]
     fn parses_plugin_installer_options() {
         let args = parse_installer_args([
@@ -789,31 +810,34 @@ mod tests {
     fn verifies_exact_bootstrapped_uv_version() {
         let root = tempdir().unwrap();
         let uv = root.path().join("uv");
-        fs::write(&uv, format!("#!/bin/sh\necho 'uv {UV_VERSION}'\n")).unwrap();
-        fs::set_permissions(&uv, fs::Permissions::from_mode(0o755)).unwrap();
+        write_executable_script(&uv, &format!("#!/bin/sh\necho 'uv {UV_VERSION}'\n"));
 
         verify_uv_version(&uv, UV_VERSION).unwrap();
         let error = verify_uv_version(&uv, "0.0.0").unwrap_err();
-        assert!(error.to_string().contains("unexpected version"));
+        assert!(
+            error.to_string().contains("unexpected version"),
+            "{error:#}"
+        );
     }
 
     #[test]
     fn rejects_malformed_uv_version_output() {
         let root = tempdir().unwrap();
         let uv = root.path().join("uv");
-        fs::write(&uv, "#!/bin/sh\necho 'not-uv 0.11.16'\n").unwrap();
-        fs::set_permissions(&uv, fs::Permissions::from_mode(0o755)).unwrap();
+        write_executable_script(&uv, "#!/bin/sh\necho 'not-uv 0.11.16'\n");
 
         let error = verify_uv_version(&uv, UV_VERSION).unwrap_err();
-        assert!(error.to_string().contains("unexpected version"));
+        assert!(
+            error.to_string().contains("unexpected version"),
+            "{error:#}"
+        );
     }
 
     #[test]
     fn rejects_explicit_uv_with_an_incompatible_version() {
         let root = tempdir().unwrap();
         let uv = root.path().join("uv");
-        fs::write(&uv, "#!/bin/sh\necho 'uv 0.10.0'\n").unwrap();
-        fs::set_permissions(&uv, fs::Permissions::from_mode(0o755)).unwrap();
+        write_executable_script(&uv, "#!/bin/sh\necho 'uv 0.10.0'\n");
 
         let error = resolve_uv(Some(&uv)).unwrap_err();
 
@@ -839,8 +863,7 @@ mod tests {
         let install_dir = root.path().join(UV_VERSION);
         fs::create_dir(&install_dir).unwrap();
         let uv = install_dir.join("uv");
-        fs::write(&uv, format!("#!/bin/sh\necho 'uv {UV_VERSION}'\n")).unwrap();
-        fs::set_permissions(&uv, fs::Permissions::from_mode(0o755)).unwrap();
+        write_executable_script(&uv, &format!("#!/bin/sh\necho 'uv {UV_VERSION}'\n"));
 
         quarantine_invalid_uv_install(&install_dir).unwrap();
 
@@ -868,7 +891,7 @@ mod tests {
         let requirements = root.path().join("plugin-requirements.txt");
         fs::write(&requirements, "demo-package==1.0\n").unwrap();
         let fake_uv = root.path().join("uv");
-        fs::write(
+        write_executable_script(
             &fake_uv,
             "#!/bin/sh\n\
              if [ \"$1\" = --version ]; then\n\
@@ -885,9 +908,7 @@ mod tests {
                printf '#!/bin/sh\\nexit 0\\n' > \"$runtime/bin/python\"\n\
                chmod +x \"$runtime/bin/python\"\n\
              fi\n",
-        )
-        .unwrap();
-        fs::set_permissions(&fake_uv, fs::Permissions::from_mode(0o755)).unwrap();
+        );
         let runtime = root.path().join("runtime");
         let args = InstallerArgs {
             plugin_roots: vec![plugin, second_plugin],

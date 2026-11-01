@@ -1,0 +1,3 @@
+.pnms/
+__pycache__/
+model/builds/

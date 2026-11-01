@@ -9,7 +9,7 @@ use crate::plugin_registry::PythonRuntimeEnvConfig;
 use anyhow::{Context, anyhow};
 use std::collections::HashMap;
 use std::env;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 
 /// Default server port
@@ -335,9 +335,15 @@ impl ServerConfig {
         F: Fn(&str) -> Option<String>,
     {
         let port = env_provider("PORT").unwrap_or_else(|| DEFAULT_PORT.to_string());
-        let addr: SocketAddr = format!("0.0.0.0:{}", port)
+        let port: u16 = port
             .parse()
             .with_context(|| format!("invalid PORT value: {}", port))?;
+        let host =
+            env_provider("PHYSICSNEMO_SERVE_BIND_HOST").unwrap_or_else(|| "0.0.0.0".to_string());
+        let host: IpAddr = host
+            .parse()
+            .with_context(|| format!("invalid PHYSICSNEMO_SERVE_BIND_HOST value: {}", host))?;
+        let addr = SocketAddr::new(host, port);
 
         let redis_url = if let Some(url) = env_provider("REDIS_URL") {
             url
@@ -1002,6 +1008,28 @@ mod tests {
         let config = ServerConfig::from_env_vars(&env_provider).unwrap();
         assert_eq!(config.addr.port(), 9000);
         assert_eq!(config.addr.ip(), std::net::Ipv4Addr::new(0, 0, 0, 0));
+    }
+
+    #[test]
+    fn test_from_env_bind_host() {
+        for host in ["127.0.0.1", "0.0.0.0", "::1"] {
+            let env_provider = create_test_env(vec![
+                ("PHYSICSNEMO_SERVE_BIND_HOST", host),
+                ("PORT", "9000"),
+            ]);
+            let config = ServerConfig::from_env_vars(&env_provider).unwrap();
+            assert_eq!(config.addr.ip(), host.parse::<std::net::IpAddr>().unwrap());
+            assert_eq!(config.addr.port(), 9000);
+        }
+    }
+
+    #[test]
+    fn test_from_env_invalid_bind_host() {
+        for host in ["", "localhost", "127.0.0.1:8080"] {
+            let env_provider = create_test_env(vec![("PHYSICSNEMO_SERVE_BIND_HOST", host)]);
+            let error = ServerConfig::from_env_vars(&env_provider).unwrap_err();
+            assert!(error.to_string().contains("PHYSICSNEMO_SERVE_BIND_HOST"));
+        }
     }
 
     #[test]

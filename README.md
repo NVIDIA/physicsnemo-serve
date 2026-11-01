@@ -25,6 +25,7 @@ docker build -f Dockerfile.physicsnemo-serve.scicomp-rust-slim -t physicsnemo-se
 
 Then choose your path:
 
+- **Develop and package a Python or C++ application** — use the common [`pnms` CLI](application-cli/README.md) for init, check, build, run and serve. Native local builds and inference work in a GPU-node venv without Docker or Lepton; release-image packaging uses Docker.
 - **Export a model for native inference** — see [PhysicsNeMo Model Builder and C++ Inference SDK](native-inference/README.md) for the development builder, model packages and standalone C++ SDK.
 - **Use a deployed service** — see [onboarding.md](docs/onboarding.md) for REST API examples (list workflows, submit runs, fetch results)
 - **Author a new plugin** — see [plugin-authoring-guide.md](docs/plugin-authoring-guide.md) for layout, hooks, and local validation

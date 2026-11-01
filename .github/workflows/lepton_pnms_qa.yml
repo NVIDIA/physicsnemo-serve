@@ -1,0 +1,138 @@
+name: Unified Application Lepton QA
+
+# Compilation and same-bundle HTTP profiles: 132 required gates. Native/Python
+# image packaging is qualified separately through the public CLI and QA runners.
+on:
+  workflow_call:
+    inputs:
+      image:
+        required: true
+        type: string
+      source_sha:
+        required: true
+        type: string
+      resource_shape:
+        type: string
+        default: gpu.h100-sxm
+  workflow_dispatch:
+    inputs:
+      image:
+        description: "Current-source pnms development QA image as registry/repository@sha256:digest"
+        required: true
+        type: string
+      source_sha:
+        description: "Full clean source revision captured in the prepared image"
+        required: true
+        type: string
+      resource_shape:
+        description: "Lepton H100 GPU resource shape"
+        type: string
+        default: gpu.h100-sxm
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pnms-qa-${{ github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  qualify:
+    runs-on: linux-amd64-cpu4
+    timeout-minutes: 300
+    env:
+      PNMS_QA_IMAGE: ${{ inputs.image }}
+      PNMS_QA_SOURCE_SHA: ${{ inputs.source_sha }}
+      PNMS_QA_SHAPE: ${{ inputs.resource_shape }}
+      PNMS_QA_RUN: pnms-${{ github.run_id }}-${{ github.run_attempt }}
+      PNMS_VENV_WHEELHOUSE: ${{ vars.PNMS_QA_WHEELHOUSE }}
+      LEPTON_WORKSPACE_TOKEN: ${{ secrets.LEPTON_WORKSPACE_TOKEN }}
+      LEPTON_WORKSPACE_ID: ${{ secrets.LEPTON_WORKSPACE_ID }}
+      LEPTON_NODE_GROUP: ${{ secrets.LEPTON_NODE_GROUP }}
+      LEPTON_PULL_SECRET: ${{ secrets.PULL_SECRET }}
+      LEPTON_WORKSPACE_URL: ${{ vars.LEPTON_WORKSPACE_URL }}
+      LEPTON_LUSTRE_STORAGE: ${{ vars.LEPTON_LUSTRE_STORAGE || 'lustre' }}
+      NFS_MOUNT_BASE: ${{ vars.NFS_MOUNT_BASE }}
+      QA_LUSTRE_DIR: ${{ vars.QA_LUSTRE_DIR || 'qa' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_sha }}
+      - uses: astral-sh/setup-uv@v3
+      - name: Install QA controller tools
+        run: |
+          uv tool install leptonai==0.27.2
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: Stage source and pinned QA inputs through Lepton
+        run: |
+          set -euo pipefail
+          uv run python scripts/run_lepton_pnms_stage_qa.py \
+            --image "$PNMS_QA_IMAGE" --expected-source-sha "$PNMS_QA_SOURCE_SHA" \
+            --resource-shape cpu.medium --run-id "$PNMS_QA_RUN-stage" \
+            --artifact-dir qa/artifacts/pnms --job-timeout 1200
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          path = Path("qa/artifacts/pnms") / (os.environ["PNMS_QA_RUN"] + "-stage") / "job-summary.json"
+          summary = json.loads(path.read_text())
+          values = {
+              "PNMS_QA_SOURCE_ROOT": summary["source_root"],
+              "PNMS_VENV_REQUIREMENTS": summary["requirements_file"],
+              "PNMS_VENV_REQUIREMENTS_SHA256": summary["requirements_sha256"],
+          }
+          with open(os.environ["GITHUB_ENV"], "a") as output:
+              for key, value in values.items():
+                  if not isinstance(value, str) or not value or "\n" in value or "\r" in value:
+                      raise ValueError("Invalid staged QA input: " + key)
+                  output.write(key + "=" + value + "\n")
+          PY
+      - name: Qualify development from a fresh venv on Lepton
+        run: |
+          set -euo pipefail
+          args=(
+            --image "$PNMS_QA_IMAGE" --expected-source-sha "$PNMS_QA_SOURCE_SHA"
+            --repository "$PNMS_QA_SOURCE_ROOT"
+            --requirements "$PNMS_VENV_REQUIREMENTS"
+            --requirements-sha256 "$PNMS_VENV_REQUIREMENTS_SHA256"
+            --resource-shape "$PNMS_QA_SHAPE" --run-id "$PNMS_QA_RUN-venv"
+            --artifact-dir qa/artifacts/pnms --job-timeout 3600
+          )
+          if [[ -n "$PNMS_VENV_WHEELHOUSE" ]]; then
+            args+=(--wheelhouse "$PNMS_VENV_WHEELHOUSE")
+          fi
+          uv run python scripts/run_lepton_pnms_venv_qa.py "${args[@]}"
+      - name: Serve the fresh-venv compiled bundles on Lepton
+        run: |
+          set -euo pipefail
+          uv run python scripts/run_lepton_pnms_http_qa.py \
+            --image "$PNMS_QA_IMAGE" --expected-source-sha "$PNMS_QA_SOURCE_SHA" \
+            --repository "$PNMS_QA_SOURCE_ROOT" \
+            --python "/outputs/native-inference/$PNMS_QA_RUN-venv/venv/bin/python" \
+            --resource-shape "$PNMS_QA_SHAPE" --run-id "$PNMS_QA_RUN-venv-http" \
+            --artifact-dir qa/artifacts/pnms --job-timeout 3600 --mode host \
+            --local-summary "/outputs/native-inference/$PNMS_QA_RUN-venv/summary.json"
+      - name: Compile and execute public local workflows on Lepton
+        run: |
+          set -euo pipefail
+          uv run python scripts/run_lepton_pnms_qa.py \
+            --image "$PNMS_QA_IMAGE" --expected-source-sha "$PNMS_QA_SOURCE_SHA" \
+            --resource-shape "$PNMS_QA_SHAPE" --run-id "$PNMS_QA_RUN-local" \
+            --artifact-dir qa/artifacts/pnms --job-timeout 3600
+      - name: Serve the same compiled bundles and Python plugin on Lepton
+        run: |
+          set -euo pipefail
+          uv run python scripts/run_lepton_pnms_http_qa.py \
+            --image "$PNMS_QA_IMAGE" --expected-source-sha "$PNMS_QA_SOURCE_SHA" \
+            --resource-shape "$PNMS_QA_SHAPE" --run-id "$PNMS_QA_RUN-http" \
+            --artifact-dir qa/artifacts/pnms --job-timeout 3600 --mode host \
+            --local-summary "/outputs/native-inference/$PNMS_QA_RUN-local/summary.json" \
+            --include-python
+      - name: Preserve qualification evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pnms-${{ github.run_id }}-${{ github.run_attempt }}
+          path: qa/artifacts/pnms/
+          if-no-files-found: warn

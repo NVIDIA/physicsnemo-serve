@@ -1,0 +1,52 @@
+# syntax=docker/dockerfile:1
+# Ordinary CPU image assembly: models/workflow are already compiled and sealed.
+ARG RUNTIME_IMAGE
+FROM ${RUNTIME_IMAGE} AS service-build
+ARG SOURCE_SHA
+ARG BUNDLE_DIGEST
+ARG PNMS_NATIVE_ADAPTER=tensor
+ENV PATH="/root/.cargo/bin:${PATH}"
+RUN apt-get update && apt-get install -y --no-install-recommends build-essential pkg-config libssl-dev curl ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error -o /tmp/rustup-init https://static.rust-lang.org/rustup/archive/1.28.2/x86_64-unknown-linux-gnu/rustup-init \
+    && echo '20a06e644b0d9bd2fbdbfd52d42540bdde820ea7df86e92e533c073da0cdd43c  /tmp/rustup-init' | sha256sum -c - \
+    && chmod +x /tmp/rustup-init && /tmp/rustup-init -y --profile minimal --default-toolchain 1.94.1 && rm /tmp/rustup-init
+WORKDIR /src
+COPY Cargo.toml Cargo.lock ./
+COPY .cargo/ .cargo/
+COPY crates/ crates/
+COPY --from=application-bundle / /opt/physicsnemo-release/
+ENV NATIVE_WORKFLOW_ONLY=1 NATIVE_WORKFLOW_INCLUDE=/opt/physicsnemo-release/workflow/include NATIVE_WORKFLOW_LIB_DIR=/opt/physicsnemo-release/workflow/lib
+ENV NATIVE_RUNNER_INCLUDE=/opt/physicsnemo-release/workflow/include NATIVE_RUNNER_LIB_DIR=/opt/physicsnemo-release/workflow/lib
+ENV LD_LIBRARY_PATH=/opt/physicsnemo-release/workflow/lib:${LD_LIBRARY_PATH}
+RUN --mount=type=cache,target=/root/.cargo/registry \
+    --mount=type=cache,target=/root/.cargo/git \
+    if [ "$PNMS_NATIVE_ADAPTER" = transolver_surface ]; then unset NATIVE_WORKFLOW_ONLY; \
+    elif [ "$PNMS_NATIVE_ADAPTER" != tensor ]; then echo 'unsupported native adapter' >&2; exit 1; fi \
+    && export PNMS_TORCH_LIB="$(python3 -c 'import pathlib,torch;print(pathlib.Path(torch.__file__).parent / "lib")')" \
+    && export LD_LIBRARY_PATH="${PNMS_TORCH_LIB}:${LD_LIBRARY_PATH}" \
+    && export LIBRARY_PATH="${PNMS_TORCH_LIB}:${LIBRARY_PATH}" \
+    && export CXXFLAGS="${CXXFLAGS} -D_GLIBCXX_USE_CXX11_ABI=$(python3 -c 'import torch;print(int(torch._C._GLIBCXX_USE_CXX11_ABI))')" \
+    && rm -rf /tmp/pnms-image-target \
+    && cargo build --release --locked --target-dir /tmp/pnms-image-target -p native-worker --features cpp -p inference_server -p worker-runtime
+
+FROM ${RUNTIME_IMAGE}
+ARG SOURCE_SHA
+ARG WORKFLOW_ID
+ARG BUNDLE_DIGEST
+RUN apt-get update && apt-get install -y --no-install-recommends redis-server ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && python3 -m pip install --no-cache-dir pyyaml jsonschema redis
+COPY --from=service-build /tmp/pnms-image-target/release/native-worker /tmp/pnms-image-target/release/inference_server /tmp/pnms-image-target/release/worker-runtime /opt/pnms/bin/
+COPY --from=application-bundle / /opt/physicsnemo-release/
+COPY application-cli/ /opt/pnms/source/application-cli/
+COPY scripts/ /opt/pnms/source/scripts/
+COPY python/ /opt/pnms/source/python/
+COPY crates/worker-runtime/config/ /opt/pnms/source/crates/worker-runtime/config/
+ENV PYTHONPATH=/opt/pnms/source/application-cli/src:/opt/pnms/source/scripts:/opt/pnms/source/python
+ENV SOURCE_SHA=${SOURCE_SHA} PNMS_SOURCE_SHA=${SOURCE_SHA} PNMS_BUNDLE_DIGEST=${BUNDLE_DIGEST} PNMS_SERVICE_BIN_DIR=/opt/pnms/bin
+ENV LD_LIBRARY_PATH=/opt/physicsnemo-release/workflow/lib:${LD_LIBRARY_PATH}
+EXPOSE 8080
+# Inherit the runtime's initialization (for example NVIDIA CUDA compatibility
+# selection); packaging verifies that it forwards this service command.
+CMD ["python3", "-m", "pnms_app.image_entrypoint"]

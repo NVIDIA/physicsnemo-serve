@@ -1140,7 +1140,11 @@ def build_run_local_plan(
         "REDIS_URL": redis_url,
         "POD_NAMESPACE": "local",
         "POD_NAME": f"{workflow_id}-run-local",
-        "PLUGIN_DIR": str(runtime_plugin_root.parent),
+        "PLUGIN_DIR": str(
+            runtime_plugin_root.parent
+            if runtime_plugin_root.name == workflow_id
+            else runtime_plugin_root
+        ),
         "PHYSICSNEMO_SERVE_ENABLED_PLUGIN_ID": workflow_id,
         "ARTIFACT_DIR": str(workspace_root / "artifacts"),
         "DEFAULT_OUTPUT_DIR": str(workspace_root / "outputs"),

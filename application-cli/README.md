@@ -539,6 +539,12 @@ published immutable image separately. These tests belong to our CI infrastructur
 they do not add cloud tools or accounts to the application commands. See the
 [QA profile guide](../qa/native_inference/PNMS.md) for the tested paths.
 
+Repository automation also connects GPU compilation, verified build handoff,
+CPU image packaging, and immutable-image Lepton acceptance for AOTI and
+TensorRT. The [automatic release qualification guide](../qa/native_inference/PNMS.md#automatic-native-release-qualification)
+describes its approval policy and CI configuration. This automation uses the
+same public build and packaging commands shown above.
+
 The HTTP API keeps its existing asynchronous contract. For the native example:
 
 ```bash

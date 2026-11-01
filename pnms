@@ -1,0 +1,9 @@
+#!/usr/bin/env python3
+"""Run the application frontend from this source checkout."""
+from pathlib import Path
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parent / "application-cli/src"))
+from pnms_app.cli import main
+
+raise SystemExit(main())

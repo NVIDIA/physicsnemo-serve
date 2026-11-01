@@ -101,8 +101,11 @@ jobs:
             ${{ runner.os }}-cargo-test-
       - name: Install system dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libssl-dev pkg-config python3 python3-yaml redis-server
+          # Avoid package download failures from the regional EC2 mirror.
+          sudo find /etc/apt -type f \( -name '*.list' -o -name '*.sources' \) \
+            -exec sed -i -E 's|https?://[a-z0-9.-]+\.ec2\.archive\.ubuntu\.com/ubuntu/?|https://archive.ubuntu.com/ubuntu/|g' {} +
+          sudo apt-get -o Acquire::Retries=3 update
+          sudo apt-get -o Acquire::Retries=3 install -y --no-install-recommends libssl-dev pkg-config python3 python3-yaml redis-server
           sudo ln -sf /usr/bin/python3 /usr/local/bin/python
       - run: cargo test
 
@@ -146,8 +149,11 @@ jobs:
           cache: false
       - name: Install CPU build dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends build-essential ca-certificates cmake curl libssl-dev nlohmann-json3-dev pkg-config python3 python3-venv redis-server
+          # Avoid package download failures from the regional EC2 mirror.
+          sudo find /etc/apt -type f \( -name '*.list' -o -name '*.sources' \) \
+            -exec sed -i -E 's|https?://[a-z0-9.-]+\.ec2\.archive\.ubuntu\.com/ubuntu/?|https://archive.ubuntu.com/ubuntu/|g' {} +
+          sudo apt-get -o Acquire::Retries=3 update
+          sudo apt-get -o Acquire::Retries=3 install -y --no-install-recommends build-essential ca-certificates cmake curl libssl-dev nlohmann-json3-dev pkg-config python3 python3-venv redis-server
       - name: Prepare isolated builder packaging environment
         run: |
           python3 -m venv "$RUNNER_TEMP/inference-packaging-venv"
@@ -196,6 +202,14 @@ jobs:
             native-inference/tests/test_python_image_planner.py \
             -v --junitxml="$RUNNER_TEMP/inference-cpu-evidence/python-image-planner-tests.xml" \
             2>&1 | tee "$RUNNER_TEMP/inference-cpu-evidence/python-image-planner-tests.log"
+      - name: Test unified pnms CPU contracts
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/inference-graph-venv/bin/python" -m pip install redis==6.4.0 pydantic==2.12.5
+          "$RUNNER_TEMP/inference-graph-venv/bin/python" -m pytest \
+            tests/test_pnms*.py -q -o xfail_strict=true \
+            --junitxml="$RUNNER_TEMP/inference-cpu-evidence/pnms-contract-tests.xml" \
+            2>&1 | tee "$RUNNER_TEMP/inference-cpu-evidence/pnms-contract-tests.log"
       - name: Run exact TensorRT graph tests on CPU
         env:
           PYTHONPATH: ${{ github.workspace }}/native-inference/model-builder/src

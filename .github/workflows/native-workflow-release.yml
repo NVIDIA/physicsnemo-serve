@@ -1,0 +1,241 @@
+name: Native Workflow Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      workflow:
+        description: "Native workflow to build and qualify"
+        type: choice
+        options: [transolver, tensor, raw, custom, multipart]
+        default: transolver
+      repository:
+        description: "Destination registry/repository, without tag or digest"
+        type: string
+        required: true
+      backend:
+        description: "Compiled model backend; one backend per release image"
+        type: choice
+        options: [aoti, tensorrt]
+        default: aoti
+      promote:
+        description: "Optional tag to point at the exact qualified digest"
+        type: string
+        required: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-release-${{ github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Build and qualify native ${{ inputs.workflow }} (${{ inputs.backend }})
+    runs-on: linux-amd64-cpu8
+    timeout-minutes: 480
+    env:
+      NATIVE_WORKFLOW: ${{ inputs.workflow }}
+      NATIVE_BACKEND: ${{ inputs.backend }}
+      NATIVE_REPOSITORY: ${{ inputs.repository }}
+      NATIVE_PROMOTE: ${{ inputs.promote }}
+      NATIVE_SOURCE_SHA: ${{ github.sha }}
+      NATIVE_COMPONENT_RUN_ID: native-ci-${{ github.run_id }}-${{ github.run_attempt }}
+      COMPONENT_QA_BASE_IMAGE: ${{ vars.COMPONENT_QA_BASE_IMAGE || 'nvcr.io/dycvht5ows21/physicsnemo-serve@sha256:5956694872b0141f14f18fff7783a0eecf219c732475c54f5cb3e5311a943ee8' }}
+      LEPTON_WORKSPACE_TOKEN: ${{ secrets.LEPTON_WORKSPACE_TOKEN }}
+      LEPTON_WORKSPACE_ID: ${{ secrets.LEPTON_WORKSPACE_ID }}
+      LEPTON_NODE_GROUP: ${{ secrets.LEPTON_NODE_GROUP }}
+      LEPTON_PULL_SECRET: ${{ secrets.PULL_SECRET }}
+      LEPTON_WORKSPACE_URL: ${{ vars.LEPTON_WORKSPACE_URL }}
+      LEPTON_LUSTRE_STORAGE: ${{ vars.LEPTON_LUSTRE_STORAGE || 'lustre' }}
+      NFS_MOUNT_BASE: ${{ vars.NFS_MOUNT_BASE }}
+      QA_LUSTRE_DIR: ${{ vars.QA_LUSTRE_DIR || 'qa' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@v3
+      - uses: docker/setup-buildx-action@v3
+      - name: Authenticate image registry
+        env:
+          NGC_PASSWORD: ${{ secrets.NGC_REGISTRY_PASSWORD }}
+          NGC_REGISTRY: ${{ vars.NGC_REGISTRY }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$NGC_PASSWORD" | docker login "$NGC_REGISTRY" -u '$oauthtoken' --password-stdin
+      - name: Install release controller dependencies
+        run: |
+          set -euo pipefail
+          uv sync --frozen
+          uv pip install --python .venv/bin/python leptonai==0.27.2
+          printf '%s/.venv/bin\n' "$GITHUB_WORKSPACE" >> "$GITHUB_PATH"
+          printf 'NATIVE_WORKSPACE=%s/native-release\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
+      - name: Build the source-bound native Lepton component image
+        run: |
+          set -euo pipefail
+          context="$RUNNER_TEMP/native-component-context"
+          mkdir -p "$context/cargo-source"
+          git bundle create "$context/source.bundle" HEAD
+          git archive HEAD Cargo.toml Cargo.lock .cargo crates | tar -x -C "$context/cargo-source"
+          uv export --frozen --extra qa --no-emit-project --format requirements-txt --output-file "$context/requirements.txt"
+          .venv/bin/python - <<'PY'
+          import os
+          import re
+          repository = os.environ['NATIVE_REPOSITORY']
+          if not re.fullmatch(r'[a-z0-9][a-z0-9._:/-]*', repository) or ':' in repository.rsplit('/', 1)[-1]:
+              raise ValueError('destination must be a registry/repository without a tag')
+          if not re.fullmatch(r'[^\s@]+@sha256:[0-9a-f]{64}', os.environ['COMPONENT_QA_BASE_IMAGE']):
+              raise ValueError('component QA base must be an immutable image digest')
+          PY
+          component_tag="$NATIVE_REPOSITORY:components-${NATIVE_SOURCE_SHA:0:12}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          docker buildx build --platform linux/amd64 \
+            --file qa/native_inference/components.Dockerfile \
+            --build-arg SOURCE_SHA="$NATIVE_SOURCE_SHA" \
+            --build-arg COMPONENT_QA_BASE_IMAGE="$COMPONENT_QA_BASE_IMAGE" \
+            --tag "$component_tag" \
+            --metadata-file "$RUNNER_TEMP/native-components-image.json" \
+            --push "$context"
+          .venv/bin/python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          import re
+          metadata = json.loads((Path(os.environ['RUNNER_TEMP']) / 'native-components-image.json').read_text())
+          digest = metadata.get('containerimage.digest', '')
+          if not re.fullmatch(r'sha256:[0-9a-f]{64}', digest):
+              raise ValueError('component image build did not return an immutable digest')
+          with open(os.environ['GITHUB_ENV'], 'a') as output:
+              output.write('NATIVE_COMPONENT_IMAGE=' + os.environ['NATIVE_REPOSITORY'] + '@' + digest + '\n')
+          PY
+      - name: Qualify native CPU components in Lepton
+        run: |
+          set -euo pipefail
+          .venv/bin/python qa/scripts/run_lepton_native_components.py \
+            --image "$NATIVE_COMPONENT_IMAGE" \
+            --expected-source-sha "$NATIVE_SOURCE_SHA" \
+            --resource-shape cpu.medium \
+            --artifact-dir "$RUNNER_TEMP/native-components" \
+            --run-id "$NATIVE_COMPONENT_RUN_ID" \
+            --workspace-id "$LEPTON_WORKSPACE_ID" \
+            --workspace-url "$LEPTON_WORKSPACE_URL" \
+            --node-group "$LEPTON_NODE_GROUP" \
+            --pull-secret "$LEPTON_PULL_SECRET" \
+            --nfs-mount-base "$NFS_MOUNT_BASE" \
+            --lustre-dir "$QA_LUSTRE_DIR" \
+            --lustre-storage "$LEPTON_LUSTRE_STORAGE"
+      - name: Restore verified model candidates
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/native-model-cache
+          key: native-models-v1-${{ runner.os }}-${{ runner.arch }}-${{ inputs.workflow }}-${{ inputs.backend }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            native-models-v1-${{ runner.os }}-${{ runner.arch }}-${{ inputs.workflow }}-${{ inputs.backend }}-
+            native-models-v1-${{ runner.os }}-${{ runner.arch }}-${{ inputs.workflow }}-
+            native-models-v1-${{ runner.os }}-${{ runner.arch }}-
+      - name: Select the workflow and registry
+        run: |
+          set -euo pipefail
+          case "$NATIVE_WORKFLOW" in
+            transolver) workflow_path=plugins/physicsnemo-cfd-transolver-native
+              if [[ "$NATIVE_BACKEND" == tensorrt ]]; then
+                cp "$workflow_path/release-tensorrt.yaml" "$workflow_path/release.yaml"
+              fi ;;
+            tensor) workflow_path=plugins/ci-native-tensor
+              .venv/bin/python scripts/plugin_dev.py init "$workflow_path" --runtime cpp --template tensor --backend "$NATIVE_BACKEND" ;;
+            multipart) workflow_path=plugins/ci-native-multipart
+              .venv/bin/python scripts/plugin_dev.py init "$workflow_path" --runtime cpp --template tensor --backend "$NATIVE_BACKEND" --content-type multipart/form-data ;;
+            raw) workflow_path=plugins/ci-native-raw
+              .venv/bin/python scripts/plugin_dev.py init plugins/ci-native-tensor --runtime cpp --template tensor --backend "$NATIVE_BACKEND"
+              .venv/bin/python qa/scripts/create_native_raw_variant.py plugins/ci-native-tensor "$workflow_path" ;;
+            custom) workflow_path=plugins/ci-native-custom
+              .venv/bin/python scripts/plugin_dev.py init "$workflow_path" --runtime cpp --template cpp --backend "$NATIVE_BACKEND" ;;
+            *) exit 1 ;;
+          esac
+          export NATIVE_WORKFLOW_PATH="$workflow_path"
+          .venv/bin/python - <<'PY'
+          import os
+          from pathlib import Path
+          import yaml
+          profile = Path(os.environ['NATIVE_WORKFLOW_PATH']) / 'release.yaml'
+          document = yaml.safe_load(profile.read_text())
+          document['output']['repository'] = os.environ['NATIVE_REPOSITORY']
+          document.setdefault('lepton', {}).update({
+              'workspace_id': os.environ['LEPTON_WORKSPACE_ID'],
+              'workspace_url': os.environ['LEPTON_WORKSPACE_URL'],
+              'node_group': os.environ['LEPTON_NODE_GROUP'],
+              'pull_secret': os.environ['LEPTON_PULL_SECRET'],
+              'nfs_mount_base': os.environ['NFS_MOUNT_BASE'],
+              'lustre_dir': os.environ['QA_LUSTRE_DIR'],
+              'lustre_storage': os.environ['LEPTON_LUSTRE_STORAGE'],
+          })
+          profile.write_text(yaml.safe_dump(document, sort_keys=False))
+          PY
+          printf 'NATIVE_WORKFLOW_PATH=%s\n' "$workflow_path" >> "$GITHUB_ENV"
+      - name: Validate, plan, compile misses and qualify the exact release image
+        run: |
+          set -euo pipefail
+          .venv/bin/python scripts/plugin_dev.py validate "$NATIVE_WORKFLOW_PATH"
+          .venv/bin/python scripts/plugin_dev.py release "$NATIVE_WORKFLOW_PATH" \
+            --plan --cache-dir "$RUNNER_TEMP/native-model-cache" > "$RUNNER_TEMP/native-release-plan.json"
+          args=(--workspace "$NATIVE_WORKSPACE" --cache-dir "$RUNNER_TEMP/native-model-cache")
+          .venv/bin/python scripts/plugin_dev.py release "$NATIVE_WORKFLOW_PATH" "${args[@]}"
+      - name: Promote the exact image after required Lepton gates
+        if: inputs.promote != ''
+        run: |
+          set -euo pipefail
+          read -r destination image < <(.venv/bin/python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          import re
+          root = Path(os.environ['RUNNER_TEMP'])
+          release = json.loads((Path(os.environ['NATIVE_WORKSPACE']) / 'release.json').read_text())
+          components = json.loads((root / 'native-components' / os.environ['NATIVE_COMPONENT_RUN_ID'] / 'component-receipt.json').read_text())
+          image = release.get('candidate', {}).get('image', '')
+          if release.get('status') != 'passed' or release.get('source_sha') != os.environ['NATIVE_SOURCE_SHA']:
+              raise ValueError('promotion requires the passed source-bound release')
+          if components.get('status') != 'passed' or components.get('source_sha') != os.environ['NATIVE_SOURCE_SHA'] or components.get('image_digest') != os.environ['NATIVE_COMPONENT_IMAGE']:
+              raise ValueError('promotion requires passed source-bound Lepton component evidence')
+          if not re.fullmatch(re.escape(os.environ['NATIVE_REPOSITORY']) + r'@sha256:[0-9a-f]{64}', image):
+              raise ValueError('promotion requires the exact qualified image in the destination repository')
+          tag = os.environ['NATIVE_PROMOTE']
+          if not re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}', tag):
+              raise ValueError('promotion requires a registry tag')
+          print(os.environ['NATIVE_REPOSITORY'] + ':' + tag, image)
+          PY
+          )
+          docker buildx imagetools create --prefer-index=false --tag "$destination" "$image"
+          actual=$(docker buildx imagetools inspect --format '{{json .Manifest.Digest}}' "$destination")
+          NATIVE_PROMOTED_DIGEST="$actual" NATIVE_PROMOTED_IMAGE="$image" NATIVE_PROMOTED_DESTINATION="$destination" .venv/bin/python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          digest = json.loads(os.environ['NATIVE_PROMOTED_DIGEST'])
+          if digest != os.environ['NATIVE_PROMOTED_IMAGE'].split('@', 1)[1]:
+              raise ValueError('promotion changed the exact qualified image digest')
+          report = {'status': 'passed', 'image': os.environ['NATIVE_PROMOTED_IMAGE'], 'tag': os.environ['NATIVE_PROMOTED_DESTINATION']}
+          (Path(os.environ['RUNNER_TEMP']) / 'native-promotion.json').write_text(json.dumps(report, sort_keys=True, indent=2) + '\n')
+          PY
+      - name: Preserve release evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-release-${{ inputs.workflow }}-${{ inputs.backend }}-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: warn
+          path: |
+            ${{ runner.temp }}/native-components/**
+            ${{ runner.temp }}/native-components-image.json
+            ${{ runner.temp }}/native-promotion.json
+            ${{ runner.temp }}/native-release-plan.json
+            ${{ runner.temp }}/native-release/release.json
+            ${{ runner.temp }}/native-release/resolved.json
+            ${{ runner.temp }}/native-release/native-stack.json
+            ${{ runner.temp }}/native-release/candidate-inspection.json
+            ${{ runner.temp }}/native-release/qualification.json
+            ${{ runner.temp }}/native-release/jobs/**/summary.json
+            ${{ runner.temp }}/native-release/jobs/**/job-summary.json
+            ${{ runner.temp }}/native-release/jobs/**/*.log
+            ${{ runner.temp }}/native-release/handoff/**/transfer-summary.json
+            ${{ runner.temp }}/native-release/compilation-attempt-*/handoff/**/transfer-summary.json
+            ${{ runner.temp }}/native-release/qualification-evidence/transfer-summary.json
+            ${{ runner.temp }}/native-release/qualification-evidence/extracted/**

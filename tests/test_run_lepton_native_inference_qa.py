@@ -297,6 +297,17 @@ def test_invalid_requests_fail_before_launch(tmp_path, monkeypatch, extra):
         qa.validate_args(args)
 
 
+def test_default_parser_preserves_smoke_default_and_provider_profile(
+    tmp_path, monkeypatch
+):
+    assert args_for(tmp_path, monkeypatch).profile == "smoke"
+    args = args_for(tmp_path, monkeypatch, "--profile", "provider")
+    qa.validate_args(args)
+    command = qa.build_job_command(args, "unit-name")
+    runner = shlex.split(command[-1])
+    assert runner[runner.index("--profile") + 1] == "provider"
+
+
 def test_full_profile_forwards_mounted_manifest(tmp_path, monkeypatch):
     args = args_for(
         tmp_path,

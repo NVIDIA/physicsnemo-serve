@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import fcntl
 import hashlib
 import http.client
 import json
@@ -129,6 +128,8 @@ def _download(destination, descriptor):
 
 def prepare_assets(cache_root: Path) -> Path:
     """Return a verified manifest; warm caches work without network access."""
+    import fcntl
+
     identity = hashlib.sha256(json.dumps(ASSETS, sort_keys=True).encode()).hexdigest()[
         :16
     ]

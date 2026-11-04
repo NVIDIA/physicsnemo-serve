@@ -1,0 +1,185 @@
+{
+  "schema_version": 1,
+  "profile_id": "physicsnemo-cfd-surface-transolver-run1-v1",
+  "workflow_id": "physicsnemo-cfd-surface-benchmark",
+  "domain": "surface",
+  "provider": {
+    "distribution": "nvidia-physicsnemo-cfd",
+    "module": "physicsnemo.cfd",
+    "repository": "https://github.com/NVIDIA/physicsnemo-cfd.git",
+    "tag": "v0.0.2",
+    "version": "0.0.2",
+    "commit": "921f14dc2ac14c04aabffaba3290deb792379dd8",
+    "physicsnemo_version": "2.1.1",
+    "python_version": "3.12"
+  },
+  "rest": {
+    "service": "rust",
+    "suite": "cfd_e2e",
+    "evidence_subdir": "cfd-e2e",
+    "request_path": "plugins/physicsnemo-cfd-surface-benchmark/examples/public_run_1_transolver_request.json"
+  },
+  "request": {
+    "models": [
+      "transolver_surface"
+    ],
+    "metrics": [
+      "l2_pressure",
+      "l2_shear_stress",
+      "l2_pressure_area_weighted",
+      "drag",
+      "lift"
+    ],
+    "seed": 42,
+    "save_inference_mesh": false,
+    "visual_case_ids": [],
+    "case_id_pattern": "^run_(?P<case_number>[1-9][0-9]*)$"
+  },
+  "input_layout": [
+    {
+      "digest_field": "sha256",
+      "size_field": "size_bytes",
+      "relative_path": "run_{case_number}/boundary_{case_number}.vtp"
+    },
+    {
+      "digest_field": "geometry_sha256",
+      "size_field": "geometry_size_bytes",
+      "relative_path": "run_{case_number}/drivaer_{case_number}.stl"
+    }
+  ],
+  "runner": {
+    "python": "/opt/physicsnemo-cfd-venv/bin/python",
+    "module": "physicsnemo.cfd.evaluation.benchmarks.run",
+    "timeout_seconds": 21600,
+    "environment": {
+      "HF_HOME": "$MOUNT_TARGET/.cache/physicsnemo-cfd/huggingface",
+      "PHYSICSNEMO_CFD_MODEL_CACHE": "$MOUNT_TARGET/.cache/physicsnemo-cfd/models",
+      "PYTHONPATH": "/app/python"
+    }
+  },
+  "config": {
+    "run": {
+      "device": "cuda:0",
+      "batch_size": 1,
+      "distributed": false,
+      "fail_on_all_skipped": true,
+      "fail_on_any_metric_nan": true,
+      "metrics_cache": {
+        "enabled": false
+      }
+    },
+    "models": [
+      {
+        "name": "transolver_surface",
+        "inference_domain": "surface",
+        "kwargs": {
+          "batch_resolution": 60000,
+          "geometry_sampling": 300000,
+          "cuda_bf16_autocast": false
+        },
+        "package": "hf://nvidia/transolver_drivaerml@96477aeb86d24c26ccf0797bca1b3851268017d0"
+      }
+    ],
+    "dataset": {
+      "name": "drivaerml",
+      "kwargs": {
+        "align_ground_truth_to_model": true,
+        "inference_domain": "surface"
+      }
+    },
+    "reproducibility": {
+      "log_env": false,
+      "save_artifacts": true
+    },
+    "output": {
+      "surface_interpolate_point_to_cell_for_metrics": true,
+      "surface_metrics_idw_k": 5,
+      "surface_metrics_idw_device": "cpu",
+      "mesh_field_names": {
+        "pressure": "pressure_pred",
+        "shear_stress": "wall_shear_stress_pred"
+      },
+      "ground_truth_mesh_field_names": {
+        "pressure": "pressure_true",
+        "shear_stress": "wall_shear_stress_true"
+      }
+    },
+    "reports": {
+      "enabled": false,
+      "save_comparison_meshes": false,
+      "comparison_mesh_subdir": "comparison_meshes",
+      "visuals": []
+    }
+  },
+  "comparison": {
+    "default_rtol": 1e-05,
+    "default_atol": 1e-06,
+    "metrics": {
+      "l2_pressure": {
+        "rtol": 1e-05,
+        "atol": 1e-06
+      },
+      "l2_shear_stress": {
+        "rtol": 1e-05,
+        "atol": 1e-06
+      },
+      "l2_pressure_area_weighted": {
+        "rtol": 1e-05,
+        "atol": 1e-06
+      },
+      "drag": {
+        "rtol": 1e-05,
+        "atol": 1e-06
+      },
+      "lift": {
+        "rtol": 1e-05,
+        "atol": 1e-06
+      }
+    }
+  },
+  "native_reference": {
+    "schema_version": 1,
+    "case_ids": [
+      "run_1"
+    ],
+    "batch_resolution": 60000,
+    "resolution": null,
+    "include_geometry": false,
+    "output_location": "cell",
+    "source_order": true,
+    "model_revision": "96477aeb86d24c26ccf0797bca1b3851268017d0",
+    "checkpoint": {
+      "filename": "Transolver.0.501.mdlus",
+      "sha256": "eb98f399a050a8f8a24919335c61642e4a835bd4044f7e21abec231aa31fd82c",
+      "size_bytes": 39188235
+    },
+    "statistics": {
+      "filename": "global_stats.json",
+      "sha256": "c4b19eaca6158219570232ce094e6ef48b8705eb727b335441a310c7479b6b25",
+      "size_bytes": 1375
+    },
+    "fields": {
+      "fx": {
+        "rtol": 1e-06,
+        "atol": 1e-06
+      },
+      "embedding": {
+        "rtol": 1e-05,
+        "atol": 1e-06
+      },
+      "standardized": {
+        "rtol": 0.0005,
+        "atol": 0.0005
+      },
+      "physical": {
+        "rtol": 0.0005,
+        "atol": 0.05
+      }
+    },
+    "point_count": 8828095,
+    "package_point_dimensions": [
+      60000,
+      8095
+    ]
+  }
+}

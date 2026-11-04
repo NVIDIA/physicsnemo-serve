@@ -131,3 +131,24 @@ images require their separately matched Python runtime base and explicit Python
 image qualification; the native matrix does not imply that coverage. These
 controllers remain repository QA tools and introduce no Lepton dependency into
 the user's `pnms` commands or standalone `pnms-model-builder` workflow.
+
+## CFD application and matched benchmark profiles
+
+The [CFD application guide](../../docs/cfd-native-workflow-and-benchmark.md)
+describes the compiled import contract and public build/run/serve commands.
+`Dockerfile.pnms-cfd` prepares a current-source QA image with verified AOTI and
+TensorRT full/tail imports and the matching Python numerical environment.
+
+`scripts/run_lepton_pnms_cfd_qa.py` requires all 16 gates: source/environment
+preflight, both imports/builds/direct runs, Python build, server preparation,
+six ordered Python/native HTTP sessions, and verified comparison. Each session
+checks parity before and after measurement. A failed prerequisite prevents
+speedup ratios. The controller verifies complete comparison bytes and session
+identities, then removes its owned finite job.
+
+Release images have a separate eight-gate profile per backend through
+`scripts/run_lepton_pnms_cfd_image_qa.py`: source/bundle preflight, preparation,
+startup goldens, first/repeat requests, residency, isolation and shutdown.
+Use an image assembled from the verified build and a source-bound CFD base.
+These CFD profiles are separate from the generic 147-case profile workflow;
+neither an image build nor an older compiled-model receipt proves they passed.

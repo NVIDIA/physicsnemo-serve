@@ -17,6 +17,8 @@ the plugin-based PhysicsNeMo Serve workflow.
   - C++ linkage, runtime configuration, readiness and Redis recovery contracts
 - [Native workflow authoring and sealed releases](native-workflow-user-guide.md)
   - native project contracts, verified model handoff, release images and QA
+- [CFD applications and matched benchmarking](cfd-native-workflow-and-benchmark.md)
+  - imported Transolver builds, Python/native parity and comparable HTTP timing
 
 ## Repo Touch Points
 

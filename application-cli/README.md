@@ -298,6 +298,10 @@ curl -F 'values={"artifact":"features","dtype":"float32","shape":[4],"byte_order
 
 ### Build outputs and direct SDK use
 
+The specialized [CFD application guide](../docs/cfd-native-workflow-and-benchmark.md)
+shows how to adopt verified Transolver full/tail packages through the same
+build/run/serve commands and compare the Python, AOTI and TensorRT workflows.
+
 A successful native build's JSON report includes:
 
 - `models.<alias>.package`: the complete compiled model package for existing C++

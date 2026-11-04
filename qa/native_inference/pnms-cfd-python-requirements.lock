@@ -1,0 +1,5 @@
+# The qualified CFD evaluator needs NumPy <=2.3. Match venv-requirements.txt.
+# CPython 3.12 / Linux amd64, as required by Dockerfile.pnms-cfd.
+numpy==2.2.6 --hash=sha256:fd83c01228a688733f1ded5201c678f0c53ecc1006ffbc404db9f7a899ac6249
+# Build backend for the current frozen scicomp-rq Python extension.
+maturin==1.16.0 --hash=sha256:837db2f4d93d4899c3ac393fb3cc9eebf35b6002336e5d574f4a4fb6c49fe283

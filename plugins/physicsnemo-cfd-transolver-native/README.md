@@ -5,6 +5,11 @@ persistent [native worker](../../crates/native-worker/README.md). A deployment
 must provide the compiled full and tail packages, verified normalization
 statistics, and prepared inputs described by its deployment configuration.
 
+The [CFD application guide](../../docs/cfd-native-workflow-and-benchmark.md)
+shows the common `pnms build/run/serve` path, compiled-package imports and
+matched Python/AOTI/TensorRT benchmarking. Local application use needs no Lepton;
+repository GPU and HTTP acceptance use Lepton.
+
 Validate the public contract and inspect the configured environment:
 
 ```sh

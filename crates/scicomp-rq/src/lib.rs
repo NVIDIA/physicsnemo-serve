@@ -87,6 +87,7 @@ use lua::{
 };
 
 mod manager;
+mod native_completion;
 mod operations;
 
 pub use manager::{ConnectionManagerConfig, QueueManager};

@@ -154,6 +154,7 @@ fn workflow_schema_contract(
 
 #[derive(Clone)]
 pub struct AppState {
+    pub native_runtime: Option<Result<crate::native_readiness::NativeExpectation, String>>,
     pub config: Arc<ServerConfig>,
     pub redis_service: Arc<RwLock<Option<RedisService>>>,
     pub workflow_registry: Arc<RwLock<WorkflowRegistrySnapshot>>,
@@ -165,6 +166,7 @@ pub struct AppState {
 impl AppState {
     pub fn new(config: ServerConfig, redis_service: RedisService) -> Self {
         Self {
+            native_runtime: crate::native_readiness::NativeExpectation::from_environment(),
             config: Arc::new(config),
             redis_service: Arc::new(RwLock::new(Some(redis_service))),
             workflow_registry: Arc::new(RwLock::new(WorkflowRegistrySnapshot::default())),
@@ -177,6 +179,7 @@ impl AppState {
     #[doc(hidden)]
     pub fn new_for_testing(config: ServerConfig) -> Self {
         Self {
+            native_runtime: None,
             config: Arc::new(config),
             redis_service: Arc::new(RwLock::new(None)),
             workflow_registry: Arc::new(RwLock::new(WorkflowRegistrySnapshot::default())),

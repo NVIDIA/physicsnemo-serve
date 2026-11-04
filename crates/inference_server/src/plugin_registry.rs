@@ -409,6 +409,35 @@ impl PluginManifest {
         validate_non_empty("runtime.kind", &self.runtime.kind)?;
         validate_non_empty("runtime.entrypoint", &self.runtime.entrypoint)?;
         validate_non_empty("runtime.executor_class", &self.runtime.executor_class)?;
+        if self.runtime.kind == "cpp" {
+            let phases: Vec<_> = self
+                .pipeline
+                .stages
+                .iter()
+                .map(|stage| stage.phase.as_str())
+                .collect();
+            if phases != ["schedule", "execute", "results"]
+                || self.pipeline.stages[1].handler != "native_workflow"
+            {
+                bail!(
+                    "cpp runtime requires the explicit schedule/execute(native_workflow)/results pipeline"
+                );
+            }
+            if self.runtime.prepare_executor_class.is_some()
+                || self.runtime.postprocess_executor_class.is_some()
+                || self.runtime.readiness_executor_class.is_some()
+                || !self.developer.readiness.python_modules.is_empty()
+            {
+                bail!("cpp runtime cannot use Python phase or readiness hooks");
+            }
+        } else if self
+            .pipeline
+            .stages
+            .iter()
+            .any(|stage| stage.handler == "native_workflow")
+        {
+            bail!("native_workflow handler requires runtime.kind cpp");
+        }
         if let Some(executor_class) = &self.runtime.prepare_executor_class {
             validate_non_empty("runtime.prepare_executor_class", executor_class)?;
         }
@@ -806,6 +835,7 @@ fn is_supported_stage_handler(phase: &str, handler: &str) -> bool {
             | ("prefetch", "prefetch")
             | ("schedule", "schedule")
             | ("execute", "plugin_phase")
+            | ("execute", "native_workflow")
             | ("postprocess", "plugin_phase")
             | ("publish", "plugin_phase")
             | ("publish", "publish_outputs")

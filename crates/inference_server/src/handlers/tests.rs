@@ -17,6 +17,50 @@ fn create_mock_state() -> Arc<AppState> {
     create_mock_state_with_swagger_cdn(None)
 }
 
+#[tokio::test]
+async fn multipart_upload_digest_survives_staging_into_run_envelope() {
+    let root = std::env::temp_dir().join(format!("native-upload-digest-{}", uuid::Uuid::new_v4()));
+    let manifest = crate::plugin_registry::PluginManifest::from_yaml_str(
+        r#"
+metadata: {id: upload-test, display_name: Upload, version: 1.0.0, description: Upload test}
+ingress:
+  content_type: multipart/form-data
+  request_schema: schemas/request.json
+  files:
+    - {name: features, required: true, media_types: [application/octet-stream], max_size_mb: 1}
+pipeline: {profile: postprocess}
+runtime: {profile: python-test}
+outputs: {result_schema: schemas/result.json}
+"#,
+    )
+    .unwrap();
+    let plugin = RegisteredPlugin {
+        root_dir: root.clone(),
+        manifest_path: root.join("plugin.yaml"),
+        manifest,
+    };
+    let body = "--boundary\r\nContent-Disposition: form-data; name=\"features\"; filename=\"data.bin\"\r\nContent-Type: application/octet-stream\r\n\r\nabc\r\n--boundary--\r\n";
+    let request = Request::builder()
+        .method("POST")
+        .header("content-type", "multipart/form-data; boundary=boundary")
+        .body(axum::body::Body::from(body))
+        .unwrap();
+    let parsed = collect_multipart_plugin_request(&plugin, &root, request)
+        .await
+        .unwrap();
+    let staged = stage_pending_artifacts(root.clone(), "run-1", parsed.pending_files)
+        .await
+        .unwrap();
+    let artifact = serde_json::to_value(&staged[0]).unwrap();
+    assert_eq!(
+        artifact["sha256"],
+        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+    );
+    assert_eq!(artifact["size_bytes"], 3);
+    assert_eq!(fs::read(&staged[0].storage_path).await.unwrap(), b"abc");
+    fs::remove_dir_all(root).await.unwrap();
+}
+
 fn create_mock_state_with_swagger_cdn(swagger_cdn_url: Option<&str>) -> Arc<AppState> {
     let config = ServerConfig {
         addr: "127.0.0.1:8080".parse().unwrap(),
@@ -164,6 +208,7 @@ async fn stage_pending_artifacts_cleans_up_partial_staging_on_failure() {
                 media_type: "model/stl".to_string(),
                 temp_path: first_upload,
                 size_bytes: 6,
+                sha256: None,
             },
             PendingUploadedFile {
                 field_name: "design_stl".to_string(),
@@ -171,6 +216,7 @@ async fn stage_pending_artifacts_cleans_up_partial_staging_on_failure() {
                 media_type: "model/stl".to_string(),
                 temp_path: missing_upload,
                 size_bytes: 6,
+                sha256: None,
             },
             PendingUploadedFile {
                 field_name: "design_stl".to_string(),
@@ -178,6 +224,7 @@ async fn stage_pending_artifacts_cleans_up_partial_staging_on_failure() {
                 media_type: "model/stl".to_string(),
                 temp_path: third_upload.clone(),
                 size_bytes: 6,
+                sha256: None,
             },
         ],
     )

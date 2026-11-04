@@ -27,6 +27,7 @@ anyhow = { workspace = true }
 
 # Utilities
 uuid = { workspace = true }
+sha2 = "0.10"
 jsonschema = { workspace = true }
 
 # Logging
@@ -35,6 +36,7 @@ tracing-subscriber = { workspace = true }
 
 # Redis (via scicomp-rq)
 scicomp-rq = { path = "../scicomp-rq" }
+worker-runtime = { path = "../worker-runtime" }
 redis = { workspace = true }
 
 # Metrics / Observability
@@ -44,3 +46,6 @@ sysinfo.workspace = true
 
 # HTTP client (for Prometheus proxy)
 reqwest = { version = "0.12", features = ["json"] }
+
+[dev-dependencies]
+tempfile = "3"

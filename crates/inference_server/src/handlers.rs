@@ -18,6 +18,7 @@ use axum::{
     response::{Html, IntoResponse, Response},
 };
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path as StdPath, PathBuf};
 use std::process::Stdio;
@@ -47,6 +48,7 @@ struct PendingUploadedFile {
     media_type: String,
     temp_path: PathBuf,
     size_bytes: u64,
+    sha256: Option<String>,
 }
 
 struct ParsedPluginRequest {
@@ -185,7 +187,15 @@ pub async fn get_workflow_schema(
 ) -> (StatusCode, Json<Value>) {
     match get_contract_or_404(&state, &name).await {
         Ok(contract) => match contract.schema_contract {
-            Ok(schema_contract) => (StatusCode::OK, Json(schema_contract)),
+            Ok(mut schema_contract) => {
+                if let Some(Ok(native)) = &state.native_runtime
+                    && native.workflow_id == name
+                {
+                    schema_contract["public_contract_digest"] =
+                        json!(native.public_contract_digest);
+                }
+                (StatusCode::OK, Json(schema_contract))
+            }
             Err(err) => workflow_schema_error_response(err),
         },
         Err(e) => e,
@@ -198,13 +208,35 @@ pub async fn get_workflow_readiness(
     Path(name): Path<String>,
 ) -> (StatusCode, Json<Value>) {
     match get_contract_or_404(&state, &name).await {
-        Ok(contract) => (
-            StatusCode::OK,
-            Json(build_plugin_readiness_contract(
-                &contract.plugin,
-                contract.readiness,
-            )),
-        ),
+        Ok(contract) => {
+            let is_native = contract.plugin.manifest.runtime.kind == "cpp";
+            let mut response =
+                build_plugin_readiness_contract(&contract.plugin, contract.readiness);
+            if is_native {
+                let native = match &state.native_runtime {
+                    Some(Ok(expected)) if expected.workflow_id == name => {
+                        crate::native_readiness::probe(&state, expected).await
+                    }
+                    Some(Err(error)) => crate::native_readiness::unavailable(error.clone()),
+                    _ => crate::native_readiness::unavailable(
+                        "no matching native deployment is configured",
+                    ),
+                };
+                let ready = response["readiness"]["ready"] == true && native["ready"] == true;
+                response["readiness"]["ready"] = json!(ready);
+                response["native"] = native;
+                (
+                    if ready {
+                        StatusCode::OK
+                    } else {
+                        StatusCode::SERVICE_UNAVAILABLE
+                    },
+                    Json(response),
+                )
+            } else {
+                (StatusCode::OK, Json(response))
+            }
+        }
         Err(e) => e,
     }
 }
@@ -529,6 +561,7 @@ async fn collect_multipart_plugin_request(
             };
             let mut field = field;
             let mut size_bytes = 0_u64;
+            let mut digest = Sha256::new();
             while let Some(chunk) = match field.chunk().await {
                 Ok(value) => value,
                 Err(e) => {
@@ -566,6 +599,7 @@ async fn collect_multipart_plugin_request(
                         })
                     );
                 }
+                digest.update(&chunk);
             }
             if let Err(e) = temp_file.flush().await {
                 let _ = fs::remove_file(&temp_path).await;
@@ -585,6 +619,7 @@ async fn collect_multipart_plugin_request(
                 media_type,
                 temp_path,
                 size_bytes,
+                sha256: Some(format!("{:x}", digest.finalize())),
             });
         } else {
             let text = match field.text().await {
@@ -690,6 +725,7 @@ async fn stage_pending_artifacts(
             size_bytes: staged.size_bytes,
             storage_path: staged.storage_path.display().to_string(),
             original_filename: staged.original_filename,
+            sha256: pending_file.sha256.clone(),
         });
     }
 

@@ -222,6 +222,78 @@ impl MessageSink for GuardedHandoffTrackingSink<'_> {
         })
     }
 
+    fn begin_attempt<'a>(
+        &'a self,
+        msg: &'a scicomp_rq::Message,
+        attempt_token: &'a str,
+    ) -> crate::traits::BoxFuture<'a, Result<Option<Vec<String>>>> {
+        let tracked = self.tracker.start(msg);
+        Box::pin(async move {
+            let result = self
+                .inner
+                .begin_attempt_for_consumer(msg, attempt_token, self.consumer)
+                .await;
+            if !matches!(result, Ok(None)) {
+                self.tracker.finish(tracked, matches!(result, Ok(Some(_))));
+            } else if tracked {
+                self.tracker
+                    .state_tx
+                    .send_replace(GuardedHandoffState::NotStarted);
+            }
+            result
+        })
+    }
+
+    fn complete_attempt<'a>(
+        &'a self,
+        msg: &'a scicomp_rq::Message,
+        outputs: &'a [scicomp_rq::Output],
+        attempt_token: &'a str,
+    ) -> crate::traits::BoxFuture<'a, Result<Vec<String>>> {
+        let tracked = self.tracker.start(msg);
+        Box::pin(async move {
+            let result = self
+                .inner
+                .complete_attempt_for_consumer(msg, outputs, attempt_token, self.consumer)
+                .await;
+            match result {
+                Ok(ids) => {
+                    self.tracker.finish(tracked, true);
+                    Ok(ids)
+                }
+                Err(error) => {
+                    // A lost reply can follow a successful XACK. Resolve the
+                    // durable marker before the heartbeat calls that ownership
+                    // loss. A same-token begin is an idempotent inspection.
+                    match self
+                        .inner
+                        .begin_attempt_for_consumer(msg, attempt_token, self.consumer)
+                        .await
+                    {
+                        Ok(Some(ids)) => {
+                            self.tracker.finish(tracked, true);
+                            Ok(ids)
+                        }
+                        Ok(None) => {
+                            self.tracker.finish(tracked, false);
+                            Err(error)
+                        }
+                        Err(recovery_error) if is_message_ownership_lost_error(&recovery_error) => {
+                            self.tracker.finish(tracked, false);
+                            Err(recovery_error)
+                        }
+                        Err(_) => {
+                            // The role owns a bounded completion-retry budget.
+                            // Keep tracking the uncertainty across those retries
+                            // instead of declaring its own possible ACK a steal.
+                            Err(error)
+                        }
+                    }
+                }
+            }
+        })
+    }
+
     fn forward_many<'a>(
         &'a self,
         msg: &'a scicomp_rq::Message,
@@ -1300,6 +1372,41 @@ mod tests {
     }
 
     impl MessageSink for OwnershipLossTransport {
+        fn begin_attempt_for_consumer<'a>(
+            &'a self,
+            _msg: &'a scicomp_rq::Message,
+            _token: &'a str,
+            consumer: &'a str,
+        ) -> crate::traits::BoxFuture<'a, Result<Option<Vec<String>>>> {
+            assert_eq!(
+                consumer, "consumer-a",
+                "engine must inject its unique consumer"
+            );
+            Box::pin(async move {
+                Ok(self
+                    .source_acknowledged
+                    .load(Ordering::SeqCst)
+                    .then(|| vec!["release-id".into(), "result-id".into()]))
+            })
+        }
+
+        fn complete_attempt_for_consumer<'a>(
+            &'a self,
+            _msg: &'a scicomp_rq::Message,
+            _outputs: &'a [scicomp_rq::Output],
+            _token: &'a str,
+            consumer: &'a str,
+        ) -> crate::traits::BoxFuture<'a, Result<Vec<String>>> {
+            assert_eq!(
+                consumer, "consumer-a",
+                "engine must inject its unique consumer"
+            );
+            Box::pin(async move {
+                self.handoffs.fetch_add(1, Ordering::SeqCst);
+                self.source_acknowledged.store(true, Ordering::SeqCst);
+                Err(anyhow!("simulated lost commit reply"))
+            })
+        }
         fn enqueue<'a>(
             &'a self,
             _stream: &'a str,
@@ -1484,6 +1591,7 @@ mod tests {
     }
 
     struct GuardedHandoffCleanupRole {
+        native_completion: bool,
         handler_entered: Arc<std::sync::atomic::AtomicBool>,
         handoff_completed: Arc<Barrier>,
         release_cleanup: Arc<Notify>,
@@ -1503,17 +1611,30 @@ mod tests {
         ) -> crate::traits::BoxFuture<'a, Result<()>> {
             Box::pin(async move {
                 self.handler_entered.store(true, Ordering::SeqCst);
-                sink.handoff_to_run_and_commit(
-                    msg,
-                    "next",
-                    msg.payload(),
-                    "next",
-                    msg.run_id(),
-                    "finalization-key",
-                    "owner-token",
-                    &[],
-                )
-                .await?;
+                if self.native_completion {
+                    sink.begin_attempt(msg, "attempt-1").await?;
+                    sink.complete_attempt(
+                        msg,
+                        &[
+                            scicomp_rq::Output::new("release", "{}"),
+                            scicomp_rq::Output::new("next", msg.payload()),
+                        ],
+                        "attempt-1",
+                    )
+                    .await?;
+                } else {
+                    sink.handoff_to_run_and_commit(
+                        msg,
+                        "next",
+                        msg.payload(),
+                        "next",
+                        msg.run_id(),
+                        "finalization-key",
+                        "owner-token",
+                        &[],
+                    )
+                    .await?;
+                }
                 self.handoff_completed.wait().await;
                 self.release_cleanup.notified().await;
                 self.cleanup_completed.store(true, Ordering::SeqCst);
@@ -1765,6 +1886,15 @@ mod tests {
 
     #[tokio::test]
     async fn guarded_handoff_ack_does_not_cancel_post_handoff_cleanup() {
+        guarded_cleanup_after_ack(false).await;
+    }
+
+    #[tokio::test]
+    async fn native_completion_lost_reply_recovers_marker_before_heartbeat_cancellation() {
+        guarded_cleanup_after_ack(true).await;
+    }
+
+    async fn guarded_cleanup_after_ack(native_completion: bool) {
         let config: RuntimeConfig = serde_json::from_value(serde_json::json!({
             "stream_prefix": "",
             "streams": ["input", "next"],
@@ -1802,6 +1932,7 @@ mod tests {
         let engine = EngineBuilder::new(&config, "worker")
             .transport(transport.clone())
             .role(Box::new(GuardedHandoffCleanupRole {
+                native_completion,
                 handler_entered,
                 handoff_completed: Arc::clone(&handoff_completed),
                 release_cleanup: Arc::clone(&release_cleanup),
@@ -1812,7 +1943,9 @@ mod tests {
             .expect("engine should build");
 
         let run = tokio::spawn(async move { engine.run_once().await });
-        handoff_completed.wait().await;
+        tokio::time::timeout(Duration::from_secs(2), handoff_completed.wait())
+            .await
+            .expect("guarded completion should recover a committed marker and finish");
         assert!(source_acknowledged.load(Ordering::SeqCst));
         tokio::time::timeout(Duration::from_secs(1), async {
             while !renewal_reported_missing.load(Ordering::SeqCst) {

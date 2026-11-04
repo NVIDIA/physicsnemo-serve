@@ -113,7 +113,10 @@ impl fmt::Display for MessageDeferred {
 
 impl std::error::Error for MessageDeferred {}
 
-pub(crate) fn message_deferred(reason: impl Into<String>) -> anyhow::Error {
+/// Leave the delivery pending without counting a handler failure or using the
+/// generic dead-letter handoff. External roles must use this when an uncertain
+/// guarded operation requires ownership recovery rather than terminal failure.
+pub fn message_deferred(reason: impl Into<String>) -> anyhow::Error {
     MessageDeferred {
         reason: reason.into(),
     }
@@ -271,6 +274,59 @@ pub trait MessageSink: Send + Sync {
             owner_token,
             recovery_keys,
         )
+    }
+
+    /// Claim a native execution attempt. `Some(ids)` means this delivery already
+    /// committed and execution must not run again. The engine supplies its
+    /// unique consumer identity through `begin_attempt_for_consumer`.
+    fn begin_attempt<'a>(
+        &'a self,
+        _msg: &'a Message,
+        _attempt_token: &'a str,
+    ) -> BoxFuture<'a, Result<Option<Vec<String>>>> {
+        Box::pin(async {
+            Err(anyhow::anyhow!(
+                "sink does not support guarded native attempts"
+            ))
+        })
+    }
+
+    /// Consumer-fenced transport entry point; roles call `begin_attempt`.
+    fn begin_attempt_for_consumer<'a>(
+        &'a self,
+        msg: &'a Message,
+        attempt_token: &'a str,
+        _consumer: &'a str,
+    ) -> BoxFuture<'a, Result<Option<Vec<String>>>> {
+        self.begin_attempt(msg, attempt_token)
+    }
+
+    /// Commit native outcome and original reservation release together. A
+    /// durable marker returns the original output IDs after response loss.
+    /// Implementations must fail closed instead of falling back to unguarded
+    /// `forward_many`.
+    fn complete_attempt<'a>(
+        &'a self,
+        _msg: &'a Message,
+        _outputs: &'a [Output],
+        _attempt_token: &'a str,
+    ) -> BoxFuture<'a, Result<Vec<String>>> {
+        Box::pin(async {
+            Err(anyhow::anyhow!(
+                "sink does not support guarded native completion"
+            ))
+        })
+    }
+
+    /// Consumer-fenced transport entry point; roles call `complete_attempt`.
+    fn complete_attempt_for_consumer<'a>(
+        &'a self,
+        msg: &'a Message,
+        outputs: &'a [Output],
+        attempt_token: &'a str,
+        _consumer: &'a str,
+    ) -> BoxFuture<'a, Result<Vec<String>>> {
+        self.complete_attempt(msg, outputs, attempt_token)
     }
 
     /// Atomic ack-current + fan-out to multiple destinations.

@@ -63,6 +63,7 @@ COPY crates/inference_server/Cargo.toml ./crates/inference_server/
 COPY crates/physicsnemo-serve-cmd/Cargo.toml ./crates/physicsnemo-serve-cmd/
 COPY crates/scicomp-rq/Cargo.toml ./crates/scicomp-rq/
 COPY crates/worker-runtime/Cargo.toml ./crates/worker-runtime/
+COPY crates/native-worker/Cargo.toml ./crates/native-worker/
 COPY crates/e2s_zarr_io/Cargo.toml ./crates/e2s_zarr_io/
 
 # Create minimal source stubs for cargo-chef to analyze
@@ -74,6 +75,9 @@ RUN mkdir -p crates/inference_server/src && echo "fn main() {}" > crates/inferen
  && mkdir -p crates/scicomp-rq/src && echo "pub fn dummy() {}" > crates/scicomp-rq/src/lib.rs \
  && mkdir -p crates/scicomp-rq/benches && echo "fn main() {}" > crates/scicomp-rq/benches/redis_utils_parser.rs \
  && mkdir -p crates/worker-runtime/src && echo "fn main() {}" > crates/worker-runtime/src/main.rs \
+ && mkdir -p crates/native-worker/src && echo "pub fn dummy() {}" > crates/native-worker/src/lib.rs \
+ && echo "fn main() {}" > crates/native-worker/src/main.rs \
+ && echo "fn main() {}" > crates/native-worker/build.rs \
  && mkdir -p crates/e2s_zarr_io/src && echo "pub fn dummy() {}" > crates/e2s_zarr_io/src/lib.rs \
  && mkdir -p crates/e2s_zarr_io/benches && echo "fn main() {}" > crates/e2s_zarr_io/benches/buffer_pool_latency.rs \
  && echo "fn main() {}" > crates/e2s_zarr_io/benches/write_copy_barrier_latency.rs \
@@ -125,6 +129,7 @@ COPY crates/inference_server/Cargo.toml ./crates/inference_server/
 COPY crates/physicsnemo-serve-cmd/Cargo.toml ./crates/physicsnemo-serve-cmd/
 COPY crates/scicomp-rq/Cargo.toml ./crates/scicomp-rq/
 COPY crates/worker-runtime/Cargo.toml ./crates/worker-runtime/
+COPY crates/native-worker/Cargo.toml ./crates/native-worker/
 COPY crates/e2s_zarr_io/Cargo.toml ./crates/e2s_zarr_io/
 
 # Create minimal source stubs required for manifest parsing during cargo-chef cook.
@@ -136,6 +141,9 @@ RUN mkdir -p crates/inference_server/src && echo "fn main() {}" > crates/inferen
  && mkdir -p crates/scicomp-rq/src && echo "pub fn dummy() {}" > crates/scicomp-rq/src/lib.rs \
  && mkdir -p crates/scicomp-rq/benches && echo "fn main() {}" > crates/scicomp-rq/benches/redis_utils_parser.rs \
  && mkdir -p crates/worker-runtime/src && echo "fn main() {}" > crates/worker-runtime/src/main.rs \
+ && mkdir -p crates/native-worker/src && echo "pub fn dummy() {}" > crates/native-worker/src/lib.rs \
+ && echo "fn main() {}" > crates/native-worker/src/main.rs \
+ && echo "fn main() {}" > crates/native-worker/build.rs \
  && mkdir -p crates/e2s_zarr_io/src && echo "pub fn dummy() {}" > crates/e2s_zarr_io/src/lib.rs \
  && mkdir -p crates/e2s_zarr_io/benches && echo "fn main() {}" > crates/e2s_zarr_io/benches/buffer_pool_latency.rs \
  && echo "fn main() {}" > crates/e2s_zarr_io/benches/write_copy_barrier_latency.rs \
@@ -178,7 +186,14 @@ COPY crates/inference_server/Cargo.toml ./crates/inference_server/
 COPY crates/physicsnemo-serve-cmd/Cargo.toml ./crates/physicsnemo-serve-cmd/
 COPY crates/scicomp-rq/Cargo.toml ./crates/scicomp-rq/
 COPY crates/worker-runtime/Cargo.toml ./crates/worker-runtime/
+COPY crates/native-worker/Cargo.toml ./crates/native-worker/
 COPY crates/e2s_zarr_io/Cargo.toml ./crates/e2s_zarr_io/
+
+# Parse the optional native workspace member without building its C++ feature.
+RUN mkdir -p crates/native-worker/src \
+ && echo "pub fn dummy() {}" > crates/native-worker/src/lib.rs \
+ && echo "fn main() {}" > crates/native-worker/src/main.rs \
+ && echo "fn main() {}" > crates/native-worker/build.rs
 
 # Build the Python wheel needed by the shipped execute worker before copying
 # the binary-only crates, so worker-runtime changes do not invalidate this layer.

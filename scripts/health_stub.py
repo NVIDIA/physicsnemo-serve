@@ -5,12 +5,14 @@
 
 Listens on port 8001 and proxies all requests to the real inference server on
 port 8080. If the backend isn't ready yet, /health returns 200 so Lepton's
-health probe stays satisfied while the service boots.
+health probe stays satisfied while a Python service boots. Native /health
+proxies /readyz and reports loading as 503 until the live native owner is ready.
 
 Based on script provided by Lepton.AI support.
 """
 
 import http.server
+import os
 import socketserver
 import urllib.error
 import urllib.request
@@ -27,8 +29,12 @@ class H(http.server.BaseHTTPRequestHandler):
             else None
         )
         try:
+            native_health = self.path == "/health" and bool(
+                os.environ.get("NATIVE_DEPLOYMENT_CONFIG")
+            )
+            path = "/readyz" if native_health else self.path
             req = urllib.request.Request(
-                f"http://127.0.0.1:8080{self.path}",
+                f"http://127.0.0.1:8080{path}",
                 method=method,
                 data=body,
                 headers={k: v for k, v in self.headers.items() if k.lower() != "host"},
@@ -46,7 +52,9 @@ class H(http.server.BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(e.read())
         except Exception:
-            if self.path == "/health":
+            if self.path == "/health" and not os.environ.get(
+                "NATIVE_DEPLOYMENT_CONFIG"
+            ):
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
                 self.end_headers()
@@ -61,5 +69,6 @@ class H(http.server.BaseHTTPRequestHandler):
         self._proxy("POST")
 
 
-socketserver.ThreadingTCPServer.allow_reuse_address = True
-socketserver.ThreadingTCPServer(("0.0.0.0", 8001), H).serve_forever()
+if __name__ == "__main__":
+    socketserver.ThreadingTCPServer.allow_reuse_address = True
+    socketserver.ThreadingTCPServer(("0.0.0.0", 8001), H).serve_forever()

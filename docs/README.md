@@ -13,6 +13,8 @@ the plugin-based PhysicsNeMo Serve workflow.
   - plugin layout, SDK hooks, runtime hints, and local authoring flow
 - `earth2-deterministic-batching.md`
   - Earth2-specific batching notes for `plugins/earth2-deterministic-batch`
+- [Native worker and serving integration](native-worker-serving-integration.md)
+  - C++ linkage, runtime configuration, readiness and Redis recovery contracts
 
 ## Repo Touch Points
 

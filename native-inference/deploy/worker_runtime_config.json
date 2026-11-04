@@ -1,0 +1,32 @@
+{
+  "stream_prefix": "physicsnemo:",
+  "max_retries": 3,
+  "shared_dlq_stream": "dlq",
+  "streams": ["schedule", "release", "results", "dlq"],
+  "roles": {
+    "scheduler": {
+      "inputs": [
+        {"stream": "schedule", "max_dequeue_items": 1, "poll_interval_ms": 50, "block_ms": 500, "reclaim_idle_ms": 60000},
+        {"stream": "release", "max_dequeue_items": 4, "poll_interval_ms": 20, "block_ms": 100, "reclaim_idle_ms": 60000}
+      ],
+      "outputs": [],
+      "config": {
+        "gpu_registry_key": "gpu:registry",
+        "memory_utilization_percent": 90,
+        "gpu_discovery_interval_secs": 1,
+        "batching_enabled": false,
+        "max_batch_size": 1,
+        "max_batch_wait_ms": 200
+      }
+    },
+    "results": {
+      "inputs": [
+        {"stream": "results", "max_dequeue_items": 4, "poll_interval_ms": 50, "block_ms": 500, "reclaim_idle_ms": 60000}
+      ],
+      "outputs": [],
+      "config": {"result_ttl_seconds": 86400}
+    }
+  },
+  "python_runtime_envs": {},
+  "output_publication": {"enabled": false}
+}

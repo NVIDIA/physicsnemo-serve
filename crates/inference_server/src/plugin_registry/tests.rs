@@ -104,6 +104,64 @@ outputs:
 "#
 }
 
+#[test]
+fn native_manifest_uses_explicit_schemas_without_python_hooks() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../plugins/physicsnemo-cfd-transolver-native");
+    let plugins = discover_plugins(&[root]).unwrap();
+    assert_eq!(plugins.len(), 1);
+    let plugin = &plugins[0];
+    assert_eq!(plugin.manifest.runtime.kind, "cpp");
+    assert_eq!(plugin.manifest.pipeline.stages[0].phase, "schedule");
+    assert_eq!(
+        plugin.manifest.pipeline.stages[1].handler,
+        "native_workflow"
+    );
+    assert!(
+        plugin
+            .load_request_schemas()
+            .unwrap()
+            .contains_key("application/json")
+    );
+    assert!(plugin.load_result_schema().is_ok());
+    assert!(
+        plugin
+            .manifest
+            .developer
+            .readiness
+            .python_modules
+            .is_empty()
+    );
+}
+
+#[test]
+fn native_manifest_rejects_python_hooks_and_python_runtime_rejects_native_handler() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../plugins/physicsnemo-cfd-transolver-native/plugin.yaml");
+    let yaml = fs::read_to_string(root).unwrap();
+    let hooks = yaml.replace(
+        "kind: cpp",
+        "kind: cpp\n  prepare_executor_class: python.test",
+    );
+    assert!(
+        PluginManifest::from_yaml_str(&hooks)
+            .unwrap()
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("Python")
+    );
+    let python = yaml.replace("kind: cpp", "kind: python");
+    assert!(
+        PluginManifest::from_yaml_str(&python)
+            .unwrap()
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("requires runtime.kind cpp")
+    );
+}
+
 fn manifest_yaml_with_id(id: &str) -> String {
     minimal_manifest_yaml().replacen("demo-prefetch", id, 1)
 }

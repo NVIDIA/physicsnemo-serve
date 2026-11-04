@@ -103,6 +103,7 @@ SUPPORTED_PIPELINE_STAGE_HANDLERS = {
     ("prefetch", "prefetch"),
     ("schedule", "schedule"),
     ("execute", "plugin_phase"),
+    ("execute", "native_workflow"),
     ("postprocess", "plugin_phase"),
     ("publish", "plugin_phase"),
     ("publish", "publish_outputs"),
@@ -341,7 +342,8 @@ def expand_plugin_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
         _validate_pipeline_stage_handlers(pipeline["stages"])
 
     runtime.setdefault("kind", "python")
-    runtime.setdefault("entrypoint", "workflow.py")
+    if runtime["kind"] != "cpp":
+        runtime.setdefault("entrypoint", "workflow.py")
 
     outputs = expanded.setdefault("outputs", {})
     if not isinstance(outputs, dict):
@@ -377,6 +379,29 @@ def expand_plugin_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
                 "prepare",
             ),
         )
+    if runtime["kind"] == "cpp":
+        stages = pipeline.get("stages", [])
+        if [(stage.get("phase"), stage.get("handler")) for stage in stages] != [
+            ("schedule", "schedule"),
+            ("execute", "native_workflow"),
+            ("results", "persist_results"),
+        ]:
+            raise ValueError(
+                "cpp runtime requires the explicit schedule/execute(native_workflow)/results pipeline"
+            )
+        if not str(runtime.get("entrypoint") or "").strip():
+            raise ValueError(
+                "cpp runtime requires an explicit runtime.entrypoint factory"
+            )
+        if any(
+            runtime.get(field) is not None for field in PHASE_EXECUTOR_FIELDS.values()
+        ) or readiness.get("python_modules"):
+            raise ValueError("cpp runtime cannot use Python phase or readiness hooks")
+    elif any(
+        stage.get("handler") == "native_workflow"
+        for stage in pipeline.get("stages", [])
+    ):
+        raise ValueError("native_workflow handler requires runtime.kind cpp")
     return expanded
 
 

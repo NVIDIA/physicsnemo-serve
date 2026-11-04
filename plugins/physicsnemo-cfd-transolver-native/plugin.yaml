@@ -1,0 +1,43 @@
+metadata:
+  id: physicsnemo-cfd-transolver-native
+  display_name: Native CFD Transolver
+  version: 0.1.0
+  description: Compiled AOTI Transolver surface fields for the pinned DrivAerML run_1 case
+  tags: [cfd, native, transolver]
+ingress:
+  content_type: application/json
+  operation: {default: run, allowed: [run]}
+  json_schema_inline:
+    type: object
+    additionalProperties: false
+    required: [case_id]
+    properties:
+      case_id: {type: string, enum: [run_1]}
+      seed: {type: integer, minimum: 0, maximum: 4294967295, default: 42}
+      capture_inputs: {type: boolean, default: false}
+pipeline:
+  stages:
+    - {id: schedule, phase: schedule, handler: schedule, queue: schedule, next: execute}
+    - {id: execute, phase: execute, handler: native_workflow, queue: execute.native.transolver.aoti, next: results}
+    - {id: results, phase: results, handler: persist_results, queue: results, next: null}
+runtime:
+  kind: cpp
+  entrypoint: transolver_surface
+  executor_class: native.transolver.aoti
+resources:
+  defaults: {gpus_required: 1, memory_mb: 60000}
+outputs:
+  result_schema_inline:
+    type: object
+    required: [output_path, artifacts, native]
+    properties:
+      output_path: {type: string}
+      artifacts: {type: array, minItems: 3, items: {type: object}}
+      native: {type: object}
+  primary_artifact: {name: physical_fields, media_type: application/octet-stream}
+  retention_hours: 24
+developer:
+  readiness:
+    env:
+      - {name: NATIVE_DEPLOYMENT_CONFIG, kind: file, required: true}
+    recommended_check_phase: execute

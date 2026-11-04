@@ -3,7 +3,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#[cfg(test)]
 use std::collections::HashMap;
 #[cfg(test)]
 use std::sync::Arc;
@@ -11,8 +10,6 @@ use std::sync::Arc;
 use anyhow::{Result, anyhow};
 use redis::Script;
 use scicomp_rq::QueueManager;
-#[cfg(test)]
-use scicomp_rq::hash_ops;
 #[cfg(test)]
 use tokio::sync::Mutex;
 
@@ -22,19 +19,23 @@ const RESERVED_MEMORY_HASH_KEY: &str = "scheduler:reserved_memory_mb";
 const ACTIVE_RESERVED_MEMORY_HASH_KEY: &str = "scheduler:active_reserved_memory_mb";
 
 pub(super) trait ReservedMemoryStore: Send + Sync {
-    #[cfg(test)]
-    /// Returns the scheduler-accounted memory totals for the requested resources.
+    /// Returns active scheduler reservation totals for the requested resources.
     ///
     /// Resources with no tracked reservation are omitted from the returned map.
-    fn get_many<'a>(&'a self, resource_ids: &'a [u32]) -> BoxFuture<'a, Result<HashMap<u32, u64>>>;
+    fn get_active_many<'a>(
+        &'a self,
+        resource_ids: &'a [u32],
+    ) -> BoxFuture<'a, Result<HashMap<u32, u64>>>;
 
-    /// Increases the scheduler-accounted memory and returns the updated total.
-    fn reserve<'a>(
+    /// Atomically reserves an idle resource.
+    ///
+    /// Returns `Ok(None)` if another active reservation already exists.
+    fn try_reserve_idle<'a>(
         &'a self,
         resource_id: u32,
         observed_used_mb: u64,
         memory_mb: u64,
-    ) -> BoxFuture<'a, Result<u64>>;
+    ) -> BoxFuture<'a, Result<Option<u64>>>;
 
     /// Decreases active reserved memory for a resource and returns the updated
     /// scheduler-accounted total.
@@ -69,15 +70,19 @@ impl RedisReservedMemoryStore {
 }
 
 impl ReservedMemoryStore for RedisReservedMemoryStore {
-    #[cfg(test)]
-    fn get_many<'a>(&'a self, resource_ids: &'a [u32]) -> BoxFuture<'a, Result<HashMap<u32, u64>>> {
+    fn get_active_many<'a>(
+        &'a self,
+        resource_ids: &'a [u32],
+    ) -> BoxFuture<'a, Result<HashMap<u32, u64>>> {
         Box::pin(async move {
             let fields: Vec<String> = resource_ids
                 .iter()
                 .map(|id| Self::field_name(*id))
                 .collect();
             let mut conn = self.qm.connection();
-            let raw_values = hash_ops::hmget(&mut conn, self.hash_key.as_str(), &fields).await?;
+            let raw_values =
+                scicomp_rq::hash_ops::hmget(&mut conn, self.active_hash_key.as_str(), &fields)
+                    .await?;
             raw_values
                 .into_iter()
                 .map(|(resource_id, value)| {
@@ -97,12 +102,12 @@ impl ReservedMemoryStore for RedisReservedMemoryStore {
         })
     }
 
-    fn reserve<'a>(
+    fn try_reserve_idle<'a>(
         &'a self,
         resource_id: u32,
         observed_used_mb: u64,
         memory_mb: u64,
-    ) -> BoxFuture<'a, Result<u64>> {
+    ) -> BoxFuture<'a, Result<Option<u64>>> {
         Box::pin(async move {
             let field = Self::field_name(resource_id);
             let floor = i64::try_from(observed_used_mb).map_err(|_| {
@@ -126,14 +131,17 @@ end
 if delta < 0 then
   return redis.error_reply('delta must be non-negative')
 end
+if active_current > 0 then
+  return {0, accounted_current, active_current}
+end
 local updated_accounted = math.max(accounted_current, floor) + delta
-local updated_active = active_current + delta
+local updated_active = delta
 redis.call('HSET', KEYS[1], ARGV[1], updated_accounted)
 redis.call('HSET', KEYS[2], ARGV[1], updated_active)
-return updated_accounted
+return {1, updated_accounted, updated_active}
 "#,
             );
-            let updated: i64 = script
+            let updated: Vec<i64> = script
                 .key(self.hash_key.as_str())
                 .key(self.active_hash_key.as_str())
                 .arg(field.as_str())
@@ -141,7 +149,14 @@ return updated_accounted
                 .arg(delta)
                 .invoke_async(&mut conn)
                 .await?;
-            u64::try_from(updated).map_err(|_| {
+            let reserved = updated.first().copied().unwrap_or(0) == 1;
+            if !reserved {
+                return Ok(None);
+            }
+            let accounted = updated.get(1).copied().ok_or_else(|| {
+                anyhow!("scheduler: invalid idle reservation response for resource '{resource_id}'")
+            })?;
+            u64::try_from(accounted).map(Some).map_err(|_| {
                 anyhow!("scheduler: reserved memory became negative for resource '{resource_id}'")
             })
         })
@@ -222,9 +237,12 @@ pub(super) struct InMemoryReservedMemoryStore {
 
 #[cfg(test)]
 impl ReservedMemoryStore for InMemoryReservedMemoryStore {
-    fn get_many<'a>(&'a self, resource_ids: &'a [u32]) -> BoxFuture<'a, Result<HashMap<u32, u64>>> {
+    fn get_active_many<'a>(
+        &'a self,
+        resource_ids: &'a [u32],
+    ) -> BoxFuture<'a, Result<HashMap<u32, u64>>> {
         Box::pin(async move {
-            let values = self.accounted_values.lock().await;
+            let values = self.active_values.lock().await;
             Ok(resource_ids
                 .iter()
                 .filter_map(|resource_id| {
@@ -237,15 +255,18 @@ impl ReservedMemoryStore for InMemoryReservedMemoryStore {
         })
     }
 
-    fn reserve<'a>(
+    fn try_reserve_idle<'a>(
         &'a self,
         resource_id: u32,
         observed_used_mb: u64,
         memory_mb: u64,
-    ) -> BoxFuture<'a, Result<u64>> {
+    ) -> BoxFuture<'a, Result<Option<u64>>> {
         Box::pin(async move {
             let mut accounted_values = self.accounted_values.lock().await;
             let mut active_values = self.active_values.lock().await;
+            if active_values.get(&resource_id).copied().unwrap_or(0) > 0 {
+                return Ok(None);
+            }
             let current_accounted = accounted_values.get(&resource_id).copied().unwrap_or(0);
             let updated_accounted = current_accounted
                 .max(observed_used_mb)
@@ -257,7 +278,7 @@ impl ReservedMemoryStore for InMemoryReservedMemoryStore {
                 .saturating_add(memory_mb);
             accounted_values.insert(resource_id, updated_accounted);
             active_values.insert(resource_id, updated_active);
-            Ok(updated_accounted)
+            Ok(Some(updated_accounted))
         })
     }
 
@@ -299,35 +320,41 @@ mod tests {
     async fn in_memory_store_tracks_incremented_resources() {
         let store = InMemoryReservedMemoryStore::default();
 
-        assert_eq!(store.reserve(0, 0, 4_096).await.unwrap(), 4_096);
-        assert_eq!(store.reserve(0, 0, 1_024).await.unwrap(), 5_120);
-        assert_eq!(store.reserve(1, 0, 2_048).await.unwrap(), 2_048);
+        assert_eq!(
+            store.try_reserve_idle(0, 0, 4_096).await.unwrap(),
+            Some(4_096)
+        );
+        assert_eq!(store.try_reserve_idle(0, 0, 1_024).await.unwrap(), None);
+        assert_eq!(
+            store.try_reserve_idle(1, 0, 2_048).await.unwrap(),
+            Some(2_048)
+        );
 
-        let reserved = store.get_many(&[0, 1, 2]).await.unwrap();
+        let reserved = store.get_active_many(&[0, 1, 2]).await.unwrap();
 
-        assert_eq!(reserved, HashMap::from([(0, 5_120_u64), (1, 2_048_u64)]));
+        assert_eq!(reserved, HashMap::from([(0, 4_096_u64), (1, 2_048_u64)]));
     }
 
     #[tokio::test]
     async fn in_memory_store_decrement_clamps_to_zero_and_deletes_resource_entry() {
         let store = InMemoryReservedMemoryStore::default();
-        store.reserve(7, 0, 8_192).await.unwrap();
+        store.try_reserve_idle(7, 0, 8_192).await.unwrap();
 
         assert_eq!(store.decrement(7, 2_048).await.unwrap(), Some(6_144));
         assert_eq!(store.decrement(7, 10_000).await.unwrap(), Some(0));
 
-        let reserved = store.get_many(&[7]).await.unwrap();
+        let reserved = store.get_active_many(&[7]).await.unwrap();
         assert!(reserved.is_empty(), "zero-valued entries should be removed");
     }
 
     #[tokio::test]
     async fn in_memory_store_decrement_removes_observed_floor_after_last_reservation() {
         let store = InMemoryReservedMemoryStore::default();
-        store.reserve(3, 20_000, 10_000).await.unwrap();
+        store.try_reserve_idle(3, 20_000, 10_000).await.unwrap();
 
         assert_eq!(store.decrement(3, 10_000).await.unwrap(), Some(0));
 
-        let reserved = store.get_many(&[3]).await.unwrap();
+        let reserved = store.get_active_many(&[3]).await.unwrap();
         assert!(
             reserved.is_empty(),
             "observed memory floor should not remain as reserved accounting"
@@ -335,16 +362,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn in_memory_store_decrement_keeps_floor_while_reservations_remain() {
+    async fn in_memory_store_can_reserve_again_after_release() {
         let store = InMemoryReservedMemoryStore::default();
-        store.reserve(3, 20_000, 10_000).await.unwrap();
-        store.reserve(3, 20_000, 5_000).await.unwrap();
-
-        assert_eq!(store.decrement(3, 10_000).await.unwrap(), Some(25_000));
-        assert_eq!(store.get_many(&[3]).await.unwrap().get(&3), Some(&25_000));
-
-        assert_eq!(store.decrement(3, 5_000).await.unwrap(), Some(0));
-        assert!(store.get_many(&[3]).await.unwrap().is_empty());
+        store.try_reserve_idle(3, 20_000, 10_000).await.unwrap();
+        assert_eq!(store.decrement(3, 10_000).await.unwrap(), Some(0));
+        assert_eq!(
+            store.try_reserve_idle(3, 20_000, 5_000).await.unwrap(),
+            Some(25_000)
+        );
+        assert_eq!(
+            store.get_active_many(&[3]).await.unwrap().get(&3),
+            Some(&5_000)
+        );
     }
 
     #[tokio::test]
@@ -358,7 +387,13 @@ mod tests {
     async fn in_memory_store_reserve_uses_observed_memory_floor() {
         let store = InMemoryReservedMemoryStore::default();
 
-        assert_eq!(store.reserve(3, 20_000, 10_000).await.unwrap(), 30_000);
-        assert_eq!(store.reserve(3, 22_000, 5_000).await.unwrap(), 35_000);
+        assert_eq!(
+            store.try_reserve_idle(3, 20_000, 10_000).await.unwrap(),
+            Some(30_000)
+        );
+        assert_eq!(
+            store.try_reserve_idle(3, 22_000, 5_000).await.unwrap(),
+            None
+        );
     }
 }

@@ -80,7 +80,10 @@ def load_assets(path: Path) -> dict:
     return verify_assets(assets)
 
 
-def prepare_and_build(ctx, assets_path) -> list[dict]:
+def prepare_and_build(ctx, assets_path, *, provider=False) -> list[dict]:
+    prefix = "provider" if provider else "transolver"
+    backends = ("tensorrt",) if provider else BACKENDS
+
     def prepare():
         manifest = assets_path
         if manifest is None:
@@ -90,10 +93,10 @@ def prepare_and_build(ctx, assets_path) -> list[dict]:
             )
         return load_assets(manifest)
 
-    assets = ctx.case("transolver.assets", prepare)
+    assets = ctx.case(f"{prefix}.assets", prepare)
     projects = Path(ctx.root) / "projects"
     projects.mkdir(parents=True, exist_ok=True)
-    project75 = projects / "transolver75"
+    project75 = projects / f"{prefix}75"
     shutil.copytree(Path(ctx.native_root) / "examples/transolver-surface", project75)
 
     def import_checkpoint():
@@ -112,6 +115,16 @@ def prepare_and_build(ctx, assets_path) -> list[dict]:
         ):
             raise ValueError(
                 "Transolver QA requires both exact-v2 backend profiles and all nine TensorRT plugin assets"
+            )
+        if provider:
+            configuration.update(
+                backends=["tensorrt"],
+                required_gpu_arch="sm90",
+                tensorrt_profile="provider-default-exact-v1",
+            )
+            configuration.pop("aoti_profile", None)
+            (project75 / "model-build.json").write_text(
+                json.dumps(configuration, indent=2) + "\n"
             )
         runtime = Path(shutil.which(str(ctx.runtime)) or ctx.runtime).resolve()
         plugin_dir = project75 / "assets/tensorrt"
@@ -139,10 +152,10 @@ def prepare_and_build(ctx, assets_path) -> list[dict]:
             raise ValueError("checkpoint import did not report imported status")
         return report
 
-    ctx.case("transolver.import", import_checkpoint)
+    ctx.case(f"{prefix}.import", import_checkpoint)
     records = []
     for points in POINT_COUNTS:
-        project = projects / f"transolver{points}"
+        project = projects / f"{prefix}{points}"
         if points != 75:
             shutil.copytree(project75, project)
             # Source the documented template; only its static point count differs.
@@ -160,15 +173,15 @@ def prepare_and_build(ctx, assets_path) -> list[dict]:
             # The copied 75-point build lock describes a different adapter.
             (project / "model-build.lock.json").unlink(missing_ok=True)
         record = ctx.case(
-            f"transolver.build{points}",
+            f"{prefix}.build{points}",
             lambda points=points, project=project: ctx.build_project(
-                f"transolver{points}",
+                f"{prefix}{points}",
                 project,
-                list(BACKENDS),
-                Path(ctx.root) / "build" / f"transolver{points}",
+                list(backends),
+                Path(ctx.root) / "build" / f"{prefix}{points}",
             ),
         )
-        record.update(point_count=points, assets=assets)
+        record.update(point_count=points, assets=assets, qualification=prefix)
         records.append(record)
     return records
 
@@ -185,7 +198,9 @@ def read_tensor(path: Path, count: int, width: int) -> np.ndarray:
     return values
 
 
-def compare_tensor(actual, expected, *, name, max_abs=1e-4, relative_l2=1e-4):
+def compare_tensor(
+    actual, expected, *, name, max_abs=1e-4, relative_l2=1e-4, require_bitwise=False
+):
     if (
         actual.shape != expected.shape
         or actual.dtype != np.dtype("float32")
@@ -210,7 +225,12 @@ def compare_tensor(actual, expected, *, name, max_abs=1e-4, relative_l2=1e-4):
         "reference_shape": list(expected.shape),
         "reference_dtype": "float32",
     }
-    if maximum > max_abs or relative > relative_l2:
+    if (
+        maximum > max_abs
+        or relative > relative_l2
+        or require_bitwise
+        and not result["bitwise_equal"]
+    ):
         raise ValueError(f"{name}: parity failed: {result}")
     return result
 
@@ -337,7 +357,9 @@ def workflow_command(ctx, assets, packages, count, output, *, backend):
     return args
 
 
-def run_consumers(ctx, records):
+def run_consumers(ctx, records, *, provider=False):
+    prefix = "provider" if provider else "transolver"
+    backends = ("tensorrt",) if provider else BACKENDS
     selected = {record["point_count"]: record for record in records}
     if set(selected) != set(POINT_COUNTS) or len(records) != 2:
         raise ValueError(
@@ -347,11 +369,11 @@ def run_consumers(ctx, records):
     if selected[11]["assets"] != assets:
         raise ValueError("Transolver packages refer to different source assets")
     for record in records:
-        if set(record["packages"]) != set(BACKENDS):
+        if set(record["packages"]) != set(backends):
             raise ValueError(
-                "Transolver requires exactly both AOTI and TensorRT backends"
+                "Transolver package backends differ from the selected QA profile"
             )
-        verified = verify_model(record["model_dir"], BACKENDS)
+        verified = verify_model(record["model_dir"], backends)
         if verified != {
             backend: str(Path(path).resolve())
             for backend, path in record["packages"].items()
@@ -359,13 +381,26 @@ def run_consumers(ctx, records):
             raise ValueError(
                 "Transolver package paths do not match their release backends"
             )
+    if provider:
+        if __package__:
+            from .provider import verify_package
+        else:
+            from provider import verify_package
+        for record in records:
+            verify_package(
+                Path(record["packages"]["tensorrt"]),
+                Path(ctx.runtime).resolve().parent.parent / "lib",
+            )
     model = None
     references = {}
 
     def prepare_reference(count):
         nonlocal model
         if model is None:
-            reference.configure_determinism()
+            if provider:
+                reference.configure_determinism(provider=True)
+            else:
+                reference.configure_determinism()
             model = reference.load_original_model(Path(assets["checkpoint"]["path"]))
         mean, std = reference.surface_statistics(Path(assets["stats"]["path"]))
         fx, embedding, vtk_version = reference.prepare_surface(
@@ -373,7 +408,7 @@ def run_consumers(ctx, records):
         )
         expected = reference.eager_surface(model, fx, embedding, mean, std)
         reference_dir = (
-            Path(ctx.root) / "consumer" / "transolver" / "reference" / f"surface{count}"
+            Path(ctx.root) / "consumer" / prefix / "reference" / f"surface{count}"
         ).resolve()
         reference_dir.mkdir(parents=True, exist_ok=False)
         for name, value in expected.items():
@@ -388,7 +423,7 @@ def run_consumers(ctx, records):
             references[count] = prepare_reference(count)
         expected, mean, std, vtk_version, reference_dir = references[count]
         output = (
-            Path(ctx.root) / "consumer" / "transolver" / backend / f"surface{count}"
+            Path(ctx.root) / "consumer" / prefix / backend / f"surface{count}"
         ).resolve()
         output.mkdir(parents=True, exist_ok=False)
         points = (75,) if count == 75 else POINT_COUNTS
@@ -397,7 +432,7 @@ def run_consumers(ctx, records):
             for point in points
         ]
         ctx.run(
-            f"transolver-{backend}-surface{count}",
+            f"{prefix}-{backend}-surface{count}",
             workflow_command(ctx, assets, packages, count, output, backend=backend),
             cwd=output,
         )
@@ -419,13 +454,20 @@ def run_consumers(ctx, records):
                 else output / "standardized.f32"
             )
             actual = read_tensor(path, count, width)
-            tolerance = 0.0 if name == "fx" else 1e-6 if name == "embedding" else 1e-4
+            tolerance = (
+                0.0
+                if name == "fx" or provider
+                else 1e-6
+                if name == "embedding"
+                else 1e-4
+            )
             comparisons[name] = compare_tensor(
                 actual,
                 expected[name],
                 name=name,
                 max_abs=tolerance,
                 relative_l2=tolerance,
+                require_bitwise=provider,
             )
         physical = read_tensor(output / "physical.f32", count, 4)
         comparisons["physical_output"] = compare_physical(
@@ -439,6 +481,7 @@ def run_consumers(ctx, records):
             "native_metadata": metadata,
             "assets": assets,
             "reference_kind": "original-checkpoint-eager-raw-geometry",
+            "math_profile": "provider-default-exact-v1" if provider else "ieee",
             "reference_directory": str(reference_dir),
             "reference_implementation_sha256": sha256(Path(reference.__file__)),
             "comparisons": comparisons,
@@ -450,12 +493,12 @@ def run_consumers(ctx, records):
 
     def missing_tail(backend):
         output = (
-            Path(ctx.root) / "consumer" / "transolver" / backend / "missing-tail"
+            Path(ctx.root) / "consumer" / prefix / backend / "missing-tail"
         ).resolve()
         output.mkdir(parents=True, exist_ok=False)
         packages = [(75, Path(selected[75]["packages"][backend]).resolve())]
         result = ctx.run(
-            f"transolver-{backend}-missing-tail",
+            f"{prefix}-{backend}-missing-tail",
             workflow_command(ctx, assets, packages, 161, output, backend=backend),
             cwd=output,
             check=False,
@@ -474,13 +517,16 @@ def run_consumers(ctx, records):
             raise ValueError("rejected missing-tail workflow published a result")
         return {"returncode": result.returncode, "rejected_point_count": 11}
 
-    for backend in BACKENDS:
+    for backend in backends:
         for count in (75, 161):
-            ctx.case(
-                f"transolver.{backend}.surface{count}",
+            result = ctx.case(
+                f"{prefix}.{backend}.surface{count}",
                 lambda backend=backend, count=count: consume(backend, count),
             )
+            if provider:
+                ctx.report.setdefault("provider_parity", {})[f"surface{count}"] = result
+                ctx.save()
         ctx.case(
-            f"transolver.{backend}.missing_tail",
+            f"{prefix}.{backend}.missing_tail",
             lambda backend=backend: missing_tail(backend),
         )

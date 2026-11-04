@@ -210,7 +210,7 @@ def preflight(ctx):
         ctx.builder,
         ctx.runtime,
         ctx.consumer,
-        *([ctx.workflow] if ctx.args.profile == "full" else []),
+        *([ctx.workflow] if ctx.args.profile in ("full", "provider") else []),
     ):
         if not shutil.which(program):
             raise ValueError(f"required installed executable is unavailable: {program}")
@@ -219,6 +219,10 @@ def preflight(ctx):
 
     if not torch.cuda.is_available() or torch.cuda.device_count() < 1:
         raise ValueError("native QA requires an available CUDA GPU")
+    if ctx.args.profile == "provider" and tuple(
+        torch.cuda.get_device_capability(0)
+    ) != (9, 0):
+        raise ValueError("provider QA requires an H100/sm90 GPU")
     info = ctx.run(
         "gpu",
         ["nvidia-smi", "--query-gpu=name,uuid,driver_version", "--format=csv,noheader"],
@@ -236,6 +240,8 @@ def preflight(ctx):
         "consumer_sha256": sha256(shutil.which(ctx.consumer)),
     }
     write_json(ctx.root / "environment.json", metadata)
+    if ctx.args.profile == "provider":
+        ctx.report["environment"] = metadata
 
 
 def prepare_affine(ctx):
@@ -524,6 +530,9 @@ def execute(args):
     # Never overwrite a prior run, including a failed attempt.
     args.output.mkdir(parents=True, exist_ok=False)
     os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
+    if args.profile == "provider":
+        os.environ["CUBLASLT_WORKSPACE_SIZE"] = "1024"
+        os.environ["TORCH_CUBLASLT_UNIFIED_WORKSPACE"] = "0"
     ctx = Context(args)
     stage = "build"
 
@@ -534,12 +543,19 @@ def execute(args):
     try:
         ctx.case("environment", lambda: preflight(ctx))
         records = build_affine(ctx)
-        if args.profile == "full":
+        if args.profile in ("full", "provider"):
             if __package__:
                 from . import transolver
             else:
                 import transolver
             records += transolver.prepare_and_build(ctx, args.assets)
+        if args.profile == "provider":
+            if __package__:
+                from . import provider
+            else:
+                import provider
+            ctx.report["provider_plugins"] = provider.qualify_plugins(ctx)
+            records += transolver.prepare_and_build(ctx, args.assets, provider=True)
 
         deployed = ctx.case("handoff", lambda: handoff_models(ctx, records))
         ctx.report["stages"]["build"]["status"] = "passed"
@@ -547,8 +563,21 @@ def execute(args):
         ctx.report["stages"][stage]["status"] = "running"
         ctx.save()
         consume_affine(ctx, [r for r in deployed if "checkpoint" in r])
-        if args.profile == "full":
-            transolver.run_consumers(ctx, [r for r in deployed if "point_count" in r])
+        if args.profile in ("full", "provider"):
+            transolver.run_consumers(
+                ctx,
+                [
+                    r
+                    for r in deployed
+                    if "point_count" in r and r.get("qualification") != "provider"
+                ],
+            )
+        if args.profile == "provider":
+            transolver.run_consumers(
+                ctx,
+                [r for r in deployed if r.get("qualification") == "provider"],
+                provider=True,
+            )
         ctx.report["stages"][stage]["status"] = "passed"
         ctx.report["status"] = "passed"
         validate_summary(
@@ -581,7 +610,9 @@ def execute(args):
 
 def parser():
     result = argparse.ArgumentParser(description=__doc__)
-    result.add_argument("--profile", choices=("smoke", "full"), default="smoke")
+    result.add_argument(
+        "--profile", choices=("smoke", "full", "provider"), default="smoke"
+    )
     result.add_argument("--run-id", required=True)
     result.add_argument("--output", type=Path, required=True)
     result.add_argument("--expected-source-sha", required=True)

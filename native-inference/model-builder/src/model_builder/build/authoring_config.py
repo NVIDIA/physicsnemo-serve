@@ -10,7 +10,10 @@ from pathlib import Path, PurePosixPath
 
 from model_builder.export.aoti_profiles import validate_aoti_profile
 from model_builder.export.aoti_options import validate_aoti_options
-from model_builder.export.tensorrt_profiles import validate_tensorrt_profile
+from model_builder.export.tensorrt_profiles import (
+    validate_tensorrt_profile,
+    validate_profile_backends,
+)
 
 from . import projects
 
@@ -244,6 +247,9 @@ def load(path: Path, args=None) -> dict:
         if getattr(args, "backend", None):
             effective["backends"] = list(args.backend)
     _settings(effective, effective=True)
+    validate_profile_backends(
+        effective.get("tensorrt_profile", "baseline"), effective["backends"]
+    )
     return {
         "path": path,
         "profile": profile,

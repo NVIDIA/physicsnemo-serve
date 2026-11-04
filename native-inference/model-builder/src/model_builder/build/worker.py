@@ -86,7 +86,9 @@ def _read_recipe(recipe_path: Path, backends: list[str]) -> tuple[dict, Path]:
     from model_builder.build.tensors import tensor_contracts
     from model_builder.export.aoti_profiles import validate_aoti_profile
     from model_builder.export.aoti_options import validate_aoti_options
-    from model_builder.export.tensorrt_profiles import validate_tensorrt_profile
+    from model_builder.export.tensorrt_profiles import (
+        validate_profile_backends,
+    )
 
     recipe = json.loads(recipe_path.read_text())
     if not isinstance(recipe, dict):
@@ -110,7 +112,7 @@ def _read_recipe(recipe_path: Path, backends: list[str]) -> tuple[dict, Path]:
     validate_aoti_options(
         recipe.get("aoti_options", {}), recipe.get("aoti_profile", "baseline")
     )
-    validate_tensorrt_profile(recipe.get("tensorrt_profile", "baseline"))
+    validate_profile_backends(recipe.get("tensorrt_profile", "baseline"), backends)
     adapter_value = recipe.get("adapter")
     if not isinstance(adapter_value, str):
         raise ValueError("recipe adapter must be a relative file")
@@ -185,6 +187,10 @@ def _prepare_model(
     import torch
     from model_builder.export.exporter import _tensor_outputs
     from model_builder.export.tensorrt_exporter import tensorrt_ieee_fp32
+    from model_builder.export.tensorrt_profiles import (
+        PROVIDER_DEFAULT_EXACT,
+        provider_default_math,
+    )
     from model_builder.build.tensors import tensor_contracts
 
     input_specs, output_specs = (
@@ -264,7 +270,12 @@ def _prepare_model(
     if not isinstance(raw_cases, (list, tuple)) or not raw_cases:
         raise ValueError("recipe must produce at least one case")
     cases, inputs, references = [], [], []
-    with tensorrt_ieee_fp32(), torch.inference_mode():
+    reference_math = (
+        provider_default_math(device)
+        if recipe.get("tensorrt_profile") == PROVIDER_DEFAULT_EXACT
+        else tensorrt_ieee_fp32()
+    )
+    with reference_math, torch.inference_mode():
         for raw in raw_cases:
             if infer_contract and input_specs is None:
                 if not isinstance(raw, tuple) or not raw:
@@ -373,7 +384,9 @@ def _build_backend(
     from model_builder.build.tensors import tensor_names
     from model_builder.export.options import ExportContext, ExportOptions
     from model_builder.export.tensorrt_profiles import (
+        PROVIDER_DEFAULT_EXACT,
         plugin_names,
+        provider_default_math,
         validate_tensorrt_profile,
     )
 
@@ -457,7 +470,12 @@ def _build_backend(
     previous = torch.cuda.current_device()
     torch.cuda.set_device(target["index"])
     try:
-        with tensorrt_ieee_fp32():
+        export_math = (
+            provider_default_math(device)
+            if profile == PROVIDER_DEFAULT_EXACT
+            else tensorrt_ieee_fp32()
+        )
+        with export_math:
             graph = export_onnx_model(
                 model,
                 example,

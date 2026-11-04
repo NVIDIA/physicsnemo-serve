@@ -416,7 +416,7 @@ class SetupEnvironmentCommandTests(unittest.TestCase):
         install = next(
             command for command in commands if "pip" in command and "install" in command
         )
-        self.assertIn("tensorrt-cu13==10.14.1.48", install)
+        self.assertIn("tensorrt-cu13==10.14.1.48.*", install)
         self.assertTrue(any(value.endswith("[export]") for value in install))
         self.assertFalse(any(value.endswith("[tensorrt]") for value in install))
         configure = next(
@@ -445,7 +445,7 @@ class SetupEnvironmentCommandTests(unittest.TestCase):
         install = next(
             command for command in commands if "pip" in command and "install" in command
         )
-        self.assertIn("tensorrt-cu12==10.14.1.48", install)
+        self.assertIn("tensorrt-cu12==10.14.1.48.*", install)
         self.assertFalse(any("tensorrt-cu13" in value for value in install))
         self.assertFalse(any(value.startswith("tensorrt==") for value in install))
         self.assertFalse(any(value.endswith("[tensorrt]") for value in install))
@@ -475,7 +475,7 @@ class SetupEnvironmentCommandTests(unittest.TestCase):
         install = next(
             command for command in commands if "pip" in command and "install" in command
         )
-        self.assertIn("tensorrt-cu12==10.13.3.9", install)
+        self.assertIn("tensorrt-cu12==10.13.3.9.*", install)
         probe = next(command for command in commands if "-c" in command)
         self.assertIn("10.13.3.9", probe)
 
@@ -539,6 +539,7 @@ class SetupEnvironmentCommandTests(unittest.TestCase):
         tensorrt=True,
         aoti=False,
         triton=True,
+        tensorrt_version="10.14.1.48",
     ):
         modules = {}
         for name in (
@@ -553,6 +554,7 @@ class SetupEnvironmentCommandTests(unittest.TestCase):
             module = ModuleType(name)
             module.__version__ = "10.14.1.48"
             modules[name] = module
+        modules["tensorrt"].__version__ = tensorrt_version
         modules["torch"].version = SimpleNamespace(cuda=cuda)
         if not triton:
             modules["triton"] = None
@@ -574,6 +576,126 @@ class SetupEnvironmentCommandTests(unittest.TestCase):
             contextlib.redirect_stdout(io.StringIO()),
         ):
             exec(compile(environment._DEPENDENCY_PROBE, "dependency-probe", "exec"), {})
+
+    def test_sdk_pin_allows_linux_post_release_bindings_with_same_native_build(self):
+        trt_root = self.fake_tensorrt_sdk()
+        code, result, _, run = self.invoke(
+            "--backend", "tensorrt", "--tensorrt-root", str(trt_root)
+        )
+        self.assertEqual(code, 0, result)
+        install = next(
+            call.args[0]
+            for call in run.call_args_list
+            if "pip" in call.args[0] and "install" in call.args[0]
+        )
+        self.assertIn("tensorrt-cu13==10.14.1.48.*", install)
+        self.assertNotIn("tensorrt-cu13==10.14.1.48", install)
+        self.execute_dependency_probe(
+            {"tensorrt-cu12"},
+            sdk_version="10.14.1.48",
+            tensorrt_version="10.14.1.48.post1",
+        )
+
+    def test_actual_probe_accepts_exact_sdk_and_post_release_packaging(self):
+        for version in (
+            "10.14.1.48",
+            "10.14.1.48.post0",
+            "10.14.1.48.post1",
+            "10.14.1.48.post42",
+        ):
+            with self.subTest(version=version):
+                self.execute_dependency_probe(
+                    {"tensorrt-cu12"},
+                    sdk_version="10.14.1.48",
+                    tensorrt_version=version,
+                )
+
+    def test_actual_probe_rejects_other_native_builds_and_non_post_suffixes(self):
+        for version in (
+            "10.14.1.49",
+            "10.14.1.49.post1",
+            "10.14.2.48",
+            "10.15.1.48",
+            "11.14.1.48",
+            "10.14.1.48.1",
+            "10.14.1.48.dev1",
+            "10.14.1.48rc1",
+            "10.14.1.48a1",
+            "10.14.1.48+cu13",
+            "10.14.1.48.post1+cu13",
+            "10.14.1.48.post",
+            "10.14.1.48.post-1",
+            "10.14.1.48.post+1",
+            "10.14.1.48.post1x",
+            "10.14.1.48.post1.post2",
+            "10.14.1.48.post\u0661",
+            "10.14.1.48.post1\n",
+            "10.14.1.048",
+            "010.14.1.48",
+        ):
+            with self.subTest(version=version):
+                with self.assertRaisesRegex(
+                    RuntimeError, "(?s)TensorRT Python version.*SDK"
+                ):
+                    self.execute_dependency_probe(
+                        {"tensorrt-cu12"},
+                        sdk_version="10.14.1.48",
+                        tensorrt_version=version,
+                    )
+
+    def test_probe_blocks_sdk_bootstrap_on_same_patch_other_native_build(self):
+        trt_root = self.fake_tensorrt_sdk()
+
+        def real_probe(command, **kwargs):
+            if "-c" in command:
+                try:
+                    self.execute_dependency_probe(
+                        {"tensorrt-cu12"},
+                        sdk_version="10.14.1.48",
+                        tensorrt_version="10.14.1.49",
+                    )
+                except RuntimeError as error:
+                    kwargs["stdout"].write(str(error) + "\n")
+                    return subprocess.CompletedProcess(command, 1)
+            return self.success(command, **kwargs)
+
+        code, result, _, run = self.invoke(
+            "--backend",
+            "tensorrt",
+            "--tensorrt-root",
+            str(trt_root),
+            "--tensorrt-cuda-major",
+            "12",
+            behavior=real_probe,
+        )
+        self.assertNotEqual(code, 0, result)
+        self.assertEqual(result["stage"], "dependencies")
+        self.assertFalse(
+            any(
+                "cmake" in Path(str(call.args[0][0])).name
+                for call in run.call_args_list
+            )
+        )
+        self.assertFalse((self.destination / ".physicsnemo/environment.json").exists())
+
+    def test_supplied_runtime_keeps_uninferred_tensorrt_version_behavior(self):
+        code, result, _, run = self.invoke(
+            "--backend", "tensorrt", "--runtime", str(self.runtime)
+        )
+        self.assertEqual(code, 0, result)
+        install = next(
+            call.args[0]
+            for call in run.call_args_list
+            if "pip" in call.args[0] and "install" in call.args[0]
+        )
+        self.assertIn("tensorrt-cu13>=10", install)
+        probe = next(
+            call.args[0] for call in run.call_args_list if "-c" in call.args[0]
+        )
+        self.assertEqual(probe[-2], "")
+        self.execute_dependency_probe(
+            {"tensorrt-cu12"}, sdk_version="", tensorrt_version="11.2.1.2"
+        )
 
     def test_actual_dependency_probe_rejects_mixed_tensorrt_cuda_variants(self):
         with self.assertRaisesRegex(RuntimeError, "Conflicting TensorRT CUDA packages"):
@@ -720,6 +842,82 @@ class SetupEnvironmentCommandTests(unittest.TestCase):
         self.assertEqual(build[build.index("--backend") + 1], "aoti")
         self.assertNotIn("tensorrt", build)
         self.assertEqual(self.project_file.read_bytes(), self.project_bytes)
+
+    def test_provider_backend_override_is_applied_before_project_validation(self):
+        cases = (
+            (None, ["tensorrt"]),
+            (["aoti"], ["tensorrt"]),
+            (["aoti", "tensorrt"], ["tensorrt"]),
+            (["aoti", "tensorrt"], ["tensorrt", "tensorrt"]),
+        )
+        for index, (stored, selected) in enumerate(cases):
+            with self.subTest(stored=stored, selected=selected):
+                self.destination = self.root / f"provider-environment-{index}"
+                document = json.loads(self.project_bytes)
+                document["tensorrt_profile"] = "provider-default-exact-v1"
+                if stored is None:
+                    document.pop("backends")
+                else:
+                    document["backends"] = stored
+                self.project_file.write_text(json.dumps(document))
+                project_bytes = self.project_file.read_bytes()
+                options = [
+                    value for backend in selected for value in ("--backend", backend)
+                ]
+                code, result, _, run = self.invoke(
+                    "--runtime",
+                    str(self.runtime),
+                    "--build",
+                    str(self.project),
+                    *options,
+                )
+                self.assertEqual(code, 0, result)
+                self.assertEqual(result["backends"], ["tensorrt"])
+                self.assertEqual(result["build"]["status"], "complete")
+                build = next(
+                    call.args[0]
+                    for call in run.call_args_list
+                    if "build" in call.args[0]
+                )
+                self.assertEqual(
+                    [
+                        build[position + 1]
+                        for position, value in enumerate(build)
+                        if value == "--backend"
+                    ],
+                    ["tensorrt"],
+                )
+                self.assertEqual(self.project_file.read_bytes(), project_bytes)
+
+    def test_invalid_provider_backend_selection_fails_before_environment_creation(self):
+        cases = (
+            (["tensorrt"], ["aoti"]),
+            (["tensorrt"], ["tensorrt", "aoti"]),
+            (["aoti"], []),
+        )
+        for index, (stored, selected) in enumerate(cases):
+            with self.subTest(stored=stored, selected=selected):
+                self.destination = self.root / f"invalid-provider-environment-{index}"
+                document = json.loads(self.project_bytes)
+                document["tensorrt_profile"] = "provider-default-exact-v1"
+                document["backends"] = stored
+                self.project_file.write_text(json.dumps(document))
+                project_bytes = self.project_file.read_bytes()
+                options = [
+                    value for backend in selected for value in ("--backend", backend)
+                ]
+                code, result, _, run = self.invoke(
+                    "--runtime",
+                    str(self.runtime),
+                    "--build",
+                    str(self.project),
+                    *options,
+                )
+                self.assertEqual(code, 2, result)
+                self.assertIn("TensorRT-only", result["diagnostics"][0]["message"])
+                run.assert_not_called()
+                self.assertFalse(self.destination.exists())
+                self.assertEqual(self.project_file.read_bytes(), project_bytes)
 
     def test_failed_dependency_install_does_not_claim_ready_or_start_build(self):
         def fail_install(command, **kwargs):

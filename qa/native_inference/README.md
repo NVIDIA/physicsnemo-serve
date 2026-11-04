@@ -8,6 +8,7 @@ and the service Docker publishing checks are not involved.
 | --- | --- |
 | `smoke` | Configured-affine format-2 project, AOTI and TensorRT CUDA builds, checkpoint/config/asset handling, independent analytical output checks, relocated packages, installed C++ SDK consumer, and failure checks. |
 | `full` | All smoke checks plus real Transolver surface builds and C++ inference through both AOTI and TensorRT, raw VTP/STL geometry, C++ preprocessing and physical decoding, and an independent eager Python reference. |
+| `provider` | All full IEEE checks plus H100-only provider BLAS serialization/reload tests and TensorRT-only Transolver builds using `provider-default-exact-v1`, with byte-identical native/reference tensors. |
 
 All required stages must run and pass. A missing GPU, backend, dependency, or
 full-profile asset fails the job. Numerical parity qualifies the tested software
@@ -197,19 +198,62 @@ Native and Python VTK versions must match. The full profile requires all 33 case
 to pass; neither backend is optional. This is bounded surface qualification,
 not whole-mesh, volume-model, or scientific CFD validation.
 
+## Qualify provider math on H100
+
+The `provider` profile requires an H100 (`sm90`) and all **42 cases**. It retains
+the 33 full-profile IEEE cases and adds creator-policy validation, eight BLAS
+math cases (four operators, each with v1 and v2 creators), and real Transolver
+provider builds for both the 75-point and 11-point shapes. Each BLAS engine is
+serialized/reloaded and executed twice after changing Torch precision settings;
+saved output bytes, finite references and SHA-256 hashes are independently checked.
+The creator-policy and math scripts are also registered with CTest for Linux
+exact-plugin SDK builds targeting architecture `90`.
+
+Provider projects are separate QA copies of the existing Transolver example.
+They select only TensorRT and `provider-default-exact-v1`; the example's public
+IEEE defaults stay intact. After package relocation, the C++ workflow handles
+75 cells and 161 cells (`75 + 75 + 11`) and must reject a missing tail package.
+The independent eager reference reads the original checkpoint and raw geometry
+with the provider's high/TF32 math, cuBLAS preference, 32 MiB cuBLAS workspace
+and separate 1 MiB cuBLASLt workspace. Inputs and standardized outputs must be
+byte-identical, including signed zero. Physical decoding retains the existing
+channel-scaled rounding checks. Package metadata must identify the provider
+policy, all nine operator identities, and the installed plugin library hashes.
+
+Use `--profile provider --job-timeout 7200` with the launcher above, or select
+`provider` in the manual workflow below. A missing GPU/dependency, skipped test,
+incomplete case inventory or numerical mismatch fails qualification. Raw outputs,
+serialized engines and JUnit persist on the shared filesystem. The collected
+job summary additionally includes GPU/software identity, all eight BLAS result
+hashes, and both provider surface comparisons.
+
 ## Manual GitHub Actions entry point
 
 Run **Native Inference Lepton QA** from
 [lepton_native_qa.yml](../../.github/workflows/lepton_native_qa.yml), supplying
-the pushed image digest, full source SHA, profile, resource shape, and optional
-full-profile asset manifest path. The workflow checks out that source revision,
+the full source SHA, profile, resource shape, optional pushed image digest, and
+optional asset manifest path. The workflow checks out that source revision,
 invokes the same launcher, and uploads local evidence even when qualification
-fails. It does not build or publish an image and is not tied to the service
-image's checks.
+fails. With an image digest supplied, it uses that immutable image. With the image
+input empty, a CPU runner builds the `native-qa` target for architecture `90`
+from the exact source SHA, publishes it with the existing NGC credentials, and
+passes the resulting immutable digest to the Lepton job. This automatic build
+targets H100; other GPU architectures require an explicitly supplied matching
+image. Model compilation and all GPU acceptance checks run inside Lepton.
+
+For the provider PR branch, one dispatch builds the image and runs qualification:
+
+```bash
+gh workflow run lepton_native_qa.yml --ref codex/native-sdk-builder-compatibility \
+  -f source_sha="$(git rev-parse HEAD)" -f profile=provider -f job_timeout=7200
+```
 
 Configure repository secrets `LEPTON_WORKSPACE_TOKEN`, `LEPTON_WORKSPACE_ID`,
 `LEPTON_NODE_GROUP`, and `PULL_SECRET`, plus variables `NFS_MOUNT_BASE` and
 `QA_LUSTRE_DIR`. There is no implicit nightly schedule or pull-request trigger.
+Image builds also use the existing `NGC_REGISTRY_PASSWORD`, `NGC_ORG`, and
+`NGC_IMAGE` secrets and `NGC_REGISTRY` variable. Optional `PNMS_QA_REPOSITORY`
+overrides the QA destination repository. Service image publishing is unchanged.
 
 ## Local harness verification
 

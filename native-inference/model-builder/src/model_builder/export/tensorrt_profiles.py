@@ -1,9 +1,12 @@
 """Explicit TensorRT precision profiles and their verified native dependencies."""
 
 from collections.abc import Mapping
+from contextlib import contextmanager
 import ctypes
 import hashlib
+import os
 from pathlib import Path
+import re
 
 
 EXACT_PLUGIN_NAMES = (
@@ -42,6 +45,68 @@ _CREATORS_BY_NAME["exact_weighted_blend"] = "PNMIRExactWeightedBlend"
 _CREATORS_BY_NAME["exact_scalar_div"] = "PNMIRExactScalarDiv"
 _CREATORS_BY_NAME["exact_inverse_distance_blend"] = "PNMIRExactInverseDistanceBlend"
 _CREATORS_BY_NAME["exact_deslice_bmm"] = "PNMIRExactDesliceBmm"
+PROVIDER_DEFAULT_EXACT = "provider-default-exact-v1"
+PROVIDER_BLAS_NAMES = frozenset(
+    ("exact_linear", "exact_gemm", "exact_slice_bmm", "exact_deslice_bmm")
+)
+PROVIDER_MATH_POLICY = {
+    "name": "provider-default-v1",
+    "compute_capability": "9.0",
+    "float32_matmul_precision": "high",
+    "allow_tf32_matmul": True,
+    "allow_tf32_cudnn": True,
+    "cudnn_benchmark": False,
+    "cudnn_deterministic": False,
+    "deterministic_algorithms": False,
+    "preferred_blas_library": "cublas",
+    "cublas_workspace_bytes": 32 * 1024 * 1024,
+    "cublaslt_workspace_bytes": 1024 * 1024,
+    "native_tensorrt_tf32": False,
+}
+
+
+@contextmanager
+def provider_default_math(device=None):
+    """Pinned H100 provider policy; restore every changed caller setting."""
+    import torch
+
+    if tuple(torch.cuda.get_device_capability(device)) != (9, 0):
+        raise ValueError("provider-default-exact-v1 requires the qualified sm90 stack")
+    workspace = os.environ.get("CUBLAS_WORKSPACE_CONFIG")
+    if workspace is not None:
+        pairs = re.findall(r":([0-9]+):([0-9]+)", workspace)
+        if (
+            not pairs
+            or sum(int(size) * int(count) * 1024 for size, count in pairs) != 33554432
+        ):
+            raise ValueError("provider profile requires a 32 MiB cuBLAS workspace")
+    if os.environ.get("CUBLASLT_WORKSPACE_SIZE", "1024") != "1024":
+        raise ValueError("provider profile requires a 1 MiB cuBLASLt workspace")
+    if os.environ.get("TORCH_CUBLASLT_UNIFIED_WORKSPACE", "0") == "1":
+        raise ValueError("provider profile requires separate cuBLASLt workspace")
+    precision = torch.get_float32_matmul_precision()
+    cudnn = torch.backends.cudnn
+    previous = (
+        cudnn.allow_tf32,
+        cudnn.benchmark,
+        cudnn.deterministic,
+        torch.are_deterministic_algorithms_enabled(),
+        torch.is_deterministic_algorithms_warn_only_enabled(),
+        torch.backends.cuda.preferred_blas_library(),
+    )
+    try:
+        torch.set_float32_matmul_precision("high")
+        cudnn.allow_tf32 = True
+        cudnn.benchmark = False
+        cudnn.deterministic = False
+        torch.use_deterministic_algorithms(False)
+        torch.backends.cuda.preferred_blas_library("cublas")
+        yield
+    finally:
+        cudnn.allow_tf32, cudnn.benchmark, cudnn.deterministic = previous[:3]
+        torch.use_deterministic_algorithms(previous[3], warn_only=previous[4])
+        torch.backends.cuda.preferred_blas_library(previous[5])
+        torch.set_float32_matmul_precision(precision)
 
 
 def validate_tensorrt_profile(name: str) -> str:
@@ -52,19 +117,27 @@ def validate_tensorrt_profile(name: str) -> str:
         "geotransolver-exact",
         "geotransolver-exact-v2",
         "domino-surface-exact",
+        PROVIDER_DEFAULT_EXACT,
     ):
         raise ValueError(
             "tensorrt_profile must be baseline, layout-order-exact, layout-order-exact-v2, "
-            "geotransolver-exact, geotransolver-exact-v2 or domino-surface-exact"
+            "geotransolver-exact, geotransolver-exact-v2, domino-surface-exact "
+            "or provider-default-exact-v1"
         )
     return name
+
+
+def validate_profile_backends(profile, backends):
+    validate_tensorrt_profile(profile)
+    if profile == PROVIDER_DEFAULT_EXACT and list(backends) != ["tensorrt"]:
+        raise ValueError("provider-default-exact-v1 requires a TensorRT-only build")
 
 
 def plugin_names(profile):
     validate_tensorrt_profile(profile)
     if profile == "baseline":
         return ()
-    if profile == "layout-order-exact-v2":
+    if profile in ("layout-order-exact-v2", PROVIDER_DEFAULT_EXACT):
         return TRANSOLVER_V2_PLUGIN_NAMES
     if profile == "geotransolver-exact":
         return GEOTRANSOLVER_PLUGIN_NAMES
@@ -84,6 +157,8 @@ def profile_version(profile):
 
 def selection_metadata(profile):
     validate_tensorrt_profile(profile)
+    if profile == PROVIDER_DEFAULT_EXACT:
+        return {"math_policy": dict(PROVIDER_MATH_POLICY)}
     if profile == "domino-surface-exact":
         return {
             "exact_linear_bias_name_prefixes": list(DOMINO_LINEAR_PREFIXES),
@@ -99,6 +174,7 @@ def requires_byte_identical(profile):
         "geotransolver-exact",
         "geotransolver-exact-v2",
         "domino-surface-exact",
+        PROVIDER_DEFAULT_EXACT,
     )
 
 
@@ -135,7 +211,12 @@ def load_exact_plugins(trt, libraries, profile="layout-order-exact"):
         path = libraries[name]
         digest = hashlib.sha256(path.read_bytes()).hexdigest()
         handles.append(ctypes.CDLL(str(path), mode=ctypes.RTLD_GLOBAL))
-        if trt.get_plugin_registry().get_creator(creator, "1", "") is None:
+        version = (
+            "2"
+            if profile == PROVIDER_DEFAULT_EXACT and name in PROVIDER_BLAS_NAMES
+            else "1"
+        )
+        if trt.get_plugin_registry().get_creator(creator, version, "") is None:
             raise RuntimeError(
                 f"TensorRT exact plugin creator is not registered: {creator}"
             )
@@ -162,7 +243,7 @@ def prepare_exact_graph(onnx, model, profile="layout-order-exact"):
         ("exact_gelu", graphs._replace_gelu_subgraphs),
         ("exact_softmax", graphs._replace_softmaxes),
     )
-    if profile == "layout-order-exact-v2":
+    if profile in ("layout-order-exact-v2", PROVIDER_DEFAULT_EXACT):
         # Deslicing needs the exact attention creator's physical BSHD output.
         transforms = (
             *transforms[:4],
@@ -198,11 +279,40 @@ def prepare_exact_graph(onnx, model, profile="layout-order-exact"):
         counts[name] = transform(onnx, model)
         if counts[name] == 0:
             raise ValueError(f"{profile} found no supported {name} graph pattern")
+    if profile == PROVIDER_DEFAULT_EXACT:
+        blas_creators = {_CREATORS_BY_NAME[name] for name in PROVIDER_BLAS_NAMES}
+        for node in model.graph.node:
+            if node.op_type in ("MatMul", "Gemm"):
+                raise ValueError(
+                    "provider profile requires exact replacement of every matrix product"
+                )
+            if node.op_type in blas_creators:
+                retained = [
+                    field for field in node.attribute if field.name != "plugin_version"
+                ]
+                del node.attribute[:]
+                node.attribute.extend(retained)
+                for key, value in (
+                    ("plugin_version", "2"),
+                    ("compute_mode", 1),
+                    ("cublas_workspace_bytes", 33554432),
+                    ("cublaslt_workspace_bytes", 1048576),
+                ):
+                    node.attribute.append(onnx.helper.make_attribute(key, value))
     return counts
 
 
 def required_operators(profile="layout-order-exact"):
     return [
-        {"id": "pnmir.tensorrt-" + name.replace("_", "-"), "abi": "1"}
+        {
+            "id": "pnmir.tensorrt-"
+            + (
+                "provider-default-"
+                if profile == PROVIDER_DEFAULT_EXACT and name in PROVIDER_BLAS_NAMES
+                else ""
+            )
+            + name.replace("_", "-"),
+            "abi": "1",
+        }
         for name in plugin_names(profile)
     ]

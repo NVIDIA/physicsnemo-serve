@@ -60,18 +60,20 @@ def decode_surface(standardized, mean, std, density=1.205, velocity=30.0):
     return (standardized * std + mean) * (density * velocity * velocity)
 
 
-def configure_determinism():
+def configure_determinism(*, provider=False):
     import torch
 
     torch.set_num_threads(1)
     if torch.get_num_interop_threads() != 1:
         torch.set_num_interop_threads(1)
     torch.backends.cudnn.benchmark = False
-    torch.backends.cudnn.deterministic = True
-    torch.use_deterministic_algorithms(True)
-    torch.set_float32_matmul_precision("highest")
-    torch.backends.cuda.matmul.allow_tf32 = False
-    torch.backends.cudnn.allow_tf32 = False
+    if provider and tuple(torch.cuda.get_device_capability()) != (9, 0):
+        raise ValueError("provider reference requires sm90")
+    torch.backends.cudnn.deterministic = not provider
+    torch.use_deterministic_algorithms(not provider)
+    torch.set_float32_matmul_precision("high" if provider else "highest")
+    torch.backends.cuda.matmul.allow_tf32 = provider
+    torch.backends.cudnn.allow_tf32 = provider
     torch.backends.cuda.preferred_blas_library("cublas")
 
 

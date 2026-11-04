@@ -33,3 +33,5 @@ the plugin-based PhysicsNeMo Serve workflow.
 
 This directory should track shipped behavior. Long-lived design review notes
 belong elsewhere once the implementation lands.
+
+- [Unified application CLI](../application-cli/README.md): Python and native local development, verified builds and serving.

@@ -1,0 +1,32 @@
+schema_version: 1
+name: tensor-files-aoti
+runtime: cpp
+models:
+  primary:
+    project: model/model-build.json
+build:
+  backend: aoti
+  environment: local
+  target: current-gpu
+workflow:
+  template: tensor
+  tensor_adapter:
+    model_alias: primary
+    inputs:
+      input:
+        request_field: values
+        codec: raw-fp32-le
+    outputs:
+      output:
+        response_field: prediction
+        codec: raw-fp32-le
+serve:
+  port: 8080
+ingress:
+  content_type: multipart/form-data
+  files:
+  - name: features
+    required: true
+    media_types:
+    - application/octet-stream
+    max_size_mb: 1

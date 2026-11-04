@@ -1,0 +1,122 @@
+{
+  "cases": [
+    {
+      "expected": {
+        "prediction": {
+          "artifact": "output.f32",
+          "byte_order": "little",
+          "dtype": "float32",
+          "layout": "contiguous",
+          "shape": [
+            4
+          ],
+          "size_bytes": 16
+        }
+      },
+      "expected_artifacts": {
+        "output.f32": {
+          "sha256": "64d72524e7ca44b7481e70bc9399a99ed862077ab33f8bfed6597f163b13b0b0",
+          "size_bytes": 16
+        }
+      },
+      "files": {
+        "features": {
+          "media_type": "application/octet-stream",
+          "source": "fixtures/input-0.f32"
+        }
+      },
+      "name": "independent-0",
+      "request": {
+        "values": {
+          "artifact": "features",
+          "byte_order": "little",
+          "dtype": "float32",
+          "layout": "contiguous",
+          "shape": [
+            4
+          ],
+          "size_bytes": 16
+        }
+      }
+    },
+    {
+      "expected": {
+        "prediction": {
+          "artifact": "output.f32",
+          "byte_order": "little",
+          "dtype": "float32",
+          "layout": "contiguous",
+          "shape": [
+            4
+          ],
+          "size_bytes": 16
+        }
+      },
+      "expected_artifacts": {
+        "output.f32": {
+          "sha256": "308b5a3a4bb11e315ae5530a67527520434982da9f143c574d5529dcbb262fbc",
+          "size_bytes": 16
+        }
+      },
+      "files": {
+        "features": {
+          "media_type": "application/octet-stream",
+          "source": "fixtures/input-1.f32"
+        }
+      },
+      "name": "independent-1",
+      "request": {
+        "values": {
+          "artifact": "features",
+          "byte_order": "little",
+          "dtype": "float32",
+          "layout": "contiguous",
+          "shape": [
+            4
+          ],
+          "size_bytes": 16
+        }
+      }
+    },
+    {
+      "expected": {
+        "prediction": {
+          "artifact": "output.f32",
+          "byte_order": "little",
+          "dtype": "float32",
+          "layout": "contiguous",
+          "shape": [
+            4
+          ],
+          "size_bytes": 16
+        }
+      },
+      "expected_artifacts": {
+        "output.f32": {
+          "sha256": "6c19264aad7ebb222bf8dc2f3f6902bcb959f2a5428465bc56be617e0eaadd81",
+          "size_bytes": 16
+        }
+      },
+      "files": {
+        "features": {
+          "media_type": "application/octet-stream",
+          "source": "fixtures/input-2.f32"
+        }
+      },
+      "name": "independent-2",
+      "request": {
+        "values": {
+          "artifact": "features",
+          "byte_order": "little",
+          "dtype": "float32",
+          "layout": "contiguous",
+          "shape": [
+            4
+          ],
+          "size_bytes": 16
+        }
+      }
+    }
+  ],
+  "schema_version": 1
+}

@@ -1,0 +1,13 @@
+# Selected versions for fresh-venv acceptance. setup-env records the full
+# resolved environment; this file pins the direct QA dependencies.
+--extra-index-url https://download.pytorch.org/whl/cu130
+torch==2.10.0+cu130
+# TensorRT is selected automatically by setup-env from the SDK header version.
+numpy==2.2.6
+onnx==1.20.1
+onnxscript==0.5.6
+setuptools==80.9.0
+wheel==0.45.1
+PyYAML==6.0.2
+jsonschema==4.26.0
+redis==6.4.0

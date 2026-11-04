@@ -1,0 +1,126 @@
+# syntax=docker/dockerfile:1
+# CPU bridge preparation only. Execute application/GPU acceptance through Lepton.
+# Build context: source.tar and source.json, captured together from the checkout.
+# source.json requires source_sha, source_archive_sha256, and source_dirty.
+ARG PNMS_QA_BASE_IMAGE
+FROM ${PNMS_QA_BASE_IMAGE} AS source
+ARG SOURCE_SHA
+USER root
+WORKDIR /tmp
+COPY source.tar /tmp/pnms-source.tar
+COPY source.json /tmp/pnms-source.json
+COPY source-inventory.json /tmp/pnms-source-inventory.json
+RUN SOURCE_SHA="${SOURCE_SHA}" python3 - <<'PY'
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import stat
+import tarfile
+
+metadata = json.loads(Path("/tmp/pnms-source.json").read_text())
+assert re.fullmatch(r"[a-f0-9]{40}", metadata["source_sha"])
+assert metadata["source_sha"] == os.environ["SOURCE_SHA"]
+assert metadata["source_dirty"] is False
+archive = Path("/tmp/pnms-source.tar")
+assert hashlib.file_digest(archive.open("rb"), "sha256").hexdigest() == metadata["source_archive_sha256"]
+inventory = Path("/tmp/pnms-source-inventory.json")
+assert hashlib.file_digest(inventory.open("rb"), "sha256").hexdigest() == metadata["source_inventory_sha256"]
+records = json.loads(inventory.read_text())
+assert isinstance(records, dict) and records
+workspace = Path("/workspace")
+shutil.rmtree(workspace, ignore_errors=True)
+workspace.mkdir()
+with tarfile.open(archive) as source:
+    names = set()
+    for member in source.getmembers():
+        path = Path(member.name)
+        assert member.isfile() and not path.is_absolute() and ".." not in path.parts
+        assert member.name not in names and member.name in records
+        names.add(member.name)
+    assert set(records) == names
+    source.extractall(workspace, filter="data")
+for relative, record in records.items():
+    path = workspace / relative
+    assert not path.is_symlink() and path.is_file() and record["symlink"] is None
+    assert path.stat().st_size == record["size_bytes"]
+    assert hashlib.file_digest(path.open("rb"), "sha256").hexdigest() == record["sha256"]
+    assert stat.S_IMODE(path.stat().st_mode) == record["mode"]
+for relative in (
+    "pnms", "application-cli/pyproject.toml",
+    "native-inference/model-builder/src/model_builder/build/cli.py",
+    "native-inference/cpp-runtime/CMakeLists.txt",
+    "native-inference/workflows/runtime/src/main.cpp",
+    "qa/native_inference/pnms_local_job.py",
+    "tests/fixtures/native_affine_empty_state.pt",
+):
+    assert (workspace / relative).is_file(), f"source snapshot missing {relative}"
+import tensorrt
+import torch
+metadata.update(
+    schema_version=1,
+    torch_version=torch.__version__,
+    torch_cuda=torch.version.cuda,
+    tensorrt_version=tensorrt.__version__,
+    sdk_backends=["aoti", "tensorrt"],
+    gpu_checks="not_run",
+)
+output = Path("/opt/physicsnemo-qa/source.json")
+shutil.rmtree(output.parent, ignore_errors=True)
+output.parent.mkdir(parents=True, exist_ok=True)
+output.write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n")
+shutil.copyfile(inventory, output.parent / "source-inventory.json")
+archive.unlink()
+Path("/tmp/pnms-source.json").unlink()
+inventory.unlink()
+PY
+
+FROM ${PNMS_QA_BASE_IMAGE} AS sdk
+ARG CMAKE_BUILD_PARALLEL_LEVEL=4
+ARG CMAKE_CUDA_ARCHITECTURES=90
+USER root
+# This pinned base already contains Rust 1.94.1, Redis, CMake, the frontend
+# dependencies, and the matched Torch/CUDA/TensorRT development stack.
+RUN cargo --version && rustc --version && redis-server --version \
+    && python3 -c 'import jsonschema,redis,yaml; import importlib.metadata as m; assert tuple(map(int,m.version("jsonschema").split(".")[:2])) >= (4,26)' \
+    && rm -rf /opt/physicsnemo/native-inference
+COPY --from=source /workspace/native-inference/ /opt/physicsnemo/native-inference/
+ENV LD_LIBRARY_PATH="/opt/physicsnemo-inference/lib:/opt/hpcx/ucx/lib:/opt/hpcx/ucc/lib:${LD_LIBRARY_PATH}"
+RUN rm -rf /opt/physicsnemo-inference \
+    && cmake -S /opt/physicsnemo/native-inference/cpp-runtime -B /tmp/pnms-dual-sdk \
+        -DCMAKE_BUILD_TYPE=Release -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+        -DCMAKE_INSTALL_PREFIX=/opt/physicsnemo-inference -DPNMIR_BUILD_TESTS=OFF \
+        -DPNMIR_ENABLE_AOTI=ON -DPNMIR_ENABLE_TENSORRT=ON \
+        -DPNMIR_ENABLE_TENSORRT_EXACT=OFF \
+        -DPNMIR_TENSORRT_ROOT=/usr \
+        -DCMAKE_CUDA_ARCHITECTURES="${CMAKE_CUDA_ARCHITECTURES}" \
+        -DCMAKE_EXE_LINKER_FLAGS=-Wl,-rpath-link,/opt/hpcx/ucx/lib \
+    && cmake --build /tmp/pnms-dual-sdk --parallel ${CMAKE_BUILD_PARALLEL_LEVEL} \
+    && cmake --install /tmp/pnms-dual-sdk \
+    && ldconfig \
+    && rm -rf /tmp/pnms-dual-sdk
+
+FROM sdk AS pnms
+ARG SOURCE_SHA
+RUN rm -rf /workspace /opt/physicsnemo-qa /opt/native-release /tmp/pnms-service-target
+COPY --from=source /workspace/ /workspace/
+# The existing authenticated CPU exporter imports only these frozen helpers.
+COPY --from=source /workspace/native-inference/deploy/native_release.py /opt/native-release/native_release.py
+COPY --from=source /workspace/native-inference/deploy/native_release_artifacts.py /opt/native-release/native_release_artifacts.py
+COPY --from=source /opt/physicsnemo-qa/source.json /opt/physicsnemo-qa/source.json
+COPY --from=source /opt/physicsnemo-qa/source-inventory.json /opt/physicsnemo-qa/source-inventory.json
+WORKDIR /workspace
+RUN python3 -m pip install --no-deps --no-build-isolation /workspace/application-cli \
+    && python3 -m pip install --no-deps --no-build-isolation /workspace/native-inference/model-builder \
+    && cargo fetch --locked --manifest-path /workspace/Cargo.toml \
+    && python3 /workspace/pnms --help \
+    && python3 -c 'from pathlib import Path; p=Path("/opt/physicsnemo-inference/lib/cmake/PhysicsNeMoInference/PhysicsNeMoInferenceConfig.cmake"); s=p.read_text(); assert "set(PhysicsNeMoInference_aoti_FOUND ON)" in s and "set(PhysicsNeMoInference_tensorrt_FOUND ON)" in s'
+ENV SOURCE_SHA=${SOURCE_SHA} PNMS_SOURCE_SHA=${SOURCE_SHA} \
+    CUDA_VISIBLE_DEVICES=0 TENSORRT_ROOT=/usr \
+    PYTHONPATH=/workspace:/workspace/scripts:/workspace/python:/usr/lib/python3/dist-packages \
+    CARGO_TARGET_DIR=/tmp/pnms-service-target
+LABEL org.opencontainers.image.revision="${SOURCE_SHA}"
+ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
+CMD ["python3", "/workspace/qa/native_inference/pnms_local_job.py", "--help"]

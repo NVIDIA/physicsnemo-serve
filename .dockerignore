@@ -21,3 +21,7 @@ examples/
 **/.run-local/
 **/.example-output/
 **/.e2e/
+
+# pnms supplies the selected sealed bundle through its named build context.
+.pnms/
+**/.pnms/

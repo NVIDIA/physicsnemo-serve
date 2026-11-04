@@ -1,0 +1,43 @@
+# syntax=docker/dockerfile:1
+# CPU image preparation; execute HTTP acceptance only through Lepton.
+# Supply the just-built current-source development QA image by registry digest.
+ARG PNMS_PYTHON_QA_SOURCE
+FROM ${PNMS_PYTHON_QA_SOURCE}
+ARG SOURCE_SHA
+USER root
+RUN SOURCE_SHA="${SOURCE_SHA}" python3 - <<'PY'
+import json
+import os
+from pathlib import Path
+
+metadata = json.loads(Path("/opt/physicsnemo-qa/source.json").read_text())
+assert metadata["source_sha"] == os.environ["SOURCE_SHA"]
+assert metadata["source_dirty"] is False
+PY
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        dumb-init supervisor python3-venv \
+    && rm -rf /var/lib/apt/lists/* \
+    && rm -rf /app /tmp/pnms-python-qa-target /opt/physicsnemo-serve-venv \
+    && python3 -m venv --system-site-packages /opt/physicsnemo-serve-venv
+ENV PHYSICSNEMO_SERVE_PYTHON_EXECUTABLE=/opt/physicsnemo-serve-venv/bin/python \
+    PYO3_PYTHON=/opt/physicsnemo-serve-venv/bin/python \
+    CARGO_TARGET_DIR=/tmp/pnms-python-qa-target
+WORKDIR /workspace
+RUN mkdir -p /opt/physicsnemo-qa/python-base \
+    && "$PHYSICSNEMO_SERVE_PYTHON_EXECUTABLE" scripts/plugin_dev.py bootstrap-python \
+        > /opt/physicsnemo-qa/python-base/bootstrap.log 2>&1 \
+    && cargo build --locked -p inference_server -p worker-runtime \
+    && mkdir -p /app/bin \
+    && cp /tmp/pnms-python-qa-target/debug/inference_server /app/bin/inference-server \
+    && cp /tmp/pnms-python-qa-target/debug/worker-runtime /app/bin/worker-runtime \
+    && cp -a scripts python /app/ \
+    && "$PHYSICSNEMO_SERVE_PYTHON_EXECUTABLE" -c \
+        'import redis,scicomp_rq,supervisor; assert all(hasattr(scicomp_rq,n) for n in ("QueueManager","Output"))'
+ENV PATH=/opt/physicsnemo-serve-venv/bin:${PATH} \
+    PYTHONPATH=/app/scripts:/app/python:/usr/lib/python3/dist-packages \
+    WORKER_RUNTIME_CONFIG=/app/scripts/worker_runtime_config.json \
+    PHYSICSNEMO_SERVE_RUNTIME_ENVS_CONFIG=/app/scripts/worker_runtime_config.json \
+    HEALTH_STUB_ENABLED=false
+WORKDIR /app
+ENTRYPOINT ["/usr/bin/dumb-init", "--"]
+CMD ["/app/scripts/entrypoint.sh"]

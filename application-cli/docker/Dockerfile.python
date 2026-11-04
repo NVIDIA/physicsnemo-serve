@@ -1,0 +1,12 @@
+# syntax=docker/dockerfile:1
+# Reuse the existing Python server/worker environment without native stages.
+ARG RUNTIME_IMAGE
+FROM ${RUNTIME_IMAGE}
+ARG SOURCE_SHA
+ARG WORKFLOW_ID
+COPY --from=application-plugin / /opt/pnms/plugin/
+COPY application-cli/src/pnms_app/python_release.py /opt/pnms/python_release.py
+RUN "${PHYSICSNEMO_SERVE_PYTHON_EXECUTABLE:-python3}" /opt/pnms/python_release.py prepare
+ENV PLUGIN_DIR=/opt/pnms/plugin WORKFLOW_DIR=/opt/pnms/plugin SOURCE_SHA=${SOURCE_SHA}
+ENTRYPOINT ["/usr/bin/dumb-init", "--"]
+CMD ["python3", "/opt/pnms/python_release.py", "start"]

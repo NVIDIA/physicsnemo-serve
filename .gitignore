@@ -42,6 +42,7 @@ env/
 .DS_Store
 .smoke-output/
 .run-local/
+.pnms/
 .example-output/
 .e2e/
 qa/artifacts/

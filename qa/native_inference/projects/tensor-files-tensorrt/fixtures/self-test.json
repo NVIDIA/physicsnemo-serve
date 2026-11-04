@@ -1,0 +1,22 @@
+{
+  "primary": {
+    "atol": 1e-06,
+    "expected_outputs": {
+      "output": [
+        1,
+        3,
+        -1,
+        9
+      ]
+    },
+    "inputs": {
+      "input": [
+        0,
+        1,
+        -1,
+        4
+      ]
+    },
+    "rtol": 1e-05
+  }
+}

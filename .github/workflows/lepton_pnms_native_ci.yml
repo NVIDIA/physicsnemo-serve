@@ -1,0 +1,192 @@
+name: Native Application Lepton CI
+
+on:
+  push:
+    # NVIDIA approval automation mirrors an approved commit onto pull-request/N.
+    # Direct pull_request events must not expose registry or Lepton credentials.
+    branches: [main, 'pull-request/[0-9]+']
+    paths:
+      - 'native-inference/**'
+      - 'application-cli/**'
+      - 'crates/native-worker/**'
+      - 'crates/worker-runtime/**'
+      - 'crates/inference_server/**'
+      - 'crates/scicomp-rq/**'
+      - 'qa/native_inference/**'
+      - 'qa/scripts/*native*'
+      - 'qa/scripts/benchmark_pnms_cfd.py'
+      - 'tests/test_pnms*.py'
+      - 'tests/test_model_builder_image_qa.py'
+      - 'scripts/run_lepton_pnms*'
+      - 'scripts/run_lepton_model_builder_image_qa.py'
+      - 'scripts/run_pnms_release.py'
+      - 'scripts/prepare_pnms_qa_context.py'
+      - 'pnms'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.cargo/**'
+      - 'uv.lock'
+      - 'pyproject.toml'
+      - 'scripts/plugin_dev.py'
+      - 'scripts/native_workflow.py'
+      - 'scripts/plugin_runtime.py'
+      - 'plugins/physicsnemo-cfd-transolver-native/**'
+      - '.github/workflows/lepton_pnms*.yml'
+
+permissions:
+  contents: read
+
+# Finite Lepton controllers need time to collect evidence and remove owned jobs.
+concurrency:
+  group: native-pnms-ci-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  trust:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require a trusted branch before exposing GPU and registry credentials
+        env:
+          TRUSTED_SOURCE: ${{ github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/pull-request/')) }}
+        run: |
+          set -euo pipefail
+          if [[ "$TRUSTED_SOURCE" != true ]]; then
+            echo '::error::Native GPU QA requires a trusted repository branch. PR code must be mirrored to an approved pull-request branch before this gate can run.'
+            exit 1
+          fi
+  prepare:
+    needs: trust
+    runs-on: linux-amd64-cpu8
+    timeout-minutes: 180
+    outputs:
+      image: ${{ steps.images.outputs.image }}
+      builder_image: ${{ steps.images.outputs.builder_image }}
+      source_sha: ${{ steps.source.outputs.source_sha }}
+      repository: ${{ steps.images.outputs.repository }}
+    env:
+      PNMS_QA_SOURCE_SHA: ${{ github.sha }}
+      PNMS_QA_BASE_IMAGE: ${{ vars.PNMS_QA_BASE_IMAGE }}
+      PNMS_QA_REPOSITORY: ${{ vars.PNMS_QA_REPOSITORY }}
+      PNMS_QA_RUN: native-ci-${{ github.run_id }}-${{ github.run_attempt }}
+      NGC_REGISTRY: ${{ vars.NGC_REGISTRY }}
+      NGC_PASSWORD: ${{ secrets.NGC_REGISTRY_PASSWORD }}
+      LEPTON_WORKSPACE_TOKEN: ${{ secrets.LEPTON_WORKSPACE_TOKEN }}
+      LEPTON_WORKSPACE_ID: ${{ secrets.LEPTON_WORKSPACE_ID }}
+      LEPTON_NODE_GROUP: ${{ secrets.LEPTON_NODE_GROUP }}
+      LEPTON_PULL_SECRET: ${{ secrets.PULL_SECRET }}
+      NFS_MOUNT_BASE: ${{ vars.NFS_MOUNT_BASE }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+      - uses: docker/setup-buildx-action@v3
+      - name: Validate required native QA configuration
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os
+          import re
+
+          required = ('PNMS_QA_BASE_IMAGE','PNMS_QA_REPOSITORY','NGC_REGISTRY','NGC_PASSWORD',
+                      'LEPTON_WORKSPACE_TOKEN','LEPTON_WORKSPACE_ID','LEPTON_NODE_GROUP',
+                      'LEPTON_PULL_SECRET','NFS_MOUNT_BASE')
+          missing = [name for name in required if not os.environ.get(name)]
+          if missing:
+              raise ValueError('Missing required native QA configuration: ' + ', '.join(missing))
+          if not re.fullmatch(r'[^\s@]+@sha256:[a-f0-9]{64}', os.environ['PNMS_QA_BASE_IMAGE']):
+              raise ValueError('PNMS_QA_BASE_IMAGE must pin an immutable compatible native toolchain image')
+          repository = os.environ['PNMS_QA_REPOSITORY']
+          if not re.fullmatch(r'[a-z0-9][a-z0-9._:/-]*', repository) or not all(repository.split('/')) or ':' in repository.rsplit('/', 1)[-1]:
+              raise ValueError('Native QA destination must be a registry/repository without tag or digest')
+          if not re.fullmatch(r'[a-f0-9]{40}', os.environ['PNMS_QA_SOURCE_SHA']):
+              raise ValueError('Native QA requires the exact current source revision')
+          PY
+      - name: Capture one verified source snapshot for both images
+        id: source
+        run: |
+          set -euo pipefail
+          contexts="$RUNNER_TEMP/pnms-contexts"
+          python3 scripts/prepare_pnms_qa_context.py \
+            --expected-source-sha "$PNMS_QA_SOURCE_SHA" --output "$contexts"
+          printf 'source_sha=%s\n' "$PNMS_QA_SOURCE_SHA" >> "$GITHUB_OUTPUT"
+      - name: Authenticate image registry
+        run: |
+          set -euo pipefail
+          printf '%s' "$NGC_PASSWORD" | docker login "$NGC_REGISTRY" -u '$oauthtoken' --password-stdin
+      - name: Build and publish current-source development and shipped Builder images
+        id: images
+        run: |
+          set -euo pipefail
+          contexts="$RUNNER_TEMP/pnms-contexts"
+          dev_tag="$PNMS_QA_REPOSITORY:$PNMS_QA_RUN-dev"
+          builder_tag="$PNMS_QA_REPOSITORY:$PNMS_QA_RUN-builder"
+          docker buildx build --platform linux/amd64 \
+            --file "$contexts/dev-context/Dockerfile.pnms" \
+            --build-arg SOURCE_SHA="$PNMS_QA_SOURCE_SHA" \
+            --build-arg PNMS_QA_BASE_IMAGE="$PNMS_QA_BASE_IMAGE" \
+            --metadata-file "$contexts/development-image.json" --tag "$dev_tag" \
+            --push "$contexts/dev-context"
+          docker buildx build --platform linux/amd64 \
+            --file "$contexts/builder-context/native-inference/model-builder/images/Dockerfile.builder" \
+            --target default-builder --build-arg PNMIR_ENABLE_TENSORRT=ON \
+            --metadata-file "$contexts/builder-image.json" --tag "$builder_tag" \
+            --push "$contexts/builder-context"
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          import re
+
+          root = Path(os.environ['RUNNER_TEMP']) / 'pnms-contexts'
+          metadata = json.loads((root / 'dev-context/source.json').read_text())
+          if metadata['source_sha'] != os.environ['PNMS_QA_SOURCE_SHA'] or metadata['source_dirty'] is not False:
+              raise ValueError('Prepared contexts do not match the exact clean CI source')
+          identities = {}
+          for output, filename in (('image','development-image.json'),('builder_image','builder-image.json')):
+              built = json.loads((root / filename).read_text())
+              digest = built.get('containerimage.digest', '')
+              if not re.fullmatch(r'sha256:[a-f0-9]{64}', digest):
+                  raise ValueError(output + ' build did not publish an immutable digest')
+              identities[output] = os.environ['PNMS_QA_REPOSITORY'] + '@' + digest
+          identities['repository'] = os.environ['PNMS_QA_REPOSITORY']
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              for name, value in identities.items():
+                  output.write(name + '=' + value + '\n')
+          (root / 'image-identities.json').write_text(json.dumps({'source':metadata, **identities}, indent=2, sort_keys=True) + '\n')
+          PY
+      - name: Preserve source and image preparation evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-pnms-images-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/pnms-contexts/dev-context/source.json
+            ${{ runner.temp }}/pnms-contexts/dev-context/source-inventory.json
+            ${{ runner.temp }}/pnms-contexts/*-image.json
+            ${{ runner.temp }}/pnms-contexts/image-identities.json
+          if-no-files-found: warn
+  qualify:
+    needs: prepare
+    uses: ./.github/workflows/lepton_pnms_qa.yml
+    with:
+      image: ${{ needs.prepare.outputs.image }}
+      builder_image: ${{ needs.prepare.outputs.builder_image }}
+      source_sha: ${{ needs.prepare.outputs.source_sha }}
+      resource_shape: gpu.h100-sxm
+    secrets: inherit
+  release:
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        backend: [aoti, tensorrt]
+    uses: ./.github/workflows/lepton_pnms_release.yml
+    with:
+      image: ${{ needs.prepare.outputs.image }}
+      source_sha: ${{ needs.prepare.outputs.source_sha }}
+      backend: ${{ matrix.backend }}
+      template: tensor
+      project: qa/native_inference/projects/tensor-files-${{ matrix.backend }}
+      repository: ${{ needs.prepare.outputs.repository }}
+      runtime_image: ${{ needs.prepare.outputs.image }}
+    secrets: inherit

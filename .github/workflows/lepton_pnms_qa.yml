@@ -1,7 +1,7 @@
 name: Unified Application Lepton QA
 
-# Compilation and same-bundle HTTP profiles: 132 required gates. Native/Python
-# image packaging is qualified separately through the public CLI and QA runners.
+# Shipped Builder, compilation and same-bundle HTTP profiles: 147 required gates.
+# Final image packaging is qualified separately through the release workflow.
 on:
   workflow_call:
     inputs:
@@ -9,6 +9,9 @@ on:
         required: true
         type: string
       source_sha:
+        required: true
+        type: string
+      builder_image:
         required: true
         type: string
       resource_shape:
@@ -22,6 +25,10 @@ on:
         type: string
       source_sha:
         description: "Full clean source revision captured in the prepared image"
+        required: true
+        type: string
+      builder_image:
+        description: "Shipped Model Builder image as registry/repository@sha256:digest"
         required: true
         type: string
       resource_shape:
@@ -39,9 +46,10 @@ concurrency:
 jobs:
   qualify:
     runs-on: linux-amd64-cpu4
-    timeout-minutes: 300
+    timeout-minutes: 360
     env:
       PNMS_QA_IMAGE: ${{ inputs.image }}
+      PNMS_BUILDER_IMAGE: ${{ inputs.builder_image }}
       PNMS_QA_SOURCE_SHA: ${{ inputs.source_sha }}
       PNMS_QA_SHAPE: ${{ inputs.resource_shape }}
       PNMS_QA_RUN: pnms-${{ github.run_id }}-${{ github.run_attempt }}
@@ -79,6 +87,10 @@ jobs:
           summary = json.loads(path.read_text())
           values = {
               "PNMS_QA_SOURCE_ROOT": summary["source_root"],
+              "PNMS_BUILDER_RUNNER": summary["source_root"] + "/qa/native_inference/model_builder_image_job.py",
+              "PNMS_BUILDER_SOURCE_ROOT": summary["source_root"],
+              "PNMS_BUILDER_SOURCE_MANIFEST": summary["source_manifest"],
+              "PNMS_BUILDER_SOURCE_MANIFEST_SHA256": summary["source_manifest_sha256"],
               "PNMS_VENV_REQUIREMENTS": summary["requirements_file"],
               "PNMS_VENV_REQUIREMENTS_SHA256": summary["requirements_sha256"],
           }
@@ -88,6 +100,16 @@ jobs:
                       raise ValueError("Invalid staged QA input: " + key)
                   output.write(key + "=" + value + "\n")
           PY
+      - name: Qualify the shipped Model Builder image on Lepton
+        run: |
+          set -euo pipefail
+          uv run python scripts/run_lepton_model_builder_image_qa.py \
+            --image "$PNMS_BUILDER_IMAGE" --expected-source-sha "$PNMS_QA_SOURCE_SHA" \
+            --runner "$PNMS_BUILDER_RUNNER" --source-root "$PNMS_BUILDER_SOURCE_ROOT" \
+            --source-manifest "$PNMS_BUILDER_SOURCE_MANIFEST" \
+            --source-manifest-sha256 "$PNMS_BUILDER_SOURCE_MANIFEST_SHA256" \
+            --resource-shape "$PNMS_QA_SHAPE" --run-id "$PNMS_QA_RUN-builder-image" \
+            --artifact-dir qa/artifacts/pnms --job-timeout 3600
       - name: Qualify development from a fresh venv on Lepton
         run: |
           set -euo pipefail

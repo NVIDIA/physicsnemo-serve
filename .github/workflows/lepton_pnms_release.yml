@@ -1,0 +1,166 @@
+name: Unified Application Release
+
+on:
+  workflow_call:
+    inputs:
+      image:
+        required: true
+        type: string
+      source_sha:
+        required: true
+        type: string
+      backend:
+        type: string
+        default: aoti
+      template:
+        type: string
+        default: tensor
+      project:
+        type: string
+        default: ""
+      repository:
+        required: true
+        type: string
+      runtime_image:
+        required: true
+        type: string
+      promote:
+        type: string
+        default: ""
+  workflow_dispatch:
+    inputs:
+      image:
+        description: "Prepared source-bound release build image as repository@sha256:digest"
+        required: true
+        type: string
+      source_sha:
+        description: "Full source revision captured in the build image"
+        required: true
+        type: string
+      backend:
+        type: choice
+        options: [aoti, tensorrt]
+        default: aoti
+      template:
+        type: choice
+        options: [tensor, custom]
+        default: tensor
+      project:
+        description: "Optional native JSON tensor/custom project relative to frozen source; acceptance uses its sealed declared fixtures"
+        type: string
+        default: ""
+      repository:
+        description: "Destination registry/repository without tag or digest"
+        required: true
+        type: string
+      runtime_image:
+        description: "Matched immutable serving runtime image as repository@sha256:digest"
+        required: true
+        type: string
+      promote:
+        description: "Optional tag for the exact Lepton-qualified release digest"
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pnms-release-${{ github.run_id }}-${{ inputs.backend }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: linux-amd64-cpu8
+    timeout-minutes: 240
+    env:
+      PNMS_BUILD_IMAGE: ${{ inputs.image }}
+      PNMS_SOURCE_SHA: ${{ inputs.source_sha }}
+      PNMS_BACKEND: ${{ inputs.backend }}
+      PNMS_TEMPLATE: ${{ inputs.template }}
+      PNMS_PROJECT: ${{ inputs.project }}
+      PNMS_DESTINATION: ${{ inputs.repository }}
+      PNMS_RUNTIME_IMAGE: ${{ inputs.runtime_image }}
+      PNMS_PROMOTE: ${{ inputs.promote }}
+      PNMS_RUN: rel-${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.backend }}
+      LEPTON_WORKSPACE_TOKEN: ${{ secrets.LEPTON_WORKSPACE_TOKEN }}
+      LEPTON_WORKSPACE_ID: ${{ secrets.LEPTON_WORKSPACE_ID }}
+      LEPTON_NODE_GROUP: ${{ secrets.LEPTON_NODE_GROUP }}
+      LEPTON_PULL_SECRET: ${{ secrets.PULL_SECRET }}
+      LEPTON_WORKSPACE_URL: ${{ vars.LEPTON_WORKSPACE_URL }}
+      NFS_MOUNT_BASE: ${{ vars.NFS_MOUNT_BASE }}
+      QA_LUSTRE_DIR: ${{ vars.QA_LUSTRE_DIR || 'qa' }}
+      LEPTON_LUSTRE_STORAGE: ${{ vars.LEPTON_LUSTRE_STORAGE || 'lustre' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_sha }}
+      - uses: astral-sh/setup-uv@v3
+      - uses: docker/setup-buildx-action@v3
+      - name: Install controller dependencies
+        run: |
+          set -euo pipefail
+          uv sync --frozen
+          uv pip install --python .venv/bin/python leptonai==0.27.2
+          printf '%s/.venv/bin\n' "$GITHUB_WORKSPACE" >> "$GITHUB_PATH"
+      - name: Validate release inputs
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os
+          from pathlib import PurePosixPath
+          import re
+
+          if os.environ['PNMS_BACKEND'] not in ('aoti', 'tensorrt'):
+              raise ValueError('backend must be aoti or tensorrt')
+          if os.environ['PNMS_TEMPLATE'] not in ('tensor', 'custom'):
+              raise ValueError('template must be tensor or custom')
+          repository = os.environ['PNMS_DESTINATION']
+          if not re.fullmatch(r'[a-z0-9][a-z0-9._:/-]*', repository) or ':' in repository.rsplit('/', 1)[-1]:
+              raise ValueError('destination must be a registry/repository without a tag or digest')
+          if not re.fullmatch(r'[a-f0-9]{40}', os.environ['PNMS_SOURCE_SHA']):
+              raise ValueError('source revision must be a full Git SHA')
+          for field in ('PNMS_BUILD_IMAGE', 'PNMS_RUNTIME_IMAGE'):
+              if not re.fullmatch(r'[^\s@]+@sha256:[a-f0-9]{64}', os.environ[field]):
+                  raise ValueError(field + ' must be an immutable image digest')
+          if os.environ['PNMS_PROJECT']:
+              project = PurePosixPath(os.environ['PNMS_PROJECT'])
+              if project.is_absolute() or not project.parts or '..' in project.parts:
+                  raise ValueError('project must be relative to the frozen source')
+          PY
+      - name: Authenticate destination registry
+        env:
+          NGC_PASSWORD: ${{ secrets.NGC_REGISTRY_PASSWORD }}
+          NGC_REGISTRY: ${{ vars.NGC_REGISTRY }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$NGC_PASSWORD" | docker login "$NGC_REGISTRY" -u '$oauthtoken' --password-stdin
+      - name: Build and export a verified public pnms application on Lepton
+        run: |
+          set -euo pipefail
+          args=(
+            --image "$PNMS_BUILD_IMAGE" --expected-source-sha "$PNMS_SOURCE_SHA"
+            --run-id "$PNMS_RUN-build" --artifact-dir qa/artifacts/pnms-release
+            --backend "$PNMS_BACKEND" --template "$PNMS_TEMPLATE"
+            --runtime-image "$PNMS_RUNTIME_IMAGE" --resource-shape gpu.h100-sxm
+          )
+          if [[ -n "$PNMS_PROJECT" ]]; then args+=(--project "$PNMS_PROJECT"); fi
+          .venv/bin/python scripts/run_lepton_pnms_release_build.py "${args[@]}"
+      - name: Package publish qualify and optionally promote the exact image
+        run: |
+          set -euo pipefail
+          args=(
+            --release-inputs "qa/artifacts/pnms-release/$PNMS_RUN-build/release-inputs.json"
+            --expected-source-sha "$PNMS_SOURCE_SHA" --runtime-image "$PNMS_RUNTIME_IMAGE"
+            --image "$PNMS_DESTINATION:$PNMS_RUN" --run-id "$PNMS_RUN"
+            --artifact-dir qa/artifacts/pnms-release --resource-shape gpu.h100-sxm
+          )
+          if [[ -n "$PNMS_PROMOTE" ]]; then args+=(--promote "$PNMS_PROMOTE"); fi
+          .venv/bin/python scripts/run_pnms_release.py "${args[@]}"
+      - name: Preserve release and acceptance evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pnms-release-${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.backend }}
+          path: qa/artifacts/pnms-release/
+          if-no-files-found: warn

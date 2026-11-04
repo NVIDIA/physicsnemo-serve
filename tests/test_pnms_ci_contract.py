@@ -1,4 +1,4 @@
-"""CPU contracts for PR5 CI wiring; acceptance executes only on Lepton."""
+"""CPU contracts for pnms CI wiring; acceptance executes only on Lepton."""
 
 import hashlib
 import json
@@ -41,7 +41,7 @@ def test_profile_workflow_requires_fresh_venv_and_exact_bundle_http():
     )
     assert "--include-python" in commands
     assert "leptonai==0.27.2" in commands
-    assert "run_lepton_model_builder_image_qa" not in commands
+    assert "run_lepton_model_builder_image_qa.py" in commands
     assert "run_pnms_release" not in commands
     assert not any(step.get("continue-on-error") for step in steps)
     assert steps[-1]["if"] == "always()"

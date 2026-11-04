@@ -1,0 +1,8 @@
+cmake_minimum_required(VERSION 3.24)
+project(TransolverRequestContract LANGUAGES CXX)
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+add_executable(transolver_request_plan_tests ../request_plan_test.cpp ../../src/request_plan.cpp)
+target_include_directories(transolver_request_plan_tests PRIVATE ../../include ../../../../cpp-runtime/include)
+enable_testing()
+add_test(NAME transolver_request_plan_tests COMMAND transolver_request_plan_tests)

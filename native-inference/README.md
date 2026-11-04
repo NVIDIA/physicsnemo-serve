@@ -17,6 +17,7 @@ compiled native outputs with your Python model before accepting the build.
 | Look up settings, profiles, recipes or package formats | [Technical reference](docs/reference.md) |
 | Start from a prepared model template | [Examples: affine, Transolver, GeoTransolver and DoMINO](examples/README.md) |
 | Build, install or embed the native runtime | [C++ Inference SDK](cpp-runtime/README.md) |
+| Execute or embed a tensor or custom C++ workflow | [Reusable workflow host](workflows/runtime/README.md) |
 | Set up native Windows | [Windows setup](docs/user-guide.md#windows-setup) |
 | Run raw mesh → native model → physical fields | [Transolver C++ workflow](workflows/transolver/README.md) |
 
@@ -66,6 +67,7 @@ For contributors: [builder development](model-builder/README.md),
 | `model-builder/src/model_builder/build/` | The public CLI, project configuration, captured inputs and build orchestration. |
 | `model-builder/src/model_builder/export/` | Python export APIs, compiler profiles and graph passes used by the builder. |
 | `cpp-runtime/` | C++ SDK, native CLI, backend plugins and their integration tests. |
+| `workflows/runtime/` | Reusable tensor/custom workflow host, authoring interface and standalone runner. |
 | `examples/`, `tools/examples/`, `tests/examples/` | Two-file customer projects, input preparation and one discoverable example test suite. |
 | `workflows/transolver/` | Optional native geometry workflow built as a consumer of the installed SDK. |
 | `docs/` | User manual, configuration reference, Windows SDK and release instructions. |

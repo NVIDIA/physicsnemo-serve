@@ -25,7 +25,7 @@ class OutputWriteCompletionTest(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory()
         cls.addClassCleanup(temporary.cleanup)
         cls.root = Path(temporary.name)
-        source = (WORKFLOW_ROOT / "src" / "main.cpp").read_text()
+        source = (WORKFLOW_ROOT / "src" / "runner.cpp").read_text()
         helpers = []
         for name in ("write_f32", "write_metadata"):
             start = source.index(f"void {name}(")

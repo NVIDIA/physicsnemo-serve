@@ -1,0 +1,51 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+metadata:
+  id: earth2-aifs2ens
+  display_name: ECMWF AIFS ENS v2
+  version: 1.0.0
+  description: Single-GPU Earth2Studio AIFS2ENS ensembles with one shared RNG stream
+  tags: [earth2, aifs2ens, ensemble]
+pipeline:
+  profile: default
+runtime:
+  executor_class: earth2-gpu
+  prepare_executor_class: earth2-gpu
+  postprocess_executor_class: earth2-gpu
+  readiness_executor_class: earth2-gpu
+  hook_timeout_seconds: {prepare: 7200, execute: 7200, postprocess: 3600}
+resources:
+  defaults: {gpus_required: 1, memory_mb: 65536}
+outputs:
+  result_schema_inline:
+    type: object
+    properties:
+      dataset_path: {type: string}
+      complete: {type: boolean}
+      nensemble: {type: integer}
+      nsteps: {type: integer}
+      ifs_member_id: {type: [integer, "null"]}
+      seed_base: {type: integer}
+      batch_size: {type: integer}
+      rng_policy: {type: string}
+      manifest_sha256: {type: string}
+      input_sha256: {type: string}
+      runtime: {type: object}
+      checkpoint_sha256: {type: string}
+      numerical_policy: {type: string}
+      error: {type: string}
+  primary_artifact: {name: forecast_dataset, media_type: application/x-zarr}
+developer:
+  run_local:
+    execute_worker_profiles:
+      - executor_class: earth2-gpu
+        device_kind: gpu
+        memory_mb: 65536
+        tags: [earth2, aifs2ens, gpu]
+  readiness:
+    python_modules: [numpy, pydantic, xarray, zarr, earth2studio.models.px, earth2studio.run, earth2studio.perturbation, anemoi.models, flash_attn]
+    env:
+      - {name: AIFS2ENS_INPUT_CONTRACT, kind: file}
+      - {name: AIFS2ENS_INVARIANTS, kind: file}
+      - {name: AIFS2ENS_CHECKPOINT_DIR, kind: dir}
+      - {name: AIFS2ENS_GPU_MEMORY_MB, kind: string}

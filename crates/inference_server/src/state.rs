@@ -14,6 +14,7 @@ use crate::redis_ops::RedisService;
 use serde_json::Value;
 use serde_json::json;
 use std::collections::{HashMap, VecDeque};
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -155,6 +156,8 @@ fn workflow_schema_contract(
 #[derive(Clone)]
 pub struct AppState {
     pub config: Arc<ServerConfig>,
+    /// Optional supervisor-owned JSON gate for HTTP readiness.
+    pub readiness_file: Option<PathBuf>,
     pub redis_service: Arc<RwLock<Option<RedisService>>>,
     pub workflow_registry: Arc<RwLock<WorkflowRegistrySnapshot>>,
     pub runs: Arc<RwLock<BoundedRunMap>>,
@@ -166,6 +169,7 @@ impl AppState {
     pub fn new(config: ServerConfig, redis_service: RedisService) -> Self {
         Self {
             config: Arc::new(config),
+            readiness_file: std::env::var_os("INFERENCE_READINESS_FILE").map(PathBuf::from),
             redis_service: Arc::new(RwLock::new(Some(redis_service))),
             workflow_registry: Arc::new(RwLock::new(WorkflowRegistrySnapshot::default())),
             runs: Arc::new(RwLock::new(BoundedRunMap::new(DEFAULT_MAX_RUNS))),
@@ -178,6 +182,7 @@ impl AppState {
     pub fn new_for_testing(config: ServerConfig) -> Self {
         Self {
             config: Arc::new(config),
+            readiness_file: None,
             redis_service: Arc::new(RwLock::new(None)),
             workflow_registry: Arc::new(RwLock::new(WorkflowRegistrySnapshot::default())),
             runs: Arc::new(RwLock::new(BoundedRunMap::new(DEFAULT_MAX_RUNS))),

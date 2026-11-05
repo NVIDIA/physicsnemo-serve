@@ -10,9 +10,22 @@ pub async fn healthz() -> &'static str {
     "ok"
 }
 
-/// Readiness probe - checks Redis connectivity.
+/// Readiness probe - checks Redis and an optional supervisor-owned JSON gate.
 /// Returns 200 when the server can accept traffic, 503 otherwise.
 pub async fn readyz(State(state): State<Arc<AppState>>) -> (StatusCode, Json<Value>) {
+    if let Some(path) = &state.readiness_file {
+        let ready = tokio::fs::read(path)
+            .await
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+            .is_some_and(|report| report.get("status").and_then(Value::as_str) == Some("ready"));
+        if !ready {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({"status": "not ready", "reason": "Execution workers not ready"})),
+            );
+        }
+    }
     let service_lock = state.redis_service.read().await;
     match service_lock.as_ref() {
         Some(service) => {

@@ -148,7 +148,7 @@ fn build_paths() -> Value {
         "/readyz": {
             "get": {
                 "summary": "Readiness probe",
-                "description": "Checks Redis connectivity. Returns 200 when the server can accept traffic.",
+                "description": "Checks Redis connectivity and, when INFERENCE_READINESS_FILE is configured, requires that supervisor-owned JSON file to contain status=ready. Returns 200 when the server can accept traffic.",
                 "responses": {
                     "200": {
                         "description": "Service is ready",
@@ -164,7 +164,7 @@ fn build_paths() -> Value {
                         }
                     },
                     "503": {
-                        "description": "Service not ready (Redis unreachable or not initialized)",
+                        "description": "Service not ready (Redis unavailable or configured execution-worker readiness gate not ready)",
                         "content": {
                             "application/json": {
                                 "schema": {

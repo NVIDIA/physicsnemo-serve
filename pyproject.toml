@@ -27,6 +27,7 @@ dependencies = [
 [project.optional-dependencies]
 qa = [
     "dask[array]",
+    "pip",
     "pytest-html",
     "pytest-xdist",
     "xarray",

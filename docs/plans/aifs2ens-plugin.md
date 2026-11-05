@@ -24,6 +24,11 @@ CUDA variability for the tested fixture and layouts; bitwise equality is not
 established. The [parity record](aifs2ens-parity-and-reference-workflows.md)
 preserves the current evidence and historical passes/failures separately.
 
+The subsequent PR-review follow-up preserves `cancelled` status through the SDK
+cancellation exception and resolves relative asset paths in standalone capture.
+Both changes have CPU regressions and are outside the qualified image above;
+forecast arithmetic, upstream ensemble orchestration and RNG calls are unchanged.
+
 ## Upstream contract
 
 Use Earth2Studio commit `f8af4030cfd43ec79bf4c0cf6c23463a87bfef97`, Anemoi Models

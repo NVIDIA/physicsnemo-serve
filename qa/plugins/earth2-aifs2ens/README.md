@@ -33,8 +33,11 @@ The qualified image includes the asset-warmup, batch-admission and PR-readiness
 changes. A QA-only bounded wait for structured result finalization corrected
 the first image's REST polling race; it polls the same accepted run ID and
 changes no forecast, RNG or model code. That failed qualification remains in the
-execution record. The image fingerprint binds the pre-documentation snapshot;
-the subsequent documentation-only updates are outside that qualified inventory.
+execution record. The image fingerprint binds the qualification snapshot.
+The subsequent PR-review changes use the SDK cancellation exception and resolve
+relative paths in standalone input capture. CPU regressions cover both fixes;
+these changes and later documentation updates are outside the qualified image.
+Forecast arithmetic, upstream ensemble orchestration and RNG calls are unchanged.
 
 ## Runtime
 

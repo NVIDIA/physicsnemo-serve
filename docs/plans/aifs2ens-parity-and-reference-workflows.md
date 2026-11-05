@@ -134,8 +134,15 @@ commit `bc980628c03e43638dcbc0bb0b8572951252ef4d`. The Linux build on
 `/home/zhiweis/Projects/physicsnemo-serve-aifs2ens-fresh-20261105-v2/source`.
 Its 405 portable tests passed with zero skips and two unrelated FCN GPU cases
 deselected. Source inventory, service command, image label and registry digest
-were verified. Later edits to this documentation are outside that inventory;
-the qualified runtime and scientific source remain unchanged.
+were verified.
+
+The subsequent PR-review follow-up changes cooperative cancellation to the SDK's
+`PluginCancelledError`, preserving the worker's `cancelled` status, and resolves
+relative asset paths in standalone input capture. Worker/status and standalone
+capture CPU regressions cover both fixes. These source changes and later
+documentation edits are outside the image inventory; the H100/HTTPS results
+below remain bound to source `4b91b64806d9`. Forecast arithmetic, the upstream
+ensemble call and RNG calls are unchanged.
 
 Lepton job `aifs2ens-fullqa-4b91b64806-db52` completed at
 2026-11-05T21:49:42Z with **412 passes: 405 portable and all seven H100 cases**,

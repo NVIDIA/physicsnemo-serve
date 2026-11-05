@@ -5,13 +5,17 @@
 
 from collections import OrderedDict
 from contextlib import contextmanager, nullcontext
+import json
 from pathlib import Path
 import sys
+import threading
 from types import SimpleNamespace
 import weakref
 
 import numpy as np
 import pytest
+
+from plugin_sdk import PluginCancelledError
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins/earth2-aifs2ens"))
 import aifs2ens_rollout as rollout  # noqa: E402
@@ -181,9 +185,12 @@ def test_failure_restores_seed_rng_and_closes_retained_iterator(loaded, failure)
         sink.assert_complete = lambda: (_ for _ in ()).throw(
             ValueError("incomplete forecast coverage")
         )
-    with pytest.raises(
-        (RuntimeError, InterruptedError, ValueError), match="failed|cancelled|coverage"
-    ):
+    error = {
+        "runner": RuntimeError,
+        "cancel": PluginCancelledError,
+        "coverage": ValueError,
+    }[failure]
+    with pytest.raises(error, match="failed|cancelled|coverage"):
         rollout.run_ensemble_rollout(
             model,
             loaded,
@@ -200,7 +207,7 @@ def test_failure_restores_seed_rng_and_closes_retained_iterator(loaded, failure)
 
 def test_cancelled_request_does_not_enter_upstream_runner(loaded):
     sink, model, torch = Sink(), Model(), Torch()
-    with pytest.raises(InterruptedError, match="cancelled"):
+    with pytest.raises(PluginCancelledError, match="cancelled"):
         rollout.run_ensemble_rollout(
             model,
             loaded,
@@ -213,6 +220,77 @@ def test_cancelled_request_does_not_enter_upstream_runner(loaded):
         )
     assert sink.closed and model.seed == 999
     assert not any(event[0] == "seed" for event in torch.events)
+
+
+@pytest.mark.parametrize(
+    "phase", ["before_run", "iterator_creation", "iteration", "after_run"]
+)
+def test_worker_classifies_rollout_shutdown_as_cancelled_and_restores_state(
+    loaded, tmp_path, monkeypatch, phase
+):
+    import inference_worker
+
+    model, sink, torch = Model(), Sink(), Torch()
+    shutdown = threading.Event()
+    if phase == "before_run":
+        shutdown.set()
+
+    def ensemble(**kwargs):
+        if phase == "iterator_creation":
+            shutdown.set()
+        iterator = kwargs["prognostic"].create_iterator(None, {})
+        assert next(iterator)[0] == "initial"
+        shutdown.set()
+        if phase == "iteration":
+            next(iterator)
+
+    def execute(ctx):
+        rollout.run_ensemble_rollout(
+            model,
+            loaded,
+            sink,
+            torch_module=torch,
+            ensemble_runner=ensemble,
+            abort_requested=ctx["abort_requested"],
+        )
+
+    class Redis:
+        def __init__(self):
+            self.values = {}
+
+        def setex(self, key, ttl, value):
+            self.values[key] = json.loads(value)
+
+    manifest = {"runtime": {"entrypoint": "workflow.py"}}
+    monkeypatch.setattr(
+        inference_worker,
+        "_resolve_plugin_manifest",
+        lambda _: (tmp_path, manifest),
+    )
+    redis = Redis()
+    worker = inference_worker.WorkflowExecutor(redis, worker_shutdown_event=shutdown)
+    monkeypatch.setattr(
+        worker, "_load_plugin_module", lambda *args: SimpleNamespace(execute=execute)
+    )
+    result = worker.execute(
+        "earth2-aifs2ens",
+        "cancelled-ensemble",
+        {},
+        payload={"workflow_id": "earth2-aifs2ens", "run_dir": str(tmp_path)},
+    )
+
+    assert result["status"] == "cancelled"
+    assert result["error"] == "forecast cancelled"
+    assert result["output_path"] is None and result["artifacts"] == []
+    assert (
+        redis.values["workflow_execution:earth2-aifs2ens:cancelled-ensemble"]["status"]
+        == "cancelled"
+    )
+    assert model.seed == 999 and sink.closed and not sink.complete
+    assert model.closed is (phase in {"iteration", "after_run"})
+    assert model.predictions == 0
+    assert torch.events[-1] == ("restore_rng", [0])
+    assert (("seed", 0) in torch.events) is (phase != "before_run")
 
 
 def test_explicit_gpu_index_is_used_for_rng_isolation(loaded):

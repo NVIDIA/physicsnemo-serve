@@ -7,6 +7,8 @@ from collections import OrderedDict
 
 import numpy as np
 
+from plugin_sdk import PluginCancelledError
+
 
 class FrozenInputSource:
     """Expose the staged two-time initialization through Earth2Studio's data API."""
@@ -47,7 +49,7 @@ class _ForecastIterator:
             raise StopIteration
         try:
             if self._abort_requested():
-                raise InterruptedError("forecast cancelled")
+                raise PluginCancelledError("forecast cancelled")
             result = next(self._iterator)
         except BaseException:
             self.close()
@@ -84,7 +86,7 @@ class _AbortableModel:
     def create_iterator(self, values, coords):
         self.close()
         if self._abort_requested():
-            raise InterruptedError("forecast cancelled")
+            raise PluginCancelledError("forecast cancelled")
         iterator = _ForecastIterator(
             self._model.create_iterator(values, coords),
             self._abort_requested,
@@ -134,7 +136,7 @@ def run_ensemble_rollout(
         with torch.random.fork_rng(devices=[device_index]), torch.inference_mode():
             try:
                 if abort_requested():
-                    raise InterruptedError("forecast cancelled")
+                    raise PluginCancelledError("forecast cancelled")
                 # Default Earth2Studio AIFS2ENS leaves the shared RNG stream
                 # advancing. A non-None model.seed would reseed every forward.
                 model.seed = None
@@ -156,7 +158,7 @@ def run_ensemble_rollout(
                     verbose=False,
                 )
                 if abort_requested():
-                    raise InterruptedError("forecast cancelled")
+                    raise PluginCancelledError("forecast cancelled")
                 sink.assert_complete()
             finally:
                 try:

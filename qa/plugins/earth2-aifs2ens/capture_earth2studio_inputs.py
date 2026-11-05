@@ -29,6 +29,7 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--ifs-member-id", type=int, choices=range(1, 51), default=1)
     args = parser.parse_args()
+    args.original_assets = args.original_assets.resolve()
     from earth2studio.data import IFS_ENS, fetch_data
 
     provenance = json.loads(

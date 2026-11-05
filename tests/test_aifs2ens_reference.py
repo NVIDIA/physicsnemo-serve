@@ -260,3 +260,113 @@ def test_reference_calls_stock_ensemble_with_one_seed_and_preserves_all_member_s
             report["steps"][0]["sha256"]
             == hashlib.sha256((output / "step-0001.npy").read_bytes()).hexdigest()
         )
+
+
+def test_capture_accepts_relative_asset_and_output_paths(tmp_path, monkeypatch):
+    spec = importlib.util.spec_from_file_location(
+        "relative_path_input_capture",
+        ROOT / "qa/plugins/earth2-aifs2ens/capture_earth2studio_inputs.py",
+    )
+    capture = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(capture)
+    monkeypatch.chdir(tmp_path)
+    original = tmp_path / "old-assets"
+    assets = original / "assets"
+    checkpoint = assets / "checkpoint-xet"
+    checkpoint.mkdir(parents=True)
+    (checkpoint / "aifs-ens-crps-2.0.ckpt").write_bytes(b"checkpoint fixture")
+    fixed = np.broadcast_to(
+        np.arange(5, dtype=np.float32)[:, None, None], (5, 721, 1440)
+    )
+    np.save(assets / "invariants.npy", fixed, allow_pickle=False)
+    contract = {
+        "input_variables": ["lsm", "t2m", "sdor", "slor", "z", "wmb"],
+        "lat": np.linspace(90, -90, 721).tolist(),
+        "lon": (np.arange(1440) / 4).tolist(),
+        "invariants_sha256": capture.digest(assets / "invariants.npy"),
+    }
+    (original / "qualified-input-contract.json").write_text(json.dumps(contract))
+    (original / "weather-capture-report.json").write_text(
+        json.dumps({"initialization": "2026-11-04T12:00:00Z"})
+    )
+    weather = np.broadcast_to(
+        np.array([10, 20], dtype=np.float32)[None, :, None, None, None],
+        (1, 2, 1, 721, 1440),
+    )
+    calls = []
+
+    def fetch_data(**kwargs):
+        calls.append(kwargs)
+        coords = {key: kwargs[key] for key in ("time", "lead_time", "variable")}
+        coords.update(lat=np.array(contract["lat"]), lon=np.array(contract["lon"]))
+        return SimpleNamespace(
+            cpu=lambda: SimpleNamespace(numpy=lambda: weather)
+        ), coords
+
+    monkeypatch.setitem(
+        sys.modules,
+        "earth2studio.data",
+        SimpleNamespace(IFS_ENS=lambda **kwargs: kwargs, fetch_data=fetch_data),
+    )
+    distribution = capture.importlib.metadata.distribution
+    monkeypatch.setattr(
+        capture.importlib.metadata,
+        "distribution",
+        lambda name: (
+            SimpleNamespace(
+                read_text=lambda _: json.dumps(
+                    {
+                        "vcs_info": {
+                            "commit_id": "f8af4030cfd43ec79bf4c0cf6c23463a87bfef97"
+                        }
+                    }
+                )
+            )
+            if name == "earth2studio"
+            else distribution(name)
+        ),
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            str(spec.origin),
+            "--original-assets",
+            "old-assets",
+            "--output",
+            "new-fixture",
+            "--ifs-member-id",
+            "3",
+        ],
+    )
+    capture.main()
+    output = tmp_path / "new-fixture"
+    for name in ("invariants.npy", "checkpoint-xet"):
+        linked = output / "assets" / name
+        assert linked.is_symlink() and linked.resolve() == assets / name
+    assert (output / "assets/checkpoint-xet/aifs-ens-crps-2.0.ckpt").read_bytes() == (
+        checkpoint / "aifs-ens-crps-2.0.ckpt"
+    ).read_bytes()
+    assert (
+        json.loads((output / "qualified-input-contract.json").read_text()) == contract
+    )
+    assert len(calls) == 1
+    assert calls[0]["source"] == {"member": 3, "source": "ecmwf", "verbose": False}
+    assert calls[0]["device"] == "cpu"
+    np.testing.assert_array_equal(calls[0]["variable"], ["t2m"])
+    np.testing.assert_array_equal(
+        calls[0]["lead_time"], np.array([-6, 0], "timedelta64[h]")
+    )
+    report = json.loads((output / "weather-capture-report.json").read_text())
+    assert report["status"] == "passed" and report["ifs_member_id"] == 3
+    assert report["shared_input"] is True
+    assert report["preprocessing_policy"] == capture.PREPROCESSING_POLICY
+    captured = np.load(report["input"]["path"], allow_pickle=False, mmap_mode="r")
+    assert captured.shape == (1, 2, 6, 721, 1440) and captured.dtype == np.float32
+    np.testing.assert_array_equal(captured[:, :, 1:2], weather)
+    for index, name in enumerate(capture.INVARIANTS):
+        np.testing.assert_array_equal(
+            captured[0, :, contract["input_variables"].index(name)],
+            np.broadcast_to(fixed[index], (2, 721, 1440)),
+        )
+    assert report["input"]["sha256"] == capture.digest(output / "assets/input.npy")

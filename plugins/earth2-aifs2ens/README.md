@@ -21,8 +21,13 @@ source `53da50741e74` were reused after runtime/scientific-source identity
 checks, 30 array-hash checks and 5,280 holdout comparisons; no comparison limits
 were recalibrated. The [parity record](../../docs/plans/aifs2ens-parity-and-reference-workflows.md)
 binds both image provenances and preserves earlier releases, including their
-failed runs, separately. The qualified fingerprint binds the image snapshot;
-the subsequent documentation updates do not change its runtime source.
+failed runs, separately. The qualified fingerprint binds the image snapshot.
+
+The later PR-review follow-up uses the SDK cancellation exception so cooperative
+aborts retain `cancelled` status, and resolves relative asset paths in the
+standalone capture helper. CPU regressions cover both fixes. These changes and
+the documentation updates are outside the qualified image; forecast arithmetic,
+the upstream ensemble call and RNG calls are unchanged.
 
 ## Request
 

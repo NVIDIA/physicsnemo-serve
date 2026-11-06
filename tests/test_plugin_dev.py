@@ -4736,7 +4736,8 @@ def test_shipped_plugins_opt_into_process_cache():
         assert getattr(workflow, "cache_scope", None) == "process", workflow_id
         assert callable(getattr(workflow, "cleanup_request", None)), workflow_id
         if getattr(workflow, "model_cache_names", None):
-            assert callable(getattr(module, "prepare_model_cache", None)), workflow_id
+            # The optional module hook can prefetch assets; warmup may also
+            # verify and load everything itself.
             assert callable(getattr(workflow, "warmup", None)), workflow_id
 
 
@@ -7158,6 +7159,29 @@ WORKFLOW = DemoCapabilitiesWorkflow()
         == data["runtime_config_path"]
     )
     assert launcher["env"]["WORKER_SCRIPT"].endswith("inference_worker.py")
+
+
+def test_declared_run_local_profiles_do_not_invoke_a_downloading_prepare_hook(
+    tmp_path: Path, monkeypatch
+):
+    module = load_plugin_dev_module()
+    monkeypatch.setattr(
+        module,
+        "_build_run_local_profile_probe_payloads",
+        lambda *args: pytest.fail("profile planning invoked prepare"),
+    )
+    profiles = [
+        {
+            "executor_class": "test-gpu",
+            "device_kind": "gpu",
+            "memory_mb": 65536,
+            "tags": ["gpu"],
+        }
+    ]
+    manifest = {"developer": {"run_local": {"execute_worker_profiles": profiles}}}
+    assert (
+        module._derive_run_local_execute_worker_profiles(tmp_path, manifest) == profiles
+    )
 
 
 def test_plugin_dev_run_local_sets_explicit_python_interpreter(tmp_path: Path):

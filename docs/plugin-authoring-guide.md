@@ -438,6 +438,26 @@ For a new family such as `biology-demo`:
 
 ## Dev Kit Flow
 
+When `prepare()` downloads data or has other side effects, declare the complete
+set of execute-worker profiles for `run-local` explicitly. Planning uses these
+profiles without invoking the prepare hook:
+
+```yaml
+developer:
+  run_local:
+    execute_worker_profiles:
+      - executor_class: my-gpu-runtime
+        device_kind: gpu
+        memory_mb: 65536
+        tags: [my-model, gpu]
+```
+
+Without these declarations, the dev kit discovers profiles by invoking
+`prepare()`. Execution admission still uses each request or fanout item's
+resource profile. Set memory requirements from qualification. The generated
+runtime configuration also applies the manifest's prepare and postprocess hook
+timeouts to their service roles.
+
 ```bash
 python scripts/plugin_dev.py init plugins/my-plugin
 python scripts/plugin_dev.py validate plugins/my-plugin

@@ -994,6 +994,17 @@ def build_run_local_plan(
         output_publication=output_publication,
         publish_role_config=publish_role_config,
     )
+    hook_timeouts = manifest.get("runtime", {}).get("hook_timeout_seconds", {})
+    for phase in ("prepare", "postprocess"):
+        timeout = hook_timeouts.get(phase)
+        if timeout is not None and phase in runtime_config["roles"]:
+            if type(timeout) is not int or timeout <= 0:
+                raise ValueError(
+                    f"runtime.hook_timeout_seconds.{phase} must be a positive integer"
+                )
+            runtime_config["roles"][phase].setdefault("config", {})[
+                "hook_timeout_secs"
+            ] = timeout
     runtime_config_path = workspace_root / "runtime_config.json"
     runtime_config_path.write_text(
         json.dumps(runtime_config, indent=2) + "\n", encoding="utf-8"
@@ -2007,6 +2018,33 @@ def _derive_run_local_execute_worker_profiles(
     plugin_root: Path,
     manifest: dict[str, Any],
 ) -> list[dict[str, Any]]:
+    declared = (
+        manifest.get("developer", {})
+        .get("run_local", {})
+        .get("execute_worker_profiles")
+    )
+    if declared is not None:
+        if not isinstance(declared, list) or not declared:
+            raise ValueError(
+                "developer.run_local.execute_worker_profiles must be a non-empty array"
+            )
+        profiles = []
+        for profile in declared:
+            if (
+                not isinstance(profile, dict)
+                or not str(profile.get("executor_class") or "").strip()
+                or profile.get("device_kind") not in {"cpu", "gpu"}
+                or type(profile.get("memory_mb")) is not int
+                or profile["memory_mb"] <= 0
+            ):
+                raise ValueError(
+                    "declared execute worker profiles need executor_class, device_kind, and positive memory_mb"
+                )
+            profiles.append(_normalize_run_local_execute_worker_profile(profile))
+        # A prepare hook may download data. Explicit launch profiles allow
+        # planning without invoking that hook or requiring its data assets.
+        return _merge_run_local_execute_worker_profiles(profiles)
+
     probe_payloads = _build_run_local_profile_probe_payloads(plugin_root, manifest)
     base_profile = probe_payloads[0].get("resource_profile")
     if not isinstance(base_profile, dict):

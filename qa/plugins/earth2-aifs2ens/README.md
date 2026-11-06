@@ -7,37 +7,41 @@ frozen input, `Zero()` initial perturbation, `model.seed=None`, and one initial
 member count and output fields. Per-member independently seeded references do
 not qualify this shared-stream workflow.
 
-The current `earth2-gpu` release, source `4b91b64806d9`, passed **412 selected
-tests: 405 portable and all seven H100 cases**, with zero skips. The Linux image
-build also passed the 405 portable cases, with two unrelated FCN GPU cases
-deselected. Eight candidate rollouts passed 7,440 member/step/field comparisons,
-including both Zarr backends, serial and uneven batches, cached A/B/A reuse and
-the single-task REST path.
+The current `earth2-gpu` release, source `4c10a529633b`, passed **427 selected
+tests: 420 portable and all seven H100 cases**, with zero skips, on 2026-11-06.
+The Linux image build also passed the 420 portable cases, with two unrelated FCN
+GPU cases deselected. Eight candidate rollouts passed 7,440 member/step/field
+comparisons, including both Zarr backends, serial and uneven batches, cached
+A/B/A reuse and the single-task REST path.
 
 Three separate forecasts through the private Lepton HTTPS endpoint passed
 2,880 comparisons, with full A, serial B and repeated A using one cached GPU
-worker and one task/release per request. Eight field hashes from a downloaded
-`t2m` Zarr ZIP matched the output store. The nine standalone Earth2Studio
-reference processes were originally run under image `b58eeaf61c78` / source
-`53da50741e74`; the current image reused those arrays after scientific/runtime
-identity checks, 30 array-hash checks and 5,280 holdout comparisons. No new
-reference generation, recalibration or limit widening is claimed for the rerun.
+worker and one task/release per request. Of these comparisons, 2,640 had zero
+error; the largest fraction of a positive limit was 0.5. Eight field hashes from
+a downloaded `t2m` Zarr ZIP matched the output store. Nine fresh standalone
+Earth2Studio reference processes ran in this same image/source; 30 reference
+array hashes and 5,280 holdout comparisons passed under the unchanged prior
+frozen calibration. No recalibration or limit widening occurred.
 
-The [execution record](../../../docs/plans/aifs2ens-parity-and-reference-workflows.md#execution-evidence)
-binds the release, input, source, references and collected reports. The earlier
-366-test/seven-H100-case baseline and fan-out runs remain separate evidence;
-their case counts are not added to the current endpoint validation. Parity is
-within native CUDA variability for the tested fixture and layouts.
+The [execution record](../../../docs/plans/aifs2ens-parity-and-reference-workflows.md#current-single-gpu-version)
+binds the release, input, source, references and collected reports. Earlier
+releases and failed runs remain separate evidence; their counts are not added
+to this qualification. Parity is within native CUDA variability for the tested
+fixture and layouts.
 
-The qualified image includes the asset-warmup, batch-admission and PR-readiness
-changes. A QA-only bounded wait for structured result finalization corrected
-the first image's REST polling race; it polls the same accepted run ID and
-changes no forecast, RNG or model code. That failed qualification remains in the
-execution record. The image fingerprint binds the qualification snapshot.
-The subsequent PR-review changes use the SDK cancellation exception and resolve
-relative paths in standalone input capture. CPU regressions cover both fixes;
-these changes and later documentation updates are outside the qualified image.
-Forecast arithmetic, upstream ensemble orchestration and RNG calls are unchanged.
+The qualified image includes the asset-warmup and batch-admission guards,
+structured-result polling, SDK cancellation/final abort guard, relative
+capture/output-path fixes, five-module production layout and QA lifecycle/source
+cleanup. It also includes removal of the shared HTTP GPU-readiness gate;
+`/readyz` checks Redis while independent service-ready/registry/cache evidence
+establishes GPU warmup. Generic GPU-aware HTTP readiness is deferred to a
+separate infrastructure change. Forecast arithmetic, upstream ensemble
+orchestration and RNG calls are unchanged.
+
+Only qualification-record documentation updates follow this tested image;
+runtime and test sources remain identical to its prepared working-tree snapshot.
+The fingerprint does not claim the later documentation bytes or Git commit
+metadata were present in the image.
 
 ## Runtime
 
@@ -100,7 +104,7 @@ environments. The Python CI job uses the same frozen extra:
 ```sh
 uv run --frozen --extra qa pytest -q \
   -k 'not spherical_gaussian_skip_ahead_matches' \
-  tests/test_aifs2ens_*.py tests/test_earth2_plugins.py \
+  tests/test_aifs2ens.py tests/test_earth2_plugins.py \
   tests/test_plugin_dev.py tests/test_runtime_env_launcher.py
 ```
 
@@ -178,25 +182,25 @@ creates a new service session with separate logs and observation snapshots,
 allows 600 seconds for warmup or recovery, publishes readiness atomically, and
 terminates owned process groups on shutdown or failure.
 
-The supervisor passes `INFERENCE_READINESS_FILE` to the HTTP server. Where the
-orchestrator supports HTTP readiness, configure `GET /readyz` on the serving
-port. It returns 503 until the GPU worker is available and during recovery;
-Redis connectivity is also required. Missing, malformed or unreadable readiness
-JSON fails closed. Keep `/healthz` or TCP for liveness, so warmup does not trigger
-restarts. The deployed gate passed a direct HTTP test: 200, then 503 while the
-ready record was held, then 200 after restoration; liveness stayed 200.
-Lepton's current API provides TCP liveness and readiness approval only. The
-validated deployment has no native platform HTTP readiness probe.
+Before submitting GPU QA, inspect the current service session's
+`service-ready.json` and worker-registry observations. The supervisor publishes
+that record after GPU warmup and removes it during recovery or shutdown.
+The server retains its existing Redis-only `/readyz`; an HTTP 200 there does
+not establish GPU availability. Use `/healthz` or TCP for process liveness.
+Generic GPU-aware HTTP readiness is deferred to a separate infrastructure
+change. The current qualification image includes this removal. The older
+image's direct HTTP readiness experiment remains historical evidence in the
+execution record.
 
 Worker observation snapshots contain only the latest 100 release entries in
 stream order. Polling and snapshot size stay bounded as the service handles
 requests; the underlying Redis release stream is not trimmed by this observer.
 
 The validated release tag is
-`nvcr.io/dycvht5ows21/physicsnemo-serve:aifs2ens-release-20261105-4b91b64806d9`;
+`nvcr.io/dycvht5ows21/physicsnemo-serve:aifs2ens-release-20261106-4c10a529633b`;
 deploy its immutable digest
-`nvcr.io/dycvht5ows21/physicsnemo-serve@sha256:273bf30c623a160cf857191a041b01ddd210cbd5b6c7540eca7b734c6d364f92`.
-The private [Lepton endpoint](https://r0whe339-aifs2ens-1105-4b91b64806.xenon.lepton.run)
+`nvcr.io/dycvht5ows21/physicsnemo-serve@sha256:3c044a08b94d0a42b11239205228ea84c8d22252002479f19a61ce071cb602d4`.
+The private [Lepton endpoint](https://r0whe339-aifs2ens-1106-4c10a52963.xenon.lepton.run)
 uses workspace-token authentication. For an authenticated probe, keep the URL
 and token in environment variables:
 

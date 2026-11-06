@@ -4,6 +4,7 @@
 """Expose the qualified single-GPU service through a deployed HTTP endpoint."""
 
 import argparse
+from contextlib import contextmanager
 import json
 import os
 from pathlib import Path
@@ -20,7 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import plugin_dev  # noqa: E402
 import redis  # noqa: E402
-from run_qualification import verify_source, write_json  # noqa: E402
+from prepare_source import verify_source, write_json  # noqa: E402
 
 RELEASE_OBSERVATION_LIMIT = 100
 
@@ -52,6 +53,41 @@ def _stop_processes(processes, timeout=30):
         except ProcessLookupError:
             pass
         process.wait(timeout=5)
+
+
+@contextmanager
+def service_processes(plan, *, stop_event=None, port_timeout=30):
+    """Own the service processes, logs, and process groups for one local plan."""
+    workspace = Path(plan["workspace"])
+    processes, logs = [], []
+    try:
+        for item in plan["processes"]:
+            if stop_event is not None and stop_event.is_set():
+                break
+            log = (workspace / "logs" / f"{item['name']}.log").open("w")
+            logs.append(log)
+            process = subprocess.Popen(
+                item["argv"],
+                cwd=REPO,
+                env={**os.environ, **item.get("env", {})},
+                stdout=log,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
+            processes.append((item["name"], process))
+            if item["name"] in {"redis", "inference_server"}:
+                port = plan["redis_port"] if item["name"] == "redis" else plan["port"]
+                plugin_dev._wait_for_tcp_port(
+                    "127.0.0.1", port, timeout_secs=port_timeout
+                )
+            _check_processes(processes)
+        yield processes
+    finally:
+        try:
+            _stop_processes(processes)
+        finally:
+            for log in logs:
+                log.close()
 
 
 def _observations(client):
@@ -87,90 +123,69 @@ def run_service(plan, *, stop_event, startup_timeout=600):
     observation_path = workspace / "worker-observations.json"
     ready_path.unlink(missing_ok=True)
     write_json(state_path, {"status": "starting"})
-    processes, logs, client = [], [], None
+    client = None
     status, error = "stopped", None
     try:
-        for item in plan["processes"]:
-            if stop_event.is_set():
-                return
-            log = (workspace / "logs" / f"{item['name']}.log").open("w")
-            logs.append(log)
-            env = {**os.environ, **item.get("env", {})}
-            if item["name"] == "inference_server":
-                env["INFERENCE_READINESS_FILE"] = str(ready_path)
-            process = subprocess.Popen(
-                item["argv"],
-                cwd=REPO,
-                env=env,
-                stdout=log,
-                stderr=subprocess.STDOUT,
-                start_new_session=True,
-            )
-            processes.append((item["name"], process))
-            if item["name"] in {"redis", "inference_server"}:
-                port = plan["redis_port"] if item["name"] == "redis" else plan["port"]
-                plugin_dev._wait_for_tcp_port("127.0.0.1", port, timeout_secs=30)
-            _check_processes(processes)
-        client = redis.Redis.from_url(
-            plan["redis_url"],
-            decode_responses=True,
-            socket_connect_timeout=2,
-            socket_timeout=2,
-        )
-        deadline = time.monotonic() + startup_timeout
-        ready, previously_ready, previous = False, False, None
-        while not stop_event.is_set():
-            _check_processes(processes)
-            observations = _observations(client)
-            if observations != previous:
-                write_json(observation_path, observations)
-                previous = observations
-            available = _workers_available(
-                observations,
-                plan["execute_registration_streams"],
-                allow_busy=previously_ready,
-            )
-            if ready and not available:
-                ready = False
-                ready_path.unlink(missing_ok=True)
-                write_json(state_path, {"status": "recovering"})
+        with service_processes(plan, stop_event=stop_event) as processes:
+            try:
+                if stop_event.is_set():
+                    return
+                client = redis.Redis.from_url(
+                    plan["redis_url"],
+                    decode_responses=True,
+                    socket_connect_timeout=2,
+                    socket_timeout=2,
+                )
                 deadline = time.monotonic() + startup_timeout
-            if not ready:
-                if available:
-                    write_json(
-                        ready_path,
-                        {
-                            "status": "ready",
-                            "executor_class": "earth2-gpu",
-                            "workspace": str(workspace),
-                            "registry_path": str(observation_path),
-                            "release_path": str(observation_path),
-                            "registration_streams": plan[
-                                "execute_registration_streams"
-                            ],
-                        },
+                ready, previously_ready, previous = False, False, None
+                while not stop_event.is_set():
+                    _check_processes(processes)
+                    observations = _observations(client)
+                    if observations != previous:
+                        write_json(observation_path, observations)
+                        previous = observations
+                    available = _workers_available(
+                        observations,
+                        plan["execute_registration_streams"],
+                        allow_busy=previously_ready,
                     )
-                    write_json(state_path, {"status": "ready"})
-                    print(f"AIFS2ENS_SERVICE_READY {workspace}", flush=True)
-                    ready = previously_ready = True
-                elif time.monotonic() >= deadline:
-                    raise TimeoutError(
-                        "AIFS2ENS earth2-gpu worker did not become available"
-                    )
-            time.sleep(1)
+                    if ready and not available:
+                        ready = False
+                        ready_path.unlink(missing_ok=True)
+                        write_json(state_path, {"status": "recovering"})
+                        deadline = time.monotonic() + startup_timeout
+                    if not ready:
+                        if available:
+                            write_json(
+                                ready_path,
+                                {
+                                    "status": "ready",
+                                    "executor_class": "earth2-gpu",
+                                    "workspace": str(workspace),
+                                    "registry_path": str(observation_path),
+                                    "release_path": str(observation_path),
+                                    "registration_streams": plan[
+                                        "execute_registration_streams"
+                                    ],
+                                },
+                            )
+                            write_json(state_path, {"status": "ready"})
+                            print(f"AIFS2ENS_SERVICE_READY {workspace}", flush=True)
+                            ready = previously_ready = True
+                        elif time.monotonic() >= deadline:
+                            raise TimeoutError(
+                                "AIFS2ENS earth2-gpu worker did not become available"
+                            )
+                    time.sleep(1)
+            finally:
+                ready_path.unlink(missing_ok=True)
     except BaseException as exc:
         status, error = "failed", {"type": type(exc).__name__, "message": str(exc)}
         raise
     finally:
-        ready_path.unlink(missing_ok=True)
-        try:
-            _stop_processes(processes)
-        finally:
-            if client is not None:
-                client.close()
-            for log in logs:
-                log.close()
-            write_json(state_path, {"status": status, "error": error})
+        if client is not None:
+            client.close()
+        write_json(state_path, {"status": status, "error": error})
 
 
 def main(argv=None):
@@ -185,7 +200,7 @@ def main(argv=None):
     if not 1 <= args.port <= 65535:
         parser.error("port must be between 1 and 65535")
     source_sha = os.environ["AIFS2ENS_SOURCE_CONTENT_SHA256"]
-    verify_source(source_sha)
+    verify_source(REPO, source_sha)
     root = args.workspace.resolve()
     root.mkdir(parents=True, exist_ok=True)
     workspace = Path(tempfile.mkdtemp(prefix="service-", dir=root))

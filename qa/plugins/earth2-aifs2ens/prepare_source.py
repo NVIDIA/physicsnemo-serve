@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Prepare a fresh Docker context and print its verified source fingerprint."""
+"""Prepare and verify the source fingerprint used by QA and deployed images."""
 
 import argparse
 import hashlib
@@ -24,6 +24,34 @@ BLOCKED_PARTS = {
 ASSET_SUFFIXES = {".ckpt", ".npy", ".pt", ".pth", ".onnx", ".zarr", ".log"}
 SECRET_SUFFIXES = {".key", ".pem"}
 MAX_SOURCE_BYTES = 10 * 1024**2
+
+
+def digest(path):
+    value = hashlib.sha256()
+    with Path(path).open("rb") as stream:
+        for chunk in iter(lambda: stream.read(8 * 1024**2), b""):
+            value.update(chunk)
+    return value.hexdigest()
+
+
+def write_json(path, value):
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(json.dumps(value, indent=2) + "\n")
+    temporary.replace(path)
+
+
+def verify_source(repo, expected):
+    repo = Path(repo)
+    manifest = json.loads((repo / "qa-source-inventory.json").read_text())
+    encoded = json.dumps(
+        manifest["files"], sort_keys=True, separators=(",", ":")
+    ).encode()
+    if hashlib.sha256(encoded).hexdigest() != expected:
+        raise ValueError("image source inventory differs from the requested snapshot")
+    for item in manifest["files"]:
+        if digest(repo / item["path"]) != item["sha256"]:
+            raise ValueError(f"image source bytes differ: {item['path']}")
+    return manifest["base_commit"]
 
 
 def excluded(path):
@@ -95,9 +123,7 @@ def prepare_source(repo, output):
         "source_content_sha256": identity,
         "files": records,
     }
-    (output / "qa-source-inventory.json").write_text(
-        json.dumps(manifest, indent=2) + "\n"
-    )
+    write_json(output / "qa-source-inventory.json", manifest)
     return identity
 
 

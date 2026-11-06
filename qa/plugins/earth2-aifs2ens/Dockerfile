@@ -49,10 +49,10 @@ COPY . .
 ARG SOURCE_CONTENT_SHA256
 ENV AIFS2ENS_SOURCE_CONTENT_SHA256=${SOURCE_CONTENT_SHA256}
 LABEL io.physicsnemo.aifs2ens.source-content-sha256=${SOURCE_CONTENT_SHA256}
-RUN python -c 'import os; from importlib.util import spec_from_file_location,module_from_spec; s=spec_from_file_location("qa", "qa/plugins/earth2-aifs2ens/run_qualification.py"); m=module_from_spec(s); s.loader.exec_module(m); m.verify_source(os.environ["AIFS2ENS_SOURCE_CONTENT_SHA256"])'
+RUN python -c 'import os, sys; from pathlib import Path; sys.path.insert(0, "qa/plugins/earth2-aifs2ens"); from prepare_source import verify_source; verify_source(Path.cwd(), os.environ["AIFS2ENS_SOURCE_CONTENT_SHA256"])'
 RUN /opt/aifs2ens-qa-venv/bin/python -m pytest -q -p pytest_asyncio.plugin \
       -k 'not spherical_gaussian_skip_ahead_matches' \
-      tests/test_aifs2ens_*.py tests/test_earth2_plugins.py tests/test_plugin_dev.py tests/test_runtime_env_launcher.py \
+      tests/test_aifs2ens.py tests/test_earth2_plugins.py tests/test_plugin_dev.py tests/test_runtime_env_launcher.py \
  && python scripts/plugin_dev.py validate plugins/earth2-aifs2ens
 CMD ["python", "qa/plugins/earth2-aifs2ens/run_qualification.py", "--help"]
 

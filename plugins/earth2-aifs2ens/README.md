@@ -5,29 +5,45 @@ Run a complete AIFS2ENS ensemble on **one GPU execute worker** through stock
 the GPU worker generates the ensemble with a shared seeded RNG stream and writes
 one registered Zarr dataset. Fan-out is deferred to a separate future version.
 
-The current `earth2-gpu` release, source `4b91b64806d9`, passed **412 selected
-tests: 405 portable and all seven H100 cases**, with zero skips. Eight candidate
-rollouts passed 7,440 member/step/field comparisons. Three separate forecasts
-through the private Lepton HTTPS endpoint passed another 2,880 comparisons:
-full-batch A, serial-batch B, then A again used one cached GPU worker, with one
-task and release per request. All eight downloaded `t2m` field hashes matched
-the output store. These results establish parity within measured native CUDA
-variability for the tested fixture and layouts, not bitwise equality.
+The current `earth2-gpu` release, source `4c10a529633b`, passed **427 selected
+tests: 420 portable and all seven H100 cases**, with zero skips, on 2026-11-06.
+Eight candidate rollouts passed 7,440 member/step/field comparisons. Three
+separate forecasts through the private Lepton HTTPS endpoint passed another
+2,880 comparisons: full-batch A, serial-batch B, then A again used one cached
+GPU worker, with one task and release per request. All eight downloaded `t2m`
+field hashes matched the output store. These results establish parity within
+measured native CUDA variability for the tested fixture and layouts.
 
-The release includes the asset-warmup, batch-admission and PR-readiness fixes.
-Its QA client also waits for structured result finalization on the same accepted
-run ID. Nine standalone Earth2Studio references originally generated under
-source `53da50741e74` were reused after runtime/scientific-source identity
-checks, 30 array-hash checks and 5,280 holdout comparisons; no comparison limits
-were recalibrated. The [parity record](../../docs/plans/aifs2ens-parity-and-reference-workflows.md)
-binds both image provenances and preserves earlier releases, including their
-failed runs, separately. The qualified fingerprint binds the image snapshot.
+Nine fresh standalone Earth2Studio reference processes ran in the same image
+and source as the candidate. All 30 reference array hashes and 5,280 holdout
+comparisons passed under the unchanged prior frozen calibration; no limits were
+recalibrated or widened. The qualified image includes SDK cancellation and the
+final abort guard, relative capture/output-path fixes, five-module production
+layout, QA lifecycle/source cleanup, and removal of the shared HTTP GPU-readiness
+gate. Forecast arithmetic, the upstream ensemble call and RNG calls are unchanged.
+The [parity record](../../docs/plans/aifs2ens-parity-and-reference-workflows.md#current-single-gpu-version)
+binds the current image, source and references and preserves earlier passes
+and failures separately.
 
-The later PR-review follow-up uses the SDK cancellation exception so cooperative
-aborts retain `cancelled` status, and resolves relative asset paths in the
-standalone capture helper. CPU regressions cover both fixes. These changes and
-the documentation updates are outside the qualified image; forecast arithmetic,
-the upstream ensemble call and RNG calls are unchanged.
+Only qualification-record documentation updates follow the tested image;
+runtime and test sources remain identical to the qualified snapshot. Its source
+fingerprint binds that prepared working-tree snapshot, rather than the later
+documentation bytes or Git commit metadata.
+
+## Source layout
+
+The production plugin has five Python modules:
+
+| Module | Responsibility |
+| --- | --- |
+| [workflow.py](workflow.py) | Plugin hooks, cached model lifecycle, scheduling and artifact registration |
+| [aifs2ens_inputs.py](aifs2ens_inputs.py) | Request and input contracts, weather fetching, frozen invariants and staged input manifests |
+| [aifs2ens_runtime.py](aifs2ens_runtime.py) | Pinned asset verification, model loading and runtime identity |
+| [aifs2ens_rollout.py](aifs2ens_rollout.py) | Native ensemble execution, request RNG scope, cancellation and iterator cleanup |
+| [aifs2ens_outputs.py](aifs2ens_outputs.py) | Forecast-only Zarr writing, coverage checks and post-flush data validation |
+
+The QA scripts retain an independent Earth2Studio input capture and reference
+runner. They do not import the plugin's preprocessing, rollout or output code.
 
 ## Request
 
@@ -114,13 +130,11 @@ scheduler, even when they use the same executor class.
 | `EARTH2STUDIO_DATA_CACHE` | Shared weather-data cache |
 | `AIFS2ENS_SERVICE_ROOT` | Writable root for release-service sessions, readiness records and logs |
 
-The release supervisor connects its GPU-worker readiness record to HTTP
-`/readyz` through `INFERENCE_READINESS_FILE`. Where the orchestrator supports
-HTTP readiness, use `GET /readyz`, with `/healthz` or TCP for liveness. The
-deployed gate was tested directly: readiness returned 200, then 503 while its
-record was held, then 200 after restoration; liveness stayed 200. Lepton's
-current API supplies TCP liveness and readiness approval, without a native HTTP
-readiness probe. See the
+The supervisor records GPU-worker availability in `service-ready.json` and the
+worker registry. Wait for those GPU observations before starting inference QA;
+the server's existing `/readyz` checks Redis connectivity, not model warmup.
+`/healthz` or TCP checks process liveness. Generic GPU-aware HTTP readiness is
+deferred to a separate infrastructure change. See the
 [QA guide](../../qa/plugins/earth2-aifs2ens/README.md#linux-build-and-lepton-execution)
 for source preparation and release-service configuration.
 
@@ -186,7 +200,7 @@ environment variables.
 Run portable request, staging, RNG/lifecycle and storage checks with:
 
 ```sh
-uv run --extra qa pytest -q tests/test_aifs2ens_*.py
+uv run --extra qa pytest -q tests/test_aifs2ens.py
 ```
 
 Run all actual model/CUDA tests on the configured remote H100. A complete-ensemble

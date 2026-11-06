@@ -9,21 +9,23 @@ fan-out implementation.
 The current numerical policy is `earth2studio-native-v1`, input policy is
 `earth2studio-latlon-frozen-invariants-v1`, and RNG policy is
 `torch-seed-once-native-v1`. The current `earth2-gpu` release, source
-`4b91b64806d9`, passed **412 selected tests: 405 portable and all seven H100
-cases**, with zero skips, on 2026-11-05. Eight candidate rollouts passed 7,440
+`4c10a529633b`, passed **427 selected tests: 420 portable and all seven H100
+cases**, with zero skips, on 2026-11-06. Eight candidate rollouts passed 7,440
 field comparisons. Three separate HTTPS forecasts passed 2,880 comparisons
-against standalone Earth2Studio references under the prior immutable calibration. The
-[execution record](#current-single-gpu-version) defines the tested scope and
-preserves the earlier 366-test/seven-H100-case baseline separately. Parity is
-within measured native CUDA variability; earlier fan-out/per-member passes do
-not qualify this workflow.
+against fresh standalone Earth2Studio references under the unchanged prior
+immutable calibration. The [execution record](#current-single-gpu-version)
+defines the tested scope and preserves earlier passes and failures separately.
+Parity is within measured native CUDA variability; earlier fan-out/per-member
+passes do not qualify this workflow.
 
-The qualified release includes the asset-warmup, batch-admission and
-PR-readiness changes, plus a QA-only fix for structured result finalization.
-Its nine reference processes retain their original image `b58eeaf61c78` /
-source `53da50741e74` provenance. They were reused after scientific/runtime
-identity checks, rehashing 30 arrays and revalidating 5,280 holdout comparisons;
-no new reference generation or recalibration is claimed for the final image.
+The qualified release includes asset-warmup/batch admission, structured-result
+polling, SDK cancellation/final abort guard, relative capture/output-path fixes,
+five-module production layout, QA lifecycle/source cleanup, and removal of the
+shared HTTP GPU-readiness gate. Nine fresh stock Earth2Studio reference processes
+ran in the same image/source as the candidate. All 30 reference array hashes
+and 5,280 holdout comparisons passed without recalibration or limit widening.
+Only qualification-record documentation updates follow the tested image;
+runtime and test sources remain identical to its prepared working-tree snapshot.
 
 ## Reference contract
 
@@ -57,7 +59,7 @@ reference identity. Compare identical layouts; do not infer that changing
 batch size preserves a member's random draws. Default `batch_size=None` resolves
 to `nensemble`, with larger provided values clamped to `nensemble` like upstream.
 
-The source follow-up applies `AIFS2ENS_MAX_BATCH_SIZE` after this normalization,
+The plugin applies `AIFS2ENS_MAX_BATCH_SIZE` after this normalization,
 with default `2`. It rejects oversized batches before downloading and rechecks
 them before GPU execution, without silently changing the RNG draw/member
 mapping. Ensembles larger than two require an explicit batch of 1 or 2 under
@@ -123,7 +125,119 @@ model inference.
 
 ### Current single-GPU version
 
-The current release tag is
+The 2026-11-06 release tag is
+`nvcr.io/dycvht5ows21/physicsnemo-serve:aifs2ens-release-20261106-4c10a529633b`;
+its immutable image is
+`nvcr.io/dycvht5ows21/physicsnemo-serve@sha256:3c044a08b94d0a42b11239205228ea84c8d22252002479f19a61ce071cb602d4`.
+The 690-file prepared working-tree inventory has source-content SHA-256
+`4c10a529633bbbbf91cc5ebb7be12ca8eb6f9945303c2fe54ccced0116b2ddfe`, on base
+commit `0b91f1d88026e9834e5a9ae91d6cbf1962d53514`. The Linux build on
+`nvdi863k9ph16b0` passed 420 portable tests with zero skips; two unrelated FCN
+GPU cases were deselected. Image/source inventory and registry digest were
+verified. This source was uncommitted when prepared and qualified.
+
+The image includes the five-module production consolidation, QA lifecycle and
+source cleanup, SDK `PluginCancelledError` and final abort guard, standalone
+capture relative-path and qualification-output fixes, and removal of shared
+HTTP GPU-readiness wiring. The upstream forecast arithmetic, ensemble call and
+RNG calls are unchanged. Only qualification-record documentation updates follow
+this tested image; runtime and test sources remain identical to its snapshot.
+Neither those later documentation bytes nor later Git commit metadata are
+claimed to be present in the image. Reproducing its exact fingerprint requires
+the preserved prepared source context and inventory.
+
+Lepton job `aifs2ens-fullqa-4c10a52963-4b48` completed on 2026-11-06 at
+16:53:38Z with **427 passes: 420 portable and all seven H100 cases**, with zero
+skips. Coverage includes both Zarr backends, serial and uneven mini-batches,
+complete-ensemble cached A/B/A reuse and the one-task REST path. Eight candidate
+rollouts passed 7,440 member/step/field comparisons. The qualification job used
+H100 80GB HBM3, UUID `GPU-42d395a7-5204-16a8-75f7-c51ef4ab5f7d`, driver
+570.195.03. These counts belong to this run alone.
+
+Nine **fresh** standalone stock Earth2Studio reference processes ran under this
+same immutable image and source: one anchor and two holdouts for each full,
+serial and uneven layout. All 30 reference array hashes were verified and all
+5,280 holdout comparisons passed under the prior frozen calibration SHA-256
+`00730662fac03c1d63ba74d6e19a523a7375240a372a2b2bc35e825d66715226`.
+Reference gate SHA-256 is
+`608143d7d5a6066662a4c202c1a67ecb3f9a34f0a11c3658933217bf1d10b51e`.
+The calibration was unchanged; no recalibration or limit widening occurred.
+The frozen weather input was reused with its original identity, initialization
+`2026-11-04T12:00:00Z`,
+common IFS ENS member 1 and SHA-256
+`631d9fed3102204074a39451159fd641108f98df1eef855e7d1e3b5982012b1e`.
+Checkpoint SHA-256 remains
+`e383027ee9a20469b920ed11f9af2ecc9268ebcf826447638c5c9fa296fbbbdb`.
+
+Private deployment `aifs2ens-1106-4c10a52963` serves
+[the current HTTPS endpoint](https://r0whe339-aifs2ens-1106-4c10a52963.xenon.lepton.run).
+API readback verified the immutable image, a single H100 replica, `earth2-gpu`
+with the `aifs2ens` capability tag, 65,536 MiB GPU reservation and
+`AIFS2ENS_MAX_BATCH_SIZE=2`. Three authenticated forecasts used the common input
+above, seed 0, two members, four six-hour steps and all 120 fields:
+
+| HTTPS request | Batch size | Parent run ID | Comparisons |
+| --- | ---: | --- | ---: |
+| A | 2 | `9badbcdf-0811-44e8-9e71-35ebc518bbab` | 960 |
+| B | 1 | `4e3124bc-1670-4209-a0f4-38fc38b1babc` | 960 |
+| A repeat | 2 | `c3965b16-d22d-4575-96ce-17ee0f6762d4` | 960 |
+
+Finite CPU comparison job `aifs2ens-ep-cmp-4c10a52963-w98x` completed: all 2,880
+comparisons passed, 2,640 had zero error and the worst fraction of a positive
+limit was 0.5. It reverified the 30 fresh reference array hashes and 5,280
+holdout comparisons. Worker PID 672 on GPU
+`GPU-4d876190-0641-dfbd-fef4-4c15d0d795a4` spawned once, never restarted and
+reported four cache hits including warmup. Exactly three parent GPU releases
+and one execute task per request were observed, with no children or fan-out.
+An external HTTPS `t2m` Zarr ZIP download returned HTTP 200 and 24,996,193 bytes,
+SHA-256 `c556ed9894eb3d3b209798f6b2cbeaa6e78fbf87e4ba804cc50f3e4ccdf4dc90`;
+all eight member/step field hashes matched the output store.
+
+GPU startup was checked independently through the task-owned NFS
+`service-ready.json`, source-bound session pointer, worker registry and successful
+warmed model cache before forecasts. `/healthz`, `/readyz` and workflow
+readiness returned HTTP 200, but `/readyz` covers Redis only and workflow
+readiness checks dependencies/artifact configuration. HTTP/TCP success alone
+does not prove GPU warmup. No platform HTTP readiness probe was configured;
+Lepton uses TCP liveness. The earlier 200/503/200 HTTP GPU-readiness experiment
+below belongs to the previous image, whose shared HTTP gate was removed here.
+
+An over-limit three-member, batch-size-3 request, run
+`8e8de9b3-8eef-47bb-8cff-ab5ab8e05691`, was rejected by prepare before staging
+weather inputs or using the GPU. Owned logs and observations showed zero staged
+input paths, GPU processing events or GPU releases. The shared server's existing
+retry policy moved it to failed/DLQ on attempt 5; this is expected pipeline
+behavior rather than a new immediate HTTP rejection contract.
+
+Evidence is external to versioned source under
+`/Users/zhiweis/Projects/physicsnemo-serve-evidence/aifs2ens-simplified-20261106`.
+`validation.json` binds the final result; `build/evidence-verification.json`
+binds the 690-file inventory and Linux build; `full-qa/final-audit.json` and
+`full-qa/independent-final-review.json` bind the full QA and fresh references.
+The full-QA evidence archive SHA-256 is
+`32d150da8cd3af315580e2d11aa39486942aeae940371cf3509c1864bae135ca`.
+`endpoint/final-evidence-audit.json` and
+`endpoint/endpoint-results/comparison-summary.json` bind the endpoint,
+comparisons, downloaded field hashes and worker continuity.
+`source-after-validation.json` records zero source drift before this documentation
+update. Raw reference/candidate arrays remain on task-owned shared NFS at
+`/mnt/my_lfs_data/Projects/gpu_programming-aifs2ens-simplified-20261106-4c10a529633b`;
+model data, credentials and evidence binaries are not committed.
+
+The final endpoint audit at 2026-11-06T17:01:12Z recorded deployment state
+`Ready`, left running with min/max replicas 1 on one H100 for client testing.
+The finite CPU comparison job is complete. Qualification is limited to the
+recorded fixture and layouts; additional dates, longer horizons, larger GPU
+batches, decoded products and
+ECMWF/operational equivalence remain separate gates.
+
+### Previous single-GPU release — source `4b91b64806d9`
+
+This 2026-11-05 record and its follow-up notes describe that earlier snapshot.
+Its reused-reference provenance, HTTP-readiness experiment and deployment state
+are historical; its counts are not added to the current qualification.
+
+The previous release tag is
 `nvcr.io/dycvht5ows21/physicsnemo-serve:aifs2ens-release-20261105-4b91b64806d9`;
 its immutable image is
 `nvcr.io/dycvht5ows21/physicsnemo-serve@sha256:273bf30c623a160cf857191a041b01ddd210cbd5b6c7540eca7b734c6d364f92`.
@@ -136,13 +250,21 @@ Its 405 portable tests passed with zero skips and two unrelated FCN GPU cases
 deselected. Source inventory, service command, image label and registry digest
 were verified.
 
-The subsequent PR-review follow-up changes cooperative cancellation to the SDK's
-`PluginCancelledError`, preserving the worker's `cancelled` status, and resolves
-relative asset paths in standalone input capture. Worker/status and standalone
-capture CPU regressions cover both fixes. These source changes and later
-documentation edits are outside the image inventory; the H100/HTTPS results
+At the subsequent audit, the PR-review follow-up changed cooperative cancellation
+to the SDK's `PluginCancelledError`, preserving the worker's `cancelled` status,
+and resolved relative asset paths in standalone input capture. Worker/status
+and standalone capture CPU regressions covered both fixes. Those source changes
+and later documentation edits were outside that image inventory; the H100/HTTPS
+results
 below remain bound to source `4b91b64806d9`. Forecast arithmetic, the upstream
 ensemble call and RNG calls are unchanged.
+
+The MR subsequently removed the shared HTTP worker-readiness gate and its
+supervisor wiring, deferring that generic infrastructure enhancement. That
+source kept the server's Redis-only `/readyz` and waited for GPU registry/file
+observations before inference QA. That removal was outside the previous image
+inventory; the image's direct HTTP-readiness experiment below is historical
+evidence, not a current plugin requirement.
 
 Lepton job `aifs2ens-fullqa-4b91b64806-db52` completed at
 2026-11-05T21:49:42Z with **412 passes: 405 portable and all seven H100 cases**,
@@ -169,7 +291,7 @@ reference was relabeled as generated by the final image, and no calibration or
 comparison limits were changed.
 
 Private deployment `aifs2ens-1105-4b91b64806` serves
-[the current HTTPS endpoint](https://r0whe339-aifs2ens-1105-4b91b64806.xenon.lepton.run).
+[the previous HTTPS endpoint](https://r0whe339-aifs2ens-1105-4b91b64806.xenon.lepton.run).
 API readback verified the immutable image, one H100, `earth2-gpu` with the
 `aifs2ens` capability tag, 65,536 MiB GPU reservation and
 `AIFS2ENS_MAX_BATCH_SIZE=2`. The three authenticated requests all used
@@ -194,13 +316,14 @@ download returned HTTP 200, 24,996,193 bytes and SHA-256
 `a243fa9d38010c6b53c3572261fee9953114a7b7335b67cd896f6a624d529c54`;
 all eight member/step field hashes matched the output store.
 
-The deployed readiness-file gate passed direct authenticated probes:
+The published image's readiness-file gate passed direct authenticated probes:
 `/readyz` returned 200, then 503 while the ready record was held, then 200 after
 the original record was restored. `/healthz` stayed 200. This exercised the
-gate without restarting the worker or mutating model assets. Lepton's current
-API provides TCP liveness and readiness approval only; no native platform HTTP
-readiness probe is configured. Use `GET /readyz` where an orchestrator supports
-HTTP readiness.
+gate without restarting the worker or mutating model assets. At that audit,
+Lepton's API provided TCP liveness and readiness approval only; no native platform
+HTTP readiness probe was configured. This experiment predates removal of the gate
+from the MR; the follow-up preserved the shared server's Redis-only readiness
+check and inspected GPU registration directly.
 
 An over-limit request with three members and batch size 3 was accepted into the
 pipeline as run `69ec38d7-8cbe-4a6f-893d-9a2f9c07f560`, then rejected immediately
@@ -217,8 +340,8 @@ reference provenance; its collected report archive SHA-256 is
 `endpoint-v2/comparison-summary.json` binds HTTPS comparisons, downloaded hashes
 and worker continuity. The verified 20-file endpoint evidence archive SHA-256 is
 `4c38265f897c740d661efd2bf2858d9f2cdb5c1aa00f365a5f48b3659cb0991e`.
-The current one-H100 endpoint remains running for client testing; the superseded
-`53da50741e74` endpoint was scaled to zero. The original `4ff4684ceb44` endpoint
+At that audit, this one-H100 endpoint remained running for client testing; the
+superseded `53da50741e74` endpoint was scaled to zero. The original `4ff4684ceb44` endpoint
 was left untouched.
 
 ### Intermediate fresh image — source `53da50741e74`
@@ -255,12 +378,12 @@ review also passed. Follow-up evidence is under
 
 The later PR-readiness changes install the existing QA dependency extra in the
 Python CI job, add a checked-in source-context/inventory generator, and bound
-the release observer to the latest 100 entries. The release supervisor now
+the release observer to the latest 100 entries. That earlier supervisor
 sets `INFERENCE_READINESS_FILE` for the HTTP server; `/readyz` requires both
-Redis and an atomically published GPU-ready record. Configure the deployment
-to probe `GET /readyz` for readiness, with `/healthz` or TCP for liveness. These
-changes preserve the model and RNG path. They remain separate from the deployed
-release evidence below.
+Redis and an atomically published GPU-ready record. This HTTP integration was
+later removed from the MR and deferred to separate infrastructure work. Those
+earlier changes preserve the model and RNG path and remain separate from the
+deployed release evidence below.
 
 The PR-readiness follow-up passed the full Python CI command in a fresh
 isolated environment with `--frozen --extra qa`: 847 passed and nine optional

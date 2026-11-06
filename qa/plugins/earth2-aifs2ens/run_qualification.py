@@ -4,7 +4,6 @@
 """Run frozen-reference calibration and the complete AIFS2ENS QA suite in one job."""
 
 import argparse
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -18,6 +17,7 @@ from xml.etree import ElementTree as ET
 REPO = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from native_parity import POLICY, RNG_POLICY, calibrate_ensemble, validate_holdouts  # noqa: E402
+from prepare_source import digest, verify_source, write_json  # noqa: E402
 
 LAYOUTS = {
     "full": {"nensemble": 2, "batch_size": 2, "nsteps": 4, "seed_base": 0},
@@ -35,33 +35,6 @@ H100_CASES = frozenset(
         "test_rest_single_gpu_no_fanout",
     }
 )
-
-
-def digest(path):
-    value = hashlib.sha256()
-    with Path(path).open("rb") as stream:
-        for chunk in iter(lambda: stream.read(8 * 1024**2), b""):
-            value.update(chunk)
-    return value.hexdigest()
-
-
-def write_json(path, value):
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(json.dumps(value, indent=2) + "\n")
-    temporary.replace(path)
-
-
-def verify_source(expected):
-    manifest = json.loads((REPO / "qa-source-inventory.json").read_text())
-    encoded = json.dumps(
-        manifest["files"], sort_keys=True, separators=(",", ":")
-    ).encode()
-    if hashlib.sha256(encoded).hexdigest() != expected:
-        raise ValueError("image source inventory differs from the requested snapshot")
-    for item in manifest["files"]:
-        if digest(REPO / item["path"]) != item["sha256"]:
-            raise ValueError(f"image source bytes differ: {item['path']}")
-    return manifest["base_commit"]
 
 
 def verify_reference_pair(first, second, expected, *, nsteps):
@@ -234,6 +207,7 @@ def checked(argv, env, log):
 
 
 def run(args):
+    args.output = args.output.resolve()
     args.output.mkdir(parents=True, exist_ok=False)
     work = Path(tempfile.mkdtemp(prefix="aifs2ens-single-gpu-qa-"))
     summary = {
@@ -251,7 +225,7 @@ def run(args):
         ],
     }
     try:
-        summary["base_commit"] = verify_source(args.source_content_sha256)
+        summary["base_commit"] = verify_source(REPO, args.source_content_sha256)
         original = args.assets.resolve()
         fixture = args.output / "fixture"
         env = {
@@ -418,9 +392,7 @@ def run(args):
             "All complete-ensemble holdouts passed; candidate limits now frozen",
             flush=True,
         )
-        tests = sorted(
-            str(path) for path in (REPO / "tests").glob("test_aifs2ens_*.py")
-        )
+        tests = [str(REPO / "tests/test_aifs2ens.py")]
         tests.extend(
             str(REPO / "tests" / name)
             for name in (

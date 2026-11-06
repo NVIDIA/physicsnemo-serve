@@ -74,7 +74,7 @@ class _AbortableModel:
         self._model = model
         self._abort_requested = abort_requested
         self._nsteps = nsteps
-        self._iterators = []
+        self._iterator = None
 
     def __getattr__(self, name):
         return getattr(self._model, name)
@@ -87,20 +87,17 @@ class _AbortableModel:
         self.close()
         if self._abort_requested():
             raise PluginCancelledError("forecast cancelled")
-        iterator = _ForecastIterator(
+        self._iterator = _ForecastIterator(
             self._model.create_iterator(values, coords),
             self._abort_requested,
             self._nsteps,
         )
-        self._iterators.append(iterator)
-        return iterator
+        return self._iterator
 
     def close(self):
-        try:
-            for iterator in self._iterators:
-                iterator.close()
-        finally:
-            self._iterators.clear()
+        iterator, self._iterator = self._iterator, None
+        if iterator is not None:
+            iterator.close()
 
 
 def run_ensemble_rollout(

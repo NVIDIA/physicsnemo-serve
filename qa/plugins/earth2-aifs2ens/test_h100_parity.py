@@ -26,6 +26,7 @@ from run_qualification import (  # noqa: E402
     wait_for_parent_release,
     wait_for_structured_result,
 )
+from serve import _check_processes, service_processes  # noqa: E402
 
 
 @pytest.fixture
@@ -205,7 +206,7 @@ def _compare(path, request, assets, layout, metrics_path, *, candidate_runtime):
 def _run(workflow, assets, work, *, layout):
     import torch
     from plugin_sdk import PrepareContext, RawRequest
-    from aifs2ens_artifacts import sha256_file
+    from aifs2ens_inputs import sha256_file
 
     work.mkdir()
     request = _request(assets, layout)
@@ -341,8 +342,6 @@ def test_cached_ensemble_A_B_A(assets, workflow, tmp_path, monkeypatch):
 
 def test_rest_single_gpu_no_fanout(assets, tmp_path, monkeypatch):
     """One complete ensemble task through the real Rust service, Redis and GPU worker."""
-    import signal
-    import subprocess
     import time
     import urllib.request
     import plugin_dev
@@ -360,7 +359,6 @@ def test_rest_single_gpu_no_fanout(assets, tmp_path, monkeypatch):
         port=0,
         redis_port=0,
     )
-    processes, logs = [], []
 
     def request(path, payload=None):
         data = None if payload is None else json.dumps(payload).encode()
@@ -372,22 +370,7 @@ def test_rest_single_gpu_no_fanout(assets, tmp_path, monkeypatch):
         with urllib.request.urlopen(req, timeout=60) as response:
             return response.status, json.load(response)
 
-    try:
-        for item in plan["processes"]:
-            log = (Path(plan["workspace"]) / "logs" / f"{item['name']}.log").open("w")
-            logs.append(log)
-            proc = subprocess.Popen(
-                item["argv"],
-                cwd=REPO,
-                env={**os.environ, **item.get("env", {})},
-                stdout=log,
-                stderr=subprocess.STDOUT,
-                start_new_session=True,
-            )
-            processes.append(proc)
-            if item["name"] in {"redis", "inference_server"}:
-                port = plan["redis_port"] if item["name"] == "redis" else plan["port"]
-                plugin_dev._wait_for_tcp_port("127.0.0.1", port, timeout_secs=60)
+    with service_processes(plan, port_timeout=60) as processes:
         for stream in plan["execute_registration_streams"]:
             plugin_dev._wait_for_worker_registration(
                 plan["redis_url"], stream, timeout_secs=180
@@ -399,9 +382,7 @@ def test_rest_single_gpu_no_fanout(assets, tmp_path, monkeypatch):
         run_id = submitted["run_id"]
         deadline = time.monotonic() + 1800
         while time.monotonic() < deadline:
-            assert all(proc.poll() is None for proc in processes), (
-                "service process exited"
-            )
+            _check_processes(processes)
             status, state = request(f"{route}/{run_id}/status")
             assert status == 200
             if state.get("status") in {"succeeded", "failed", "cancelled"}:
@@ -467,17 +448,3 @@ def test_rest_single_gpu_no_fanout(assets, tmp_path, monkeypatch):
             )
             + "\n"
         )
-    finally:
-        for proc in reversed(processes):
-            try:
-                os.killpg(proc.pid, signal.SIGTERM)
-            except ProcessLookupError:
-                pass
-        for proc in reversed(processes):
-            try:
-                proc.wait(timeout=15)
-            except subprocess.TimeoutExpired:
-                os.killpg(proc.pid, signal.SIGKILL)
-                proc.wait(timeout=15)
-        for log in logs:
-            log.close()

@@ -12,6 +12,7 @@ import threading
 import uuid
 
 from plugin_sdk import (
+    PluginCancelledError,
     PluginWorkflow,
     build_execution_context,
     cleanup_earth2_runtime_resources,
@@ -22,13 +23,15 @@ PLUGIN_ROOT = Path(__file__).resolve().parent
 if str(PLUGIN_ROOT) not in sys.path:
     sys.path.insert(0, str(PLUGIN_ROOT))
 
-from aifs2ens_artifacts import (  # noqa: E402
+from aifs2ens_inputs import (  # noqa: E402
+    ForecastRequest,
     InputContract,
+    NUMERICAL_POLICY,
+    RNG_POLICY,
     load_ensemble_input,
     stage_inputs,
     write_json,
 )
-from aifs2ens_contract import ForecastRequest, NUMERICAL_POLICY, RNG_POLICY  # noqa: E402
 
 
 def _positive_setting(name, default=None):
@@ -95,7 +98,7 @@ class AIFS2ENSWorkflow(PluginWorkflow):
         return InputContract.model_validate_json(Path(path).read_text())
 
     def _stage_inputs(self, request, ctx):
-        from aifs2ens_data import WeatherSource
+        from aifs2ens_inputs import WeatherSource
 
         return stage_inputs(
             request,
@@ -147,9 +150,8 @@ class AIFS2ENSWorkflow(PluginWorkflow):
             return self._run_ensemble(loaded, execution)
 
     def _run_ensemble(self, loaded, ctx):
-        from aifs2ens_outputs import validate_ensemble_output
+        from aifs2ens_outputs import ZarrEnsembleSink, validate_ensemble_output
         from aifs2ens_rollout import run_ensemble_rollout
-        from aifs2ens_storage import ZarrEnsembleSink
 
         if loaded.contract != self._contract():
             raise ValueError("staged input contract differs from the deployed model")
@@ -166,6 +168,8 @@ class AIFS2ENSWorkflow(PluginWorkflow):
                 abort_requested=ctx.abort_requested,
             )
             validate_ensemble_output(path, loaded, expected_hashes=sink.field_hashes)
+            if ctx.abort_requested():
+                raise PluginCancelledError("forecast cancelled during finalization")
             request = loaded.request
             payload = {
                 "complete": True,

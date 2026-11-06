@@ -7,27 +7,30 @@ stream determines ensemble diversity. A separate future fan-out version will be
 compared against this single-GPU baseline.
 
 This replaces the earlier per-member task design. The current `earth2-gpu`
-release, source `4b91b64806d9`, passed **412 selected tests: 405 portable and all
-seven H100 cases**, with zero skips. Eight candidate rollouts passed 7,440
-member/step/field comparisons. Separate full A, serial B and repeated A
-forecasts through the private Lepton HTTPS endpoint passed 2,880 comparisons;
-one cached GPU worker served all three, with one task and release per request
-and no fan-out. Eight downloaded `t2m` field hashes also matched.
+release, source `4c10a529633b`, passed **427 selected tests: 420 portable and all
+seven H100 cases**, with zero skips, on 2026-11-06. Eight candidate rollouts
+passed 7,440 member/step/field comparisons. Separate full A, serial B and
+repeated A forecasts through the private Lepton HTTPS endpoint passed 2,880
+comparisons; one cached GPU worker served all three, with one task and release
+per request and no fan-out. Eight downloaded `t2m` field hashes also matched.
 
-The release includes the asset-warmup, batch-admission and PR-readiness changes,
-plus a QA-only wait for structured result finalization on the same accepted
-run ID. Its nine stock Earth2Studio references retain their earlier image
-`b58eeaf61c78` / source `53da50741e74` provenance and were reused after runtime
-and scientific-source identity checks, 30 array-hash checks and 5,280 holdout
-comparisons. No limits were recalibrated. Parity holds within measured native
-CUDA variability for the tested fixture and layouts; bitwise equality is not
-established. The [parity record](aifs2ens-parity-and-reference-workflows.md)
+Nine fresh stock Earth2Studio references ran in the same image/source as the
+candidate. Thirty reference array hashes and 5,280 holdout comparisons passed
+under the unchanged prior frozen calibration; no limits were recalibrated or
+widened. Parity holds within measured native CUDA variability for the tested
+fixture and layouts. The [parity record](aifs2ens-parity-and-reference-workflows.md#current-single-gpu-version)
 preserves the current evidence and historical passes/failures separately.
 
-The subsequent PR-review follow-up preserves `cancelled` status through the SDK
-cancellation exception and resolves relative asset paths in standalone capture.
-Both changes have CPU regressions and are outside the qualified image above;
-forecast arithmetic, upstream ensemble orchestration and RNG calls are unchanged.
+The qualified image includes asset-warmup/batch admission, structured-result
+polling, SDK cancellation/final abort guard, relative capture/output-path fixes,
+five-module production layout, QA lifecycle/source cleanup, and removal of the
+shared HTTP GPU-readiness gate. It retains Redis-only `/readyz` and uses
+worker-registry/file observations for GPU startup qualification. Forecast
+arithmetic, upstream ensemble orchestration and RNG calls are unchanged.
+Only qualification-record documentation updates follow the tested image;
+runtime and test sources remain identical to its prepared working-tree snapshot.
+The image fingerprint does not include the later documentation bytes or Git
+commit metadata.
 
 ## Upstream contract
 
@@ -164,11 +167,12 @@ warmup or recovery. Readiness is written atomically and owned process groups
 are cleaned up on exit. The deployed endpoint uses private workspace-token
 authentication. Actual HTTPS forecast submissions, status/results retrieval
 and a downloaded Zarr field subset were validated in the current release.
-The deployed `/readyz` gate passed a direct 200→503→200 test with liveness
-remaining 200. Use HTTP readiness where the orchestrator supports it; Lepton's
-current API provides TCP liveness and readiness approval, without a native HTTP
-readiness probe. The qualified image fingerprint binds its source snapshot;
-later documentation-only edits are outside that inventory.
+Current source checks GPU availability through the supervisor's readiness
+record and registry observations. `/readyz` retains its existing Redis-only
+behavior; `/healthz` or TCP checks liveness. The shared HTTP worker-readiness
+gate is deferred to a separate infrastructure change. The current qualified
+image includes this removal; earlier HTTP-readiness experiments remain attributed
+to their historical image snapshots.
 
 The initial output contract is Earth2Studio raw model fields. Independent ECMWF/
 Anemoi preparation, decoded wave directions, accumulated products, additional

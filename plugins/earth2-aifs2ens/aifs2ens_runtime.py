@@ -10,7 +10,7 @@ from pathlib import Path
 
 import numpy as np
 
-from aifs2ens_artifacts import EARTH2STUDIO_REVISION, InputContract, sha256_file
+from aifs2ens_inputs import EARTH2STUDIO_REVISION, InputContract, sha256_file
 
 CHECKPOINT_SHA256 = "e383027ee9a20469b920ed11f9af2ecc9268ebcf826447638c5c9fa296fbbbdb"
 MATRICES = {

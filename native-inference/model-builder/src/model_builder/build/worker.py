@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Recipe-driven graph production and frozen native verification.
 
 The current recipe contract is deliberately static, float32, and single-stage.

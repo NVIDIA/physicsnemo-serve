@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Validate a built wheel in a fresh environment with no ML dependencies.
 
 Run with PNMIR_TEST_WHEEL=/absolute/path/to/the.whl python test_installed_wheel.py.

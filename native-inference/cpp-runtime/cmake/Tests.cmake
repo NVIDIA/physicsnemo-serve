@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 # Test registration is included in the SDK directory to preserve paths and properties.
 enable_testing()
 find_package(Python3 COMPONENTS Interpreter REQUIRED)

@@ -135,17 +135,15 @@ The helper is a no-op in a TensorRT build without the exact option, so such a
 build continues rejecting packages that require these operators. TensorRT
 creator registration occurs before engine deserialization. Plugin names, C
 registration symbols and serialized operator IDs/ABI versions remain compatible
-with the source implementation from `gpu_programming` commit
-`87b78bf6cec3030cfbaea10f14e4c64cbc836407`; only public C++ include paths and
-namespaces were adapted in the eight plugin implementations.
+with existing model packages.
 
 The operator IDs, ABI constants and C registration declarations for all twelve
 plugins are available in `<physicsnemo/inference/backends/tensorrt_exact.hpp>`.
 Use this consolidated header in place of the former per-plugin headers, including
 when registering operators with `v1::Engine::register_operator`.
 
-GeoTransolver's WeightedBlend plugin is ported from the same source commit and
-preserves its `pnmir.tensorrt-exact-weighted-blend` operator ID, ABI `1`, plugin
+GeoTransolver's WeightedBlend plugin preserves its
+`pnmir.tensorrt-exact-weighted-blend` operator ID, ABI `1`, plugin
 name and registration symbol. It evaluates two FP32 scalar-weighted tensors
 with separately rounded multiplies followed by a rounded add, preserving the
 eager reference's arithmetic instead of fusing it into an FMA. The original
@@ -183,8 +181,7 @@ nearest 3D upsampling and SDF features. Their C++ implementations call ATen
 directly. The exported model's learned layers remain in AOTI. The declared
 operator is `physicsnemo-cfd.domino-exact-boundary`, with ABI
 `b1c60ddada2438469a1d24b4e53ae196425b73648f6d8ae45ecf64043755d7e6`.
-The source is ported from `gpu_programming` with public C++ namespaces and
-include paths adapted; the dispatcher schemas and serialized ABI are unchanged.
+The dispatcher schemas and serialized ABI remain unchanged.
 
 The CLI and device runner register this ABI automatically when built with the
 option. Applications using the SDK call the public helper before creating a
@@ -294,6 +291,4 @@ Existing `.pnmir` packages continue loading; manifest
 and payload formats remain unchanged. New builder outputs use the
 [flat backend layout](../docs/reference.md#build-output).
 
-The runtime was imported from `physicsnemo-inference-runtime` commit
-`f6bf26090d7cd0484781ed4e1af5a47ea5469413`. Its [Apache-2.0 license](LICENSE)
-is retained and installed with the SDK.
+The runtime's [Apache-2.0 license](LICENSE) is installed with the SDK.

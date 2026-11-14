@@ -1,9 +1,11 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Independent eager reference for the documented raw Transolver surface flow.
 
 This module reads the original geometry and trusted PhysicsNeMo checkpoint. It
 does not import Model Builder, consume its converted weights, or use native input
-dumps as reference inputs. The geometry contract is the surface workflow adapted
-from gpu_programming 87b78bf6cec3030cfbaea10f14e4c64cbc836407, as documented in
+dumps as reference inputs. The geometry contract is the surface workflow documented in
 native-inference/workflows/transolver/README.md. Matching Python/C++ VTK versions
 are required because cell centers and normals can change between VTK releases.
 """

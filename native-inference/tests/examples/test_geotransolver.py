@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """The customer example consumes ordinary imported weights without preparation.
 
 The tiny upstream model double and raw/cached tensors below exercise structural

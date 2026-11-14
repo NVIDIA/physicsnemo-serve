@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 # Keep these filenames stable: Model Builder loads the same native plugins.
 set(pnmir_tensorrt_exact_targets)
 foreach(operator IN ITEMS linear gemm token_sum slice_bmm deslice_bmm layer_norm softmax attention gelu weighted_blend scalar_div inverse_distance_blend)

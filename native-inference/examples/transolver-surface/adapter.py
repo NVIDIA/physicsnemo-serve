@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Transolver surface model with imported constructor settings and weights.
 
 The C++ workflow prepares coordinates, normals and global conditions outside

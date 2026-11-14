@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Reproduce the frozen channel-flow fixture or run its optional CSV diagnostic."""
 
 from __future__ import annotations

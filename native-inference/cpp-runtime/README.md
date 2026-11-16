@@ -90,7 +90,12 @@ The option defaults to `OFF` and requires `PNMIR_ENABLE_TENSORRT=ON`.
 
 The attention plugin compiles a PyTorch/CUTLASS CUDA template. Supply the
 matching source and generated header trees explicitly; they are build-time
-dependencies and do not link the plugins to LibTorch or Python. For the H100
+dependencies and do not link the plugins to LibTorch or Python. Their template
+implementations are compiled into the plugin, so their notices must accompany
+distributed outputs. SDK installation includes the actual source-tree PyTorch
+and CUTLASS licenses and retained ATen notices; see
+[exact-attention third-party notices](third_party/README.md).
+For the H100
 environment used by the source implementation:
 
 ```bash

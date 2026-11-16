@@ -490,3 +490,4 @@ install(FILES "${CMAKE_CURRENT_BINARY_DIR}/PhysicsNeMoInferenceConfig.cmake"
               "${CMAKE_CURRENT_BINARY_DIR}/PhysicsNeMoInferenceConfigVersion.cmake"
   DESTINATION "${pnmir_cmake_dir}")
 install(FILES LICENSE DESTINATION "${CMAKE_INSTALL_DATADIR}/licenses/physicsnemo-inference")
+include(cmake/ThirdPartyNotices.cmake)

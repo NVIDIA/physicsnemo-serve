@@ -92,8 +92,8 @@ The attention plugin compiles a PyTorch/CUTLASS CUDA template. Supply the
 matching source and generated header trees explicitly; they are build-time
 dependencies and do not link the plugins to LibTorch or Python. Their template
 implementations are compiled into the plugin, so their notices must accompany
-distributed outputs. SDK installation includes the actual source-tree PyTorch
-and CUTLASS licenses and retained ATen notices; see
+distributed outputs. SDK installation includes the inventory's PyTorch and
+CUTLASS licenses and retained ATen notices; see
 [shipping exact-plugin notices](#shipping-exact-plugin-notices).
 For the H100
 environment used by the source implementation:
@@ -312,17 +312,18 @@ With `PNMIR_ENABLE_TENSORRT_EXACT=ON`, `cmake --install` places these files in
 `share/licenses/physicsnemo-inference/` under the SDK prefix (or the configured
 CMake data directory):
 
-- `PyTorch-LICENSE.txt`, from the actual `PNMIR_PYTORCH_SOURCE_ROOT/LICENSE`.
-- `CUTLASS-LICENSE.txt`, from `LICENSE.txt` beside the actual CUTLASS `include`
-  directory selected by `PNMIR_CUTLASS_INCLUDE_DIR`.
-- `PyTorch-attention-NOTICE.txt`, retaining Meta and NVIDIA notices from the
-  reference ATen headers, including the CUTLASS-derived epilogue header.
+- `licenses.txt`, the complete third-party inventory from the repository's
+  `.licenses/licenses.txt`. It contains the PyTorch and CUTLASS licenses and
+  retained Meta and NVIDIA notices from the reference ATen headers, including
+  the CUTLASS-derived epilogue header.
 - This `README.md`, containing these shipping instructions.
 
-Installation fails if either build input's full license is missing. Ship the
-notice directory with plugin binaries, SDKs, images and model packages containing
-the plugin; also carry it when extracting a plugin from an installed SDK. For
-alternate source revisions, retain any additional or changed file-level notices.
+Installation fails if the inventory is missing. For a standalone SDK source
+checkout, supply its location with `-DPNMIR_THIRD_PARTY_NOTICES=/path/to/licenses.txt`.
+Ship the notice directory with plugin binaries, SDKs, images and model packages
+containing the plugin; also carry it when extracting a plugin from an installed SDK. For
+alternate source revisions, update the inventory with any additional or changed
+file-level notices before distributing the outputs.
 Redistributed LibTorch, ONNX Runtime and other vendor packages also need the
 licenses and bundled notices from their exact distributions. This attention
 notice bundle does not replace those notices or model/checkpoint/data terms.

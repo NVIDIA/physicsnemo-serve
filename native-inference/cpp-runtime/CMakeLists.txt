@@ -495,16 +495,13 @@ install(FILES LICENSE DESTINATION "${CMAKE_INSTALL_DATADIR}/licenses/physicsnemo
 # even though the exact plugins do not link against LibTorch.
 if(PNMIR_ENABLE_TENSORRT_EXACT)
   set(pnmir_notice_dir "${CMAKE_INSTALL_DATADIR}/licenses/physicsnemo-inference")
-  get_filename_component(pnmir_cutlass_root "${PNMIR_CUTLASS_INCLUDE_DIR}" DIRECTORY)
-  # Use the actual build inputs' licenses rather than assuming the caller uses
-  # the source revisions in the checked-in reference inventory. Missing files
-  # deliberately fail installation; a header-only copy is not a notice bundle.
-  install(FILES "${PNMIR_PYTORCH_SOURCE_ROOT}/LICENSE"
-    DESTINATION "${pnmir_notice_dir}" RENAME PyTorch-LICENSE.txt)
-  install(FILES "${pnmir_cutlass_root}/LICENSE.txt"
-    DESTINATION "${pnmir_notice_dir}" RENAME CUTLASS-LICENSE.txt)
-  install(FILES
-    "${CMAKE_CURRENT_SOURCE_DIR}/third_party/PyTorch-attention-NOTICE.txt"
-    "${CMAKE_CURRENT_SOURCE_DIR}/README.md"
+  set(PNMIR_THIRD_PARTY_NOTICES
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../.licenses/licenses.txt" CACHE FILEPATH
+    "Third-party notice inventory shipped with the exact plugins")
+  # Keep one notice inventory in the source tree and ship it with the plugins.
+  # Missing inventory files deliberately fail installation.
+  install(FILES "${PNMIR_THIRD_PARTY_NOTICES}"
+    DESTINATION "${pnmir_notice_dir}" RENAME licenses.txt)
+  install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/README.md"
     DESTINATION "${pnmir_notice_dir}")
 endif()

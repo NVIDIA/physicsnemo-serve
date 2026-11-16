@@ -27,6 +27,7 @@ ARG PNMIR_ENABLE_TENSORRT=OFF
 ARG CMAKE_BUILD_PARALLEL_LEVEL=4
 
 COPY native-inference /opt/physicsnemo/native-inference
+COPY .licenses/licenses.txt /opt/physicsnemo/.licenses/licenses.txt
 
 RUN cmake -S /opt/physicsnemo/native-inference/cpp-runtime -B /tmp/physicsnemo-inference-build \
         -DCMAKE_BUILD_TYPE=Release \

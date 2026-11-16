@@ -21,10 +21,13 @@ checkpoint, dataset, or native system package.
 | [Warp](https://github.com/NVIDIA/warp) | `1.15.0` | Apache-2.0 | Installed `warp-lang`; native workflow also uses its headers and links `warp.so`. |
 
 The manifest records exact repository version evidence, upstream notice links,
-copyright attributions, distribution roles, and SHA-256-checked local license
-texts. The Earth2Studio notice was also verified against the SHA-256-verified
-0.13.0 wheel. Identical license texts shared by multiple versions are stored
-once and rendered in each applicable component section. These entries retain
+copyright attributions, distribution roles, and component/version references to
+the full texts in [`licenses.txt`](licenses.txt). Each `notice_reference` names
+the inventory path and the exact component and version in its numbered heading;
+the referenced text runs until the next numbered component section or end of
+file. Section numbers are not identifiers and may change. The Earth2Studio
+notice was also verified against the SHA-256-verified 0.13.0 wheel. There are no
+separate license snapshots or snapshot hashes to maintain. These entries retain
 the NVIDIA, Meta/PyTorch/Caffe2 contributor, ONNX Project Contributor, and
 Microsoft notices; ONNX 1.22.0's upstream `NOTICE` also retains its bundled
 Abseil, protobuf and nanobind attributions.
@@ -42,8 +45,8 @@ In particular, the exact-attention plugin includes
 instantiates `PyTorchMemEffAttention::AttentionKernel` with CUTLASS types.
 PyTorch/ATen and CUTLASS notices must accompany its distributed shared library,
 including SDKs, images and model packages containing that library, even when
-LibTorch and Python are absent. The native SDK install copies the actual
-PyTorch source `LICENSE`, CUTLASS `LICENSE.txt`, and retained ATen header notices
+LibTorch and Python are absent. The native SDK install copies `licenses.txt`,
+including the PyTorch/CUTLASS licenses and retained ATen header notices,
 to `share/licenses/physicsnemo-inference/`; keep this directory with extracted
 plugins. See the [native notice instructions](../native-inference/cpp-runtime/README.md#shipping-exact-plugin-notices)
 for alternate source revisions and redistribution details.
@@ -58,14 +61,14 @@ this OSS inventory does not replace those distribution notices.
 Maintain `licenses.txt` directly when dependency versions or distribution roles
 change. Use `Cargo.lock`, `uv.lock`, the separate ML runtime locks and native
 builder configuration to identify the applicable versions. `ml-native.json`
-retains source/version evidence and license-file hashes for the reviewed ML and
+retains source/version evidence and inventory references for the reviewed ML and
 native entries; it is a provenance reference, not a regeneration command.
 
 For each new or changed component, obtain the full license and copyright notices
 from its exact upstream release or distribution. Retain bundled third-party
 notices and distinguish separately installed dependencies from copied source,
 linked libraries and template code compiled into distributed outputs. Update
-relevant version evidence, source links and local license snapshots together.
+relevant version evidence, source links and embedded notice sections together.
 
 Preserve unchanged component sections verbatim, including their names, numbers,
 license labels and full texts. Remove superseded entries as complete sections

@@ -291,9 +291,16 @@ pnms-model-builder setup-env "$HOME/.venvs/physicsnemo-builder-dual" \
 SDK compilation needs CMake 3.20+ and a C++20 compiler. CUDA builds need a
 compatible driver and development toolkit already installed. TensorRT needs
 headers and libraries from its full C++ SDK; the pip package alone lacks the
-headers. When compiling the SDK, setup reads the TensorRT headers and pins the
-Python package to that version. Choose CUDA major 12 for a CUDA 12 SDK/toolkit;
-avoid generic `tensorrt` or conflicting CUDA variants in requirements.
+headers. When compiling the SDK, setup reads all four TensorRT native version
+components from its headers and permits Python packaging post-releases of that
+same native build using `tensorrt-cu<CUDA major>==<native version>.*`.
+For example, SDK `10.14.1.48` can use Linux's
+`10.14.1.48.post1` package. Setup checks the imported bindings against the exact
+four-part native version before compiling; a different build number is not
+compatible. It also checks the selected CUDA package variant. Choose CUDA
+major 12 for a CUDA 12 SDK/toolkit; avoid generic `tensorrt` or conflicting CUDA
+variants in requirements. Model requirements may pin a compatible post-release,
+but no manual post-release selection is needed for this setup path.
 
 When reusing a runtime, setup does not infer its TensorRT version from headers;
 pin compatible dependencies explicitly. The reused runtime must match the new
@@ -404,7 +411,8 @@ graphs and require all listed plugin assets from a matching exact-enabled SDK.
 | --- | --- | --- | --- | --- |
 | `baseline` (default) | Standard TensorRT export. | 0 | Absolute and relative L2 error each ≤ `1e-4`. | — |
 | `layout-order-exact` | Transolver operation/reduction order. | 8 | Same numerical limits. | 1 |
-| `layout-order-exact-v2` | Transolver, also preserving deslicing layout. | 9 | Byte-identical outputs. | 2 |
+| `layout-order-exact-v2` | Transolver, also preserving deslicing layout; IEEE reference math. | 9 | Byte-identical outputs. | 2 |
+| `provider-default-exact-v1` | Transolver CFD provider math on the qualified sm90 stack. | 9 | Byte-identical outputs under the explicit provider policy. | 1 |
 | `geotransolver-exact` | GeoTransolver cached core and scalar-weighted mixing. | 9 | Byte-identical outputs. | 2 |
 | `geotransolver-exact-v2` | GeoTransolver, also preserving deslicing after mixing. | 10 | Byte-identical outputs. | 3 |
 | `domino-surface-exact` | Supported DoMINO surface core. | 4 | Byte-identical outputs. | 1 |
@@ -416,7 +424,9 @@ build. AOTI remains independently configured.
 
 The full asset matrix follows. “Transolver” means `layout-order-exact`;
 “Geo” means `geotransolver-exact`. Their v2 columns refer to the corresponding
-v2 profiles. Asset keys are exact; merge them with existing validation assets.
+v2 profiles. `provider-default-exact-v1` uses the same nine assets as Transolver
+v2, with newer BLAS creators in the matching SDK. Asset keys are exact; merge
+them with existing validation assets.
 
 | Asset key | Transolver | Transolver v2 | Geo | Geo v2 | DoMINO |
 | --- | --- | --- | --- | --- | --- |
@@ -456,6 +466,78 @@ assets fail before ONNX export; profile and library identities participate in
 the project lock. Changing them requires `build --update-lock`. The SDK, plugin
 binaries and TensorRT/CUDA environment must match; a generic TensorRT SDK cannot
 load a package requiring exact plugins.
+
+### `provider-default-exact-v1`
+
+This profile matches the deployed Transolver CFD Python provider's high/TF32
+FP32 math contract. It is distinct from the existing IEEE
+`layout-order-exact-v2` profile. Select it explicitly when your reference uses
+the provider policy; the standalone Transolver example keeps its IEEE default.
+
+Select only TensorRT when using this profile:
+
+```json
+{
+  "backends": ["tensorrt"],
+  "device": "cuda",
+  "required_gpu_arch": "sm90",
+  "tensorrt_profile": "provider-default-exact-v1"
+}
+```
+
+This fragment still needs the model/project settings and all nine Transolver v2
+plugin assets listed above. A mixed AOTI/TensorRT build is rejected. The provider
+math context requires CUDA compute capability `9.0`. This profile does not
+establish portability across GPU products or CUDA/cuBLAS/PyTorch versions;
+verify the package on the intended deployment stack.
+
+Model Builder captures eager reference outputs and exports the graph with
+`float32_matmul_precision="high"`, matmul and cuDNN TF32 enabled, cuDNN benchmark
+and deterministic modes disabled, deterministic algorithms disabled, and the
+preferred BLAS library set to `cublas`. Caller settings are restored after the
+context exits, including on failure. Workspace environment overrides must agree
+with the pinned 32 MiB cuBLAS and 1 MiB cuBLASLt policy; unified Torch cuBLAS/Lt
+workspace is not selected by this profile.
+
+The graph uses the same nine exact rewrites as Transolver v2. Every supported
+matrix product must be replaced; remaining `MatMul` or `Gemm` nodes fail the
+provider export. TensorRT's native TF32 builder flag stays disabled. Four exact
+plugin families explicitly carry the provider BLAS policy:
+
+| Plugin | Provider creator version | Required operator ID |
+| --- | --- | --- |
+| Exact linear | `2` | `pnmir.tensorrt-provider-default-exact-linear` |
+| Exact GEMM | `2` | `pnmir.tensorrt-provider-default-exact-gemm` |
+| Exact slice BMM | `2` | `pnmir.tensorrt-provider-default-exact-slice-bmm` |
+| Exact deslice BMM | `2` | `pnmir.tensorrt-provider-default-exact-deslice-bmm` |
+
+Their operator ABI is `1`. Each version-2 plugin serializes and validates these
+fields during construction and plan deserialization:
+
+| Serialized field | Type | Required value |
+| --- | --- | --- |
+| `compute_mode` | INT32 | `1`: provider TF32 mode |
+| `cublas_workspace_bytes` | INT32 | `33554432` (32 MiB) |
+| `cublaslt_workspace_bytes` | INT32 | `1048576` (1 MiB) |
+
+The plugin binds its cuBLAS workspace after selecting the execution stream,
+then applies `CUBLAS_TF32_TENSOR_OP_MATH`. Its cuBLASLt linear path uses
+`CUBLAS_COMPUTE_32F_FAST_TF32` and the separate 1 MiB workspace limit. Clones keep
+the policy with independent handles; changing Torch's mutable precision after
+loading does not change serialized plugin math. Missing, changed, duplicate or
+unknown serialized policy fields are rejected.
+
+The other five exact creators remain version `1`. Existing version-1 IEEE BLAS
+creators, their empty serialized fields, legacy operator IDs and IEEE packages
+remain supported. The profile's own metadata version `1` is separate from the
+four BLAS creator versions.
+
+`model.json` records the complete `correctness_profile.math_policy`, the exact
+plugin library hashes and required operator identities. Builder completion
+verifies those against the selected inputs. Publication still requires
+byte-identical native/reference outputs with zero error limits. A successful
+package check verifies the supplied model cases; application and service
+qualification require their own representative fixtures.
 
 ### Exact graph scope
 

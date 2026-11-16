@@ -99,7 +99,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--image", required=True, help="Immutable repository@sha256:digest"
     )
     parser.add_argument("--expected-source-sha", required=True)
-    parser.add_argument("--profile", choices=("smoke", "full"), default="smoke")
+    parser.add_argument(
+        "--profile", choices=("smoke", "full", "provider"), default="smoke"
+    )
     parser.add_argument(
         "--assets",
         help="Use a mounted manifest offline; full profile otherwise downloads pinned assets",

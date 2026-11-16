@@ -1,4 +1,9 @@
-// Migrated from gpu_programming commit 87b78bf, Transolver workflow CLI.
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+// Transolver workflow CLI.
 #include <ATen/BlasBackend.h>
 #include <ATen/Context.h>
 #include <ATen/Parallel.h>

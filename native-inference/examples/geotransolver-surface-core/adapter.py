@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """GeoTransolver surface core: imported weights and synthetic feature inputs.
 
 Geometry preprocessing stays outside this graph. The four inputs are the local

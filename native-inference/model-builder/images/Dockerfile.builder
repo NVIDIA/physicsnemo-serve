@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
 # Build from the repository root. This is a development builder recipe;
 # publishing and selecting an immutable builder image is a separate release step.
 # Linux x86_64 platform manifest verified from the cached 26.01-py3 image.

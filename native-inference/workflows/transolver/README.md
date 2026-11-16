@@ -1,11 +1,9 @@
 # Transolver: raw mesh to physical fields from the CLI
 
 This example runs preprocessing, model inference, and postprocessing in one
-C++ process using the installed **PhysicsNeMo C++ Inference SDK**. It is adapted
-from `gpu_programming` commit `87b78bf6cec3030cfbaea10f14e4c64cbc836407`,
-`examples/physicsnemo_cfd_transolver_workflow`. The mesh reader, Warp SDF,
-normalization, seeded batching, and physical decoding retain the original
-implementation. Model execution uses the current SDK package API.
+C++ process using the installed **PhysicsNeMo C++ Inference SDK**. It includes
+mesh reading, Warp SDF, normalization, seeded batching, and physical decoding.
+Model execution uses the SDK package API.
 
 ```text
 VTP surface cells / VTU volume points + vehicle STL

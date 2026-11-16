@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
 # The CFD runtime currently supports only linux/amd64 because its
 # torch-scatter dependency has no Linux arm64 wheel. Build with:
 #   docker buildx build --platform linux/amd64 --load \

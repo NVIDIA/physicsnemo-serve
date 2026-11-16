@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """DoMINO surface prediction from prepared local and surface neighborhoods.
 
 Spatial queries, grid projection and neighbor gathering stay outside this graph.

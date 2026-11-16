@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """TensorRT plugin inputs, exporter doubles, and profile publication fixtures.
 
 Torch remains lazy: only TensorRTPayloadFixture setup imports its builder.

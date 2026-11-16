@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Read-only project lock planning and atomic publication with conflict checks.
 
 The short-lived sibling publication directory serializes cooperating writers.

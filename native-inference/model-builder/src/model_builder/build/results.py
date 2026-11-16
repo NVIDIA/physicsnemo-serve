@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Keep command results separate from Python and native process diagnostics."""
 
 from contextlib import contextmanager, redirect_stdout

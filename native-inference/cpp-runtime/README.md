@@ -74,6 +74,35 @@ executables require compatible native backend libraries on the loader path;
 installed CMake exports do not preserve the builder's absolute library paths.
 Native inference does not import the Python model.
 
+### Shipping exact-plugin notices
+
+The exact-attention plugin instantiates PyTorch ATen memory-efficient attention
+and CUTLASS CUDA templates. Their implementation becomes part of the shared
+library, so the notices apply even when LibTorch and Python are absent from the
+deployment. The [root dependency map](../../README.md#ml-and-native-dependencies)
+lists the reference versions; full upstream licenses and attributions are in the
+[third-party inventory](../../.licenses/licenses.txt).
+
+With `PNMIR_ENABLE_TENSORRT_EXACT=ON`, `cmake --install` places these files in
+`share/licenses/physicsnemo-inference/` under the SDK prefix (or the configured
+CMake data directory):
+
+- `licenses.txt`, the complete third-party inventory from the repository's
+  `.licenses/licenses.txt`. It contains the PyTorch and CUTLASS licenses and
+  retained Meta and NVIDIA notices from the reference ATen headers, including
+  the CUTLASS-derived epilogue header.
+- This `README.md`, containing these shipping instructions.
+
+Installation fails if the inventory is missing. For a standalone SDK source
+checkout, supply its location with `-DPNMIR_THIRD_PARTY_NOTICES=/path/to/licenses.txt`.
+Ship the notice directory with plugin binaries, SDKs, images and model packages
+containing the plugin; also carry it when extracting a plugin from an installed SDK. For
+alternate source revisions, update the inventory with any additional or changed
+file-level notices before distributing the outputs.
+Redistributed LibTorch, ONNX Runtime and other vendor packages also need the
+licenses and bundled notices from their exact distributions. This attention
+notice bundle does not replace those notices or model/checkpoint/data terms.
+
 ### Exact TensorRT operators for Transolver and GeoTransolver
 
 The opt-in `PNMIR_ENABLE_TENSORRT_EXACT=ON` build adds twelve native TensorRT
@@ -90,7 +119,12 @@ The option defaults to `OFF` and requires `PNMIR_ENABLE_TENSORRT=ON`.
 
 The attention plugin compiles a PyTorch/CUTLASS CUDA template. Supply the
 matching source and generated header trees explicitly; they are build-time
-dependencies and do not link the plugins to LibTorch or Python. For the H100
+dependencies and do not link the plugins to LibTorch or Python. Their template
+implementations are compiled into the plugin, so their notices must accompany
+distributed outputs. SDK installation includes the inventory's PyTorch and
+CUTLASS licenses and retained ATen notices; see
+[shipping exact-plugin notices](#shipping-exact-plugin-notices).
+For the H100
 environment used by the source implementation:
 
 ```bash

@@ -1,0 +1,261 @@
+{
+  "components": [
+    {
+      "name": "PyTorch-LibTorch",
+      "version": "2.10.0+cu130",
+      "homepage": "https://github.com/pytorch/pytorch",
+      "license": "BSD-3-Clause (with retained ATen/CUTLASS notices)",
+      "copyright": "Copyright (c) Meta Platforms, Inc. and affiliates. All rights reserved.\nAdditional PyTorch/Caffe2 contributor copyright notices follow in the full license.",
+      "distribution_role": "Separately installed Python ML runtime for Earth2Studio. If a wheel, LibTorch libraries, or an environment/image containing them is redistributed, include its license and bundled third-party notices.",
+      "version_evidence": [
+        "packaging/physicsnemo-serve-cmd/external-runtime/requirements-e2s.lock"
+      ],
+      "sources": [
+        "https://github.com/pytorch/pytorch/blob/v2.10.0/LICENSE",
+        "https://github.com/pytorch/pytorch/blob/v2.10.0/aten/src/ATen/native/transformers/cuda/mem_eff_attention/kernel_forward.h",
+        "https://github.com/pytorch/pytorch/blob/v2.10.0/aten/src/ATen/native/transformers/cuda/mem_eff_attention/epilogue/epilogue_pipelined.h"
+      ],
+      "notice_reference": {
+        "path": ".licenses/licenses.txt",
+        "component": "PyTorch-LibTorch",
+        "version": "2.10.0+cu130"
+      }
+    },
+    {
+      "name": "PyTorch-LibTorch",
+      "version": "2.10.0+cu128",
+      "homepage": "https://github.com/pytorch/pytorch",
+      "license": "BSD-3-Clause (with retained ATen/CUTLASS notices)",
+      "copyright": "Copyright (c) Meta Platforms, Inc. and affiliates. All rights reserved.\nAdditional PyTorch/Caffe2 contributor copyright notices follow in the full license.",
+      "distribution_role": "Separately installed CFD Python runtime; LibTorch is linked by native AOTInductor and Transolver workflow builds. This stable source tree is also supported for exact-attention templates; compiled templates are incorporated code, even without a LibTorch runtime link. Redistributed binaries/libraries and environments must retain applicable notices.",
+      "version_evidence": [
+        "packaging/physicsnemo-serve-cmd/external-runtime/requirements-cfd.lock",
+        "native-inference/model-builder/pyproject.toml (torch>=2.6; local version is user-selected)"
+      ],
+      "sources": [
+        "https://github.com/pytorch/pytorch/blob/v2.10.0/LICENSE",
+        "https://github.com/pytorch/pytorch/blob/v2.10.0/aten/src/ATen/native/transformers/cuda/mem_eff_attention/kernel_forward.h",
+        "https://github.com/pytorch/pytorch/blob/v2.10.0/aten/src/ATen/native/transformers/cuda/mem_eff_attention/epilogue/epilogue_pipelined.h"
+      ],
+      "notice_reference": {
+        "path": ".licenses/licenses.txt",
+        "component": "PyTorch-LibTorch",
+        "version": "2.10.0+cu128"
+      }
+    },
+    {
+      "name": "PyTorch-LibTorch",
+      "version": "2.10.0a0+a36e1d39eb.nv26.1.42222806",
+      "homepage": "https://github.com/pytorch/pytorch",
+      "license": "BSD-3-Clause (with retained ATen/CUTLASS notices)",
+      "copyright": "Copyright (c) Meta Platforms, Inc. and affiliates. All rights reserved.\nAdditional PyTorch/Caffe2 contributor copyright notices follow in the full license.",
+      "distribution_role": "Pinned NGC native builder/QA runtime and LibTorch dependency. ATen memory-efficient attention and CUTLASS-derived headers are instantiated into the exact-attention plugin binary. PyTorch license and the ATen/CUTLASS notices must accompany distributed plugin libraries, SDKs, images, and model packages containing the plugin. Generated AOTInductor outputs must retain any incorporated-code notices. This is not only a separately installed build tool.",
+      "version_evidence": [
+        "native-inference/model-builder/images/geotransolver-environment.json (distribution version; torch.__version__ uses nv26.01)",
+        "native-inference/model-builder/images/Dockerfile.builder"
+      ],
+      "sources": [
+        "https://github.com/pytorch/pytorch/blob/a36e1d39ebbf60976fec5a0d8a96763e6adfbea3/LICENSE",
+        "https://github.com/pytorch/pytorch/blob/a36e1d39ebbf60976fec5a0d8a96763e6adfbea3/aten/src/ATen/native/transformers/cuda/mem_eff_attention/kernel_forward.h",
+        "https://github.com/pytorch/pytorch/blob/a36e1d39ebbf60976fec5a0d8a96763e6adfbea3/aten/src/ATen/native/transformers/cuda/mem_eff_attention/epilogue/epilogue_pipelined.h"
+      ],
+      "notice_reference": {
+        "path": ".licenses/licenses.txt",
+        "component": "PyTorch-LibTorch",
+        "version": "2.10.0a0+a36e1d39eb.nv26.1.42222806"
+      }
+    },
+    {
+      "name": "CUTLASS",
+      "version": "4.3.1 (f88806b1e31dfa579842638740216dd41fc6c588)",
+      "homepage": "https://github.com/NVIDIA/cutlass",
+      "license": "BSD-3-Clause (C++ headers used here)",
+      "copyright": "Copyright (c) 2017 - 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.",
+      "distribution_role": "C++ CUDA header/template dependency pinned by the PyTorch source submodule, not a separately linked shared library. Templates are compiled into the exact-attention plugin; include the complete BSD copyright, conditions and disclaimer with distributed plugin binaries and outputs containing them. python/CuTeDSL is not used by this plugin and has separate terms, as recorded in the upstream license.",
+      "version_evidence": [
+        "PyTorch a36e1d39ebbf60976fec5a0d8a96763e6adfbea3: third_party/cutlass submodule",
+        "PyTorch v2.10.0: third_party/cutlass submodule",
+        "native-inference/cpp-runtime/cmake/TensorRTExact.cmake"
+      ],
+      "sources": [
+        "https://github.com/NVIDIA/cutlass/blob/f88806b1e31dfa579842638740216dd41fc6c588/LICENSE.txt",
+        "https://github.com/NVIDIA/cutlass/blob/f88806b1e31dfa579842638740216dd41fc6c588/include/cutlass/version.h",
+        "https://github.com/pytorch/pytorch/tree/a36e1d39ebbf60976fec5a0d8a96763e6adfbea3/third_party/cutlass"
+      ],
+      "notice_reference": {
+        "path": ".licenses/licenses.txt",
+        "component": "CUTLASS",
+        "version": "4.3.1 (f88806b1e31dfa579842638740216dd41fc6c588)"
+      }
+    },
+    {
+      "name": "Earth2Studio",
+      "version": "0.13.0",
+      "homepage": "https://github.com/NVIDIA/earth2studio",
+      "license": "Apache-2.0",
+      "copyright": "Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.",
+      "distribution_role": "Separately installed Python forecast/model/data dependency imported by the Earth2Studio workflows. Installing it does not copy its implementation into this repository. Distributing a preinstalled environment, wheel, or image redistributes it; retain its license and applicable notices. Model checkpoints and data have their own terms.",
+      "version_evidence": [
+        "packaging/physicsnemo-serve-cmd/external-runtime/requirements-e2s.lock",
+        "Dockerfile.physicsnemo-serve.scicomp-rust-slim"
+      ],
+      "sources": [
+        "https://pypi.org/project/earth2studio/0.13.0/",
+        "https://github.com/NVIDIA/earth2studio/blob/0.13.0/LICENSE",
+        "https://github.com/NVIDIA/earth2studio/blob/0.13.0/earth2studio/__init__.py"
+      ],
+      "notice_reference": {
+        "path": ".licenses/licenses.txt",
+        "component": "Earth2Studio",
+        "version": "0.13.0"
+      }
+    },
+    {
+      "name": "NVIDIA-PhysicsNeMo",
+      "version": "2.1.1",
+      "homepage": "https://github.com/NVIDIA/physicsnemo",
+      "license": "Apache-2.0",
+      "copyright": "Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.",
+      "distribution_role": "Separately installed nvidia-physicsnemo package used by the ML runtimes, checkpoint import and native model export. Model conversion alone does not imply the whole Python package is redistributed. Retain applicable source/implementation notices if code is copied or included in generated payloads; include package license and notices when distributing the installed runtime, builder environment or image.",
+      "version_evidence": [
+        "packaging/physicsnemo-serve-cmd/external-runtime/requirements-e2s.lock",
+        "packaging/physicsnemo-serve-cmd/external-runtime/requirements-cfd.lock",
+        "native-inference/model-builder/images/geotransolver-environment.json"
+      ],
+      "sources": [
+        "https://github.com/NVIDIA/physicsnemo/blob/v2.1.1/LICENSE.txt",
+        "https://github.com/NVIDIA/physicsnemo/blob/v2.1.1/physicsnemo/__init__.py"
+      ],
+      "notice_reference": {
+        "path": ".licenses/licenses.txt",
+        "component": "NVIDIA-PhysicsNeMo",
+        "version": "2.1.1"
+      }
+    },
+    {
+      "name": "NVIDIA-PhysicsNeMo-CFD",
+      "version": "0.0.2 (921f14dc2ac14c04aabffaba3290deb792379dd8)",
+      "homepage": "https://github.com/NVIDIA/physicsnemo-cfd",
+      "license": "Apache-2.0",
+      "copyright": "Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.",
+      "distribution_role": "Separately installed Git-pinned CFD runtime for the surface benchmark workflow. Its source and package notices apply when redistributing the CFD environment or including its implementation in another output; checkpoint and dataset terms are separate.",
+      "version_evidence": [
+        "packaging/physicsnemo-serve-cmd/external-runtime/requirements-cfd.lock",
+        "Dockerfile.physicsnemo-serve.scicomp-rust-slim"
+      ],
+      "sources": [
+        "https://github.com/NVIDIA/physicsnemo-cfd/blob/921f14dc2ac14c04aabffaba3290deb792379dd8/LICENSE.txt",
+        "https://github.com/NVIDIA/physicsnemo-cfd/blob/921f14dc2ac14c04aabffaba3290deb792379dd8/physicsnemo/cfd/__init__.py"
+      ],
+      "notice_reference": {
+        "path": ".licenses/licenses.txt",
+        "component": "NVIDIA-PhysicsNeMo-CFD",
+        "version": "0.0.2 (921f14dc2ac14c04aabffaba3290deb792379dd8)"
+      }
+    },
+    {
+      "name": "ONNX",
+      "version": "1.18.0",
+      "homepage": "https://github.com/onnx/onnx",
+      "license": "Apache-2.0 (bundled notices retained)",
+      "copyright": "Copyright (c) ONNX Project Contributors",
+      "distribution_role": "Separately installed ONNX exporter/importer dependency in the pinned NGC builder. Using the ONNX format alone is distinct from distributing ONNX implementation code. If shipping the package or compiled code, include its license and bundled-library notices from the exact distribution.",
+      "version_evidence": [
+        "native-inference/model-builder/images/geotransolver-environment.json"
+      ],
+      "sources": [
+        "https://github.com/onnx/onnx/blob/v1.18.0/LICENSE",
+        "https://github.com/onnx/onnx/blob/v1.18.0/onnx/__init__.py"
+      ],
+      "notice_reference": {
+        "path": ".licenses/licenses.txt",
+        "component": "ONNX",
+        "version": "1.18.0"
+      }
+    },
+    {
+      "name": "ONNX",
+      "version": "1.20.1",
+      "homepage": "https://github.com/onnx/onnx",
+      "license": "Apache-2.0 (bundled notices retained)",
+      "copyright": "Copyright (c) ONNX Project Contributors",
+      "distribution_role": "Producer version recorded by the retained channel-flow ONNX fixture; this does not mean the ONNX package is bundled in that model artifact. Using the ONNX format alone is distinct from distributing ONNX implementation code. If shipping the package or compiled code, include its license and bundled-library notices from the exact distribution.",
+      "version_evidence": [
+        "native-inference/cpp-runtime/tests/fixtures/physicsnemo_cfd_channel/physicsnemo-channel-flow-v0.1.0-onnxruntime-cpu-fp32.pnmir/model.json: producer.onnx_version"
+      ],
+      "sources": [
+        "https://github.com/onnx/onnx/blob/v1.20.1/LICENSE",
+        "https://github.com/onnx/onnx/blob/v1.20.1/onnx/__init__.py"
+      ],
+      "notice_reference": {
+        "path": ".licenses/licenses.txt",
+        "component": "ONNX",
+        "version": "1.20.1"
+      }
+    },
+    {
+      "name": "ONNX",
+      "version": "1.22.0",
+      "homepage": "https://github.com/onnx/onnx",
+      "license": "Apache-2.0 (bundled notices retained)",
+      "copyright": "Copyright (c) ONNX Project Contributors",
+      "distribution_role": "Separately installed ONNX dependency in the external ML runtimes. Using the ONNX format alone is distinct from distributing ONNX implementation code. If shipping the package or compiled code, include its license and bundled-library notices from the exact distribution.",
+      "version_evidence": [
+        "packaging/physicsnemo-serve-cmd/external-runtime/requirements-e2s.lock",
+        "packaging/physicsnemo-serve-cmd/external-runtime/requirements-cfd.lock"
+      ],
+      "sources": [
+        "https://github.com/onnx/onnx/blob/v1.22.0/LICENSE",
+        "https://github.com/onnx/onnx/blob/v1.22.0/onnx/__init__.py",
+        "https://github.com/onnx/onnx/blob/v1.22.0/NOTICE"
+      ],
+      "notice_reference": {
+        "path": ".licenses/licenses.txt",
+        "component": "ONNX",
+        "version": "1.22.0"
+      }
+    },
+    {
+      "name": "ONNX-Runtime",
+      "version": "user-selected (not pinned)",
+      "homepage": "https://github.com/microsoft/onnxruntime",
+      "license": "MIT",
+      "copyright": "Copyright (c) Microsoft Corporation",
+      "distribution_role": "Optional separately supplied C/C++ runtime linked by the native ONNX Runtime backend through PNMIR_ONNXRUNTIME_ROOT. No repository version pin exists. Record the actual release/version and retain its LICENSE and ThirdPartyNotices when distributing runtime libraries, header-derived code, or an environment containing them. The retained MIT text was verified at upstream commit 382e8a5747713a9d3bf3558b0f7bad2d4f6fe75d; that is a license-source snapshot, not a claim that this release is used.",
+      "version_evidence": [
+        "native-inference/cpp-runtime/CMakeLists.txt: PNMIR_ONNXRUNTIME_ROOT"
+      ],
+      "sources": [
+        "https://github.com/microsoft/onnxruntime/blob/382e8a5747713a9d3bf3558b0f7bad2d4f6fe75d/LICENSE"
+      ],
+      "notice_reference": {
+        "path": ".licenses/licenses.txt",
+        "component": "ONNX-Runtime",
+        "version": "user-selected (not pinned)"
+      }
+    },
+    {
+      "name": "Warp",
+      "version": "1.15.0",
+      "homepage": "https://github.com/NVIDIA/warp",
+      "license": "Apache-2.0",
+      "copyright": "Copyright (c) 2022 NVIDIA CORPORATION & AFFILIATES. All rights reserved.",
+      "distribution_role": "Separately installed warp-lang in the ML/native builder environments; the Transolver native SDF workflow also uses Warp headers and its native library. Source/template code compiled into outputs and redistributed Warp libraries require their applicable license and bundled notices, even if Python is not shipped.",
+      "version_evidence": [
+        "packaging/physicsnemo-serve-cmd/external-runtime/requirements-e2s.lock",
+        "packaging/physicsnemo-serve-cmd/external-runtime/requirements-cfd.lock",
+        "native-inference/model-builder/images/geotransolver-environment.json",
+        "native-inference/workflows/transolver/CMakeLists.txt"
+      ],
+      "sources": [
+        "https://github.com/NVIDIA/warp/blob/v1.15.0/LICENSE.md",
+        "https://github.com/NVIDIA/warp/blob/v1.15.0/warp/__init__.py"
+      ],
+      "notice_reference": {
+        "path": ".licenses/licenses.txt",
+        "component": "Warp",
+        "version": "1.15.0"
+      }
+    }
+  ]
+}

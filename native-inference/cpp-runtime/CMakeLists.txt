@@ -493,3 +493,18 @@ install(FILES "${CMAKE_CURRENT_BINARY_DIR}/PhysicsNeMoInferenceConfig.cmake"
               "${CMAKE_CURRENT_BINARY_DIR}/PhysicsNeMoInferenceConfigVersion.cmake"
   DESTINATION "${pnmir_cmake_dir}")
 install(FILES LICENSE DESTINATION "${CMAKE_INSTALL_DATADIR}/licenses/physicsnemo-inference")
+
+# Template instantiation incorporates upstream code into the attention plugin,
+# even though the exact plugins do not link against LibTorch.
+if(PNMIR_ENABLE_TENSORRT_EXACT)
+  set(pnmir_notice_dir "${CMAKE_INSTALL_DATADIR}/licenses/physicsnemo-inference")
+  set(PNMIR_THIRD_PARTY_NOTICES
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../.licenses/licenses.txt" CACHE FILEPATH
+    "Third-party notice inventory shipped with the exact plugins")
+  # Keep one notice inventory in the source tree and ship it with the plugins.
+  # Missing inventory files deliberately fail installation.
+  install(FILES "${PNMIR_THIRD_PARTY_NOTICES}"
+    DESTINATION "${pnmir_notice_dir}" RENAME licenses.txt)
+  install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/README.md"
+    DESTINATION "${pnmir_notice_dir}")
+endif()

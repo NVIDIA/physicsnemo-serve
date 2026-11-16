@@ -197,13 +197,14 @@ license files:
 | --- | --- | --- |
 | PhysicsNeMo-Serve first-party code, except where a file carries a separate notice | Apache-2.0 | [LICENSE](LICENSE) (full terms) |
 | `scicomp-rq` Redis Streams queue library and Python bindings | Apache-2.0 | [crates/scicomp-rq/LICENSE](crates/scicomp-rq/LICENSE) (full terms and NVIDIA copyright notice) |
-| Native C++ inference runtime and SDK | Apache-2.0 | [native-inference/cpp-runtime/LICENSE](native-inference/cpp-runtime/LICENSE) (short Apache notice; full terms in [LICENSE](LICENSE)) |
-| Native Transolver geometry and inference workflow | Apache-2.0 | [native-inference/workflows/transolver/LICENSE](native-inference/workflows/transolver/LICENSE) (short Apache notice; full terms in [LICENSE](LICENSE)) |
+| Native C++ inference runtime and SDK | Apache-2.0 | [native-inference/cpp-runtime/LICENSE](native-inference/cpp-runtime/LICENSE) (full terms and 2026 NVIDIA copyright notice) |
+| Native Transolver geometry and inference workflow | Apache-2.0 | [native-inference/workflows/transolver/LICENSE](native-inference/workflows/transolver/LICENSE) (full terms and 2026 NVIDIA copyright notice) |
 
 The root [LICENSE](LICENSE) is the shared full-text reference for first-party
 Apache-2.0 code. The `scicomp-rq` copy is retained for distribution of that package.
-The two native-inference files retain their PNM-IR contributor attribution; they
-are short license notices rather than complete standalone license agreements.
+Both native-inference license files contain the complete Apache-2.0 text and a
+2026 NVIDIA CORPORATION & AFFILIATES copyright notice. The runtime's license file
+is also installed with the SDK.
 Retained upstream copyright, license, and attribution notices continue to apply
 to their respective files. Third-party dependency notices are collected in
 [.licenses/licenses.txt](.licenses/licenses.txt). The

@@ -1,4 +1,6 @@
 **
+!.licenses/
+!.licenses/licenses.txt
 !native-inference/
 !native-inference/**
 !qa/

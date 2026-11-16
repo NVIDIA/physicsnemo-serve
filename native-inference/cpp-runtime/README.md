@@ -94,7 +94,7 @@ dependencies and do not link the plugins to LibTorch or Python. Their template
 implementations are compiled into the plugin, so their notices must accompany
 distributed outputs. SDK installation includes the actual source-tree PyTorch
 and CUTLASS licenses and retained ATen notices; see
-[exact-attention third-party notices](third_party/README.md).
+[shipping exact-plugin notices](#shipping-exact-plugin-notices).
 For the H100
 environment used by the source implementation:
 
@@ -298,6 +298,34 @@ not a package digest or scientific qualification report.
 Existing `.pnmir` packages continue loading; manifest
 and payload formats remain unchanged. New builder outputs use the
 [flat backend layout](../docs/reference.md#build-output).
+
+### Shipping exact-plugin notices
+
+The exact-attention plugin instantiates PyTorch ATen memory-efficient attention
+and CUTLASS CUDA templates. Their implementation becomes part of the shared
+library, so the notices apply even when LibTorch and Python are absent from the
+deployment. The [root dependency map](../../README.md#ml-and-native-dependencies)
+lists the reference versions; full upstream licenses and attributions are in the
+[third-party inventory](../../.licenses/licenses.txt).
+
+With `PNMIR_ENABLE_TENSORRT_EXACT=ON`, `cmake --install` places these files in
+`share/licenses/physicsnemo-inference/` under the SDK prefix (or the configured
+CMake data directory):
+
+- `PyTorch-LICENSE.txt`, from the actual `PNMIR_PYTORCH_SOURCE_ROOT/LICENSE`.
+- `CUTLASS-LICENSE.txt`, from `LICENSE.txt` beside the actual CUTLASS `include`
+  directory selected by `PNMIR_CUTLASS_INCLUDE_DIR`.
+- `PyTorch-attention-NOTICE.txt`, retaining Meta and NVIDIA notices from the
+  reference ATen headers, including the CUTLASS-derived epilogue header.
+- This `README.md`, containing these shipping instructions.
+
+Installation fails if either build input's full license is missing. Ship the
+notice directory with plugin binaries, SDKs, images and model packages containing
+the plugin; also carry it when extracting a plugin from an installed SDK. For
+alternate source revisions, retain any additional or changed file-level notices.
+Redistributed LibTorch, ONNX Runtime and other vendor packages also need the
+licenses and bundled notices from their exact distributions. This attention
+notice bundle does not replace those notices or model/checkpoint/data terms.
 
 The runtime was imported from `physicsnemo-inference-runtime` commit
 `f6bf26090d7cd0484781ed4e1af5a47ea5469413`. Its [Apache-2.0 license](LICENSE)

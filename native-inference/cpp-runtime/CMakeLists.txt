@@ -505,6 +505,6 @@ if(PNMIR_ENABLE_TENSORRT_EXACT)
     DESTINATION "${pnmir_notice_dir}" RENAME CUTLASS-LICENSE.txt)
   install(FILES
     "${CMAKE_CURRENT_SOURCE_DIR}/third_party/PyTorch-attention-NOTICE.txt"
-    "${CMAKE_CURRENT_SOURCE_DIR}/third_party/README.md"
+    "${CMAKE_CURRENT_SOURCE_DIR}/README.md"
     DESTINATION "${pnmir_notice_dir}")
 endif()

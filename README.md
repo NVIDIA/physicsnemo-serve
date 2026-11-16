@@ -207,9 +207,33 @@ are short license notices rather than complete standalone license agreements.
 Retained upstream copyright, license, and attribution notices continue to apply
 to their respective files. Third-party dependency notices are collected in
 [.licenses/licenses.txt](.licenses/licenses.txt). The
-[ML/native dependency map](.licenses/README.md) identifies versions and
+[ML/native dependency map](#ml-and-native-dependencies) identifies versions and
 distribution roles, including PyTorch/ATen and CUTLASS code compiled into the
 exact-attention plugin whose notices must accompany distributed outputs.
+
+### ML and native dependencies
+
+| Component | Applicable version/source | License | Distribution role |
+| --- | --- | --- | --- |
+| PyTorch / LibTorch | `2.10.0+cu130` (E2S), `2.10.0+cu128` (CFD), `2.10.0a0+a36e1d39eb.nv26.1.42222806` (native builder) | BSD-3-Clause, with ATen/CUTLASS notices | Installed ML runtime; LibTorch linked by AOTI/workflow outputs; ATen templates compiled into the exact-attention plugin. |
+| CUTLASS | `4.3.1`, commit `f88806b1e31dfa579842638740216dd41fc6c588` | BSD-3-Clause for the C++ headers used here | Templates compiled into the exact-attention plugin. |
+| Earth2Studio | `0.13.0` | Apache-2.0 | Separately installed forecast/model/data package. |
+| PhysicsNeMo | `2.1.1` | Apache-2.0 | Separately installed ML/runtime/export package. |
+| PhysicsNeMo-CFD | `0.0.2`, commit `921f14dc2ac14c04aabffaba3290deb792379dd8` | Apache-2.0 | Separately installed CFD workflow package. |
+| ONNX | `1.18.0` (native builder), `1.20.1` (retained fixture producer), `1.22.0` (E2S/CFD) | Apache-2.0, with bundled notices | Export/import tooling; an ONNX model alone does not redistribute the ONNX implementation. |
+| ONNX Runtime | User-selected through `PNMIR_ONNXRUNTIME_ROOT`; not pinned | MIT | Optional linked native runtime. |
+| Warp | `1.15.0` | Apache-2.0 | Installed `warp-lang`; native workflow also uses its headers and links `warp.so`. |
+
+The [third-party inventory](.licenses/licenses.txt) contains upstream links,
+copyright notices and full license texts for these components. This named map
+does not inventory every transitive dependency or component of a GPU base image.
+Separately installing a dependency differs from copying its implementation or
+compiling templates into a binary. Distributing an environment or image that
+contains that dependency also redistributes it. Keep applicable licenses and
+bundled notices with shipped implementation code and libraries, including code
+incorporated into generated model payloads. See
+[shipping exact-plugin notices](native-inference/cpp-runtime/README.md#shipping-exact-plugin-notices)
+for the native SDK's installed notice files and redistribution instructions.
 
 This project will download and install additional third-party open source software projects. Review the license terms of these open source projects before use. In particular, note that NVIDIA does not release docker images or host this service. If you choose to do either, also inspect the default Dockerfile provided (and any changes you make) and ensure you comply with any additional licensing terms.
 

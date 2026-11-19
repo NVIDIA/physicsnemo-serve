@@ -218,8 +218,8 @@ exact-attention plugin whose notices must accompany distributed outputs.
 | --- | --- | --- | --- |
 | PyTorch / LibTorch | `2.10.0+cu130` (E2S), `2.10.0+cu128` (CFD), `2.10.0a0+a36e1d39eb.nv26.1.42222806` (native builder) | BSD-3-Clause, with ATen/CUTLASS notices | Installed ML runtime; LibTorch linked by AOTI/workflow outputs; ATen templates compiled into the exact-attention plugin. |
 | CUTLASS | `4.3.1`, commit `f88806b1e31dfa579842638740216dd41fc6c588` | BSD-3-Clause for the C++ headers used here | Templates compiled into the exact-attention plugin. |
-| Earth2Studio | `0.13.0` | Apache-2.0 | Separately installed forecast/model/data package. |
-| PhysicsNeMo | `2.1.1` | Apache-2.0 | Separately installed ML/runtime/export package. |
+| Earth2Studio | `0.20.0` | Apache-2.0 | Separately installed forecast/model/data package. |
+| PhysicsNeMo | `2.2.2` (service-mode Earth2Studio), `2.1.1` (binary-mode Earth2Studio, CFD, and native builder) | Apache-2.0 | Separately installed ML/runtime/export package. |
 | PhysicsNeMo-CFD | `0.0.2`, commit `921f14dc2ac14c04aabffaba3290deb792379dd8` | Apache-2.0 | Separately installed CFD workflow package. |
 | ONNX | `1.18.0` (native builder), `1.20.1` (retained fixture producer), `1.22.0` (E2S/CFD) | Apache-2.0, with bundled notices | Export/import tooling; an ONNX model alone does not redistribute the ONNX implementation. |
 | ONNX Runtime | User-selected through `PNMIR_ONNXRUNTIME_ROOT`; not pinned | MIT | Optional linked native runtime. |

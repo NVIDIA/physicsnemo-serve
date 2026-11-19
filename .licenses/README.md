@@ -13,8 +13,8 @@ checkpoint, dataset, or native system package.
 | --- | --- | --- | --- |
 | [PyTorch / LibTorch](https://github.com/pytorch/pytorch) | `2.10.0+cu130` (E2S), `2.10.0+cu128` (CFD/local native profile), `2.10.0a0+a36e1d39eb.nv26.1.42222806` (NGC native builder) | BSD-3-Clause, with retained ATen/CUTLASS notices | Installed Python/runtime libraries; LibTorch linked by AOTI/workflow outputs; ATen templates compiled into the exact-attention plugin. |
 | [CUTLASS](https://github.com/NVIDIA/cutlass/tree/f88806b1e31dfa579842638740216dd41fc6c588) | `4.3.1`, commit `f88806b1e31dfa579842638740216dd41fc6c588`, pinned by both PyTorch source revisions | BSD-3-Clause for the C++ headers used here | Templates compiled into the exact-attention plugin; not a separately linked runtime. |
-| [Earth2Studio](https://github.com/NVIDIA/earth2studio) | `0.13.0` | Apache-2.0 | Separately installed forecast/model/data package. |
-| [PhysicsNeMo](https://github.com/NVIDIA/physicsnemo) | `2.1.1` (`nvidia-physicsnemo`) | Apache-2.0 | Separately installed ML/runtime/export package; retain applicable notices if implementation is copied or incorporated into generated payloads. |
+| [Earth2Studio](https://github.com/NVIDIA/earth2studio) | `0.20.0` | Apache-2.0 | Separately installed forecast/model/data package. |
+| [PhysicsNeMo](https://github.com/NVIDIA/physicsnemo) | `2.2.2` (service-mode Earth2Studio), `2.1.1` (binary-mode Earth2Studio, CFD, and native builder) | Apache-2.0 | Separately installed ML/runtime/export package; retain applicable notices if implementation is copied or incorporated into generated payloads. |
 | [PhysicsNeMo-CFD](https://github.com/NVIDIA/physicsnemo-cfd) | `0.0.2`, commit `921f14dc2ac14c04aabffaba3290deb792379dd8` | Apache-2.0 | Separately installed CFD workflow package. |
 | [ONNX](https://github.com/onnx/onnx) | `1.18.0` (NGC builder), `1.20.1` (retained fixture's producer), `1.22.0` (E2S/CFD locks) | Apache-2.0; bundled notices retained | Installed export/import tooling. An ONNX model file does not by itself redistribute the ONNX implementation. |
 | [ONNX Runtime](https://github.com/microsoft/onnxruntime) | User-selected through `PNMIR_ONNXRUNTIME_ROOT`; no repository pin | MIT | Optional native linked runtime. Inventory the selected release and its bundled third-party notices when distributing it. |
@@ -26,7 +26,7 @@ the full texts in [`licenses.txt`](licenses.txt). Each `notice_reference` names
 the inventory path and the exact component and version in its numbered heading;
 the referenced text runs until the next numbered component section or end of
 file. Section numbers are not identifiers and may change. The Earth2Studio
-notice was also verified against the SHA-256-verified 0.13.0 wheel. There are no
+notice was also verified against the SHA-256-verified 0.20.0 wheel. There are no
 separate license snapshots or snapshot hashes to maintain. These entries retain
 the NVIDIA, Meta/PyTorch/Caffe2 contributor, ONNX Project Contributor, and
 Microsoft notices; ONNX 1.22.0's upstream `NOTICE` also retains its bundled

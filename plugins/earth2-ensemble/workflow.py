@@ -64,12 +64,12 @@ def _load_model(model_name: str):
     return DLWP.load_model(package)
 
 
-def _build_perturbation(name: str, noise_amplitude: float):
+def _build_perturbation(name: str, noise_amplitude: float, seed_base: int):
     normalized = str(name).strip().lower()
     if normalized == "gaussian":
         from earth2studio.perturbation import Gaussian
 
-        return Gaussian(noise_amplitude=noise_amplitude), normalized
+        return Gaussian(noise_amplitude=noise_amplitude, seed=seed_base), normalized
     if normalized == "brown":
         from earth2studio.perturbation import Brown
 
@@ -103,7 +103,7 @@ def _normalize_parameters(raw: Mapping[str, Any]) -> EnsembleInput:
     if noise_amplitude <= 0:
         raise ValueError("noise_amplitude must be > 0")
 
-    seed_base = int(raw.get("seed_base") or 1000)
+    seed_base = raw.get("seed_base")
 
     return EnsembleInput(
         model=model,
@@ -113,7 +113,7 @@ def _normalize_parameters(raw: Mapping[str, Any]) -> EnsembleInput:
         batch_size=min(batch_size, nensemble),
         perturbation=perturbation,
         noise_amplitude=noise_amplitude,
-        seed_base=seed_base,
+        seed_base=1000 if seed_base is None else int(seed_base),
     )
 
 
@@ -219,7 +219,7 @@ class EnsembleWorkflow(PluginWorkflow):
                 model, data, device = self._ensure_runtime_loaded(inputs.model, ctx)
                 torch.manual_seed(inputs.seed_base)
                 perturbation, perturbation_name = _build_perturbation(
-                    inputs.perturbation, inputs.noise_amplitude
+                    inputs.perturbation, inputs.noise_amplitude, inputs.seed_base
                 )
 
                 ensemble(

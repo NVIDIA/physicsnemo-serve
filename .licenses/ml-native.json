@@ -8,6 +8,7 @@
       "copyright": "Copyright (c) Meta Platforms, Inc. and affiliates. All rights reserved.\nAdditional PyTorch/Caffe2 contributor copyright notices follow in the full license.",
       "distribution_role": "Separately installed Python ML runtime for Earth2Studio. If a wheel, LibTorch libraries, or an environment/image containing them is redistributed, include its license and bundled third-party notices.",
       "version_evidence": [
+        "Dockerfile.physicsnemo-serve.runtime-base",
         "packaging/physicsnemo-serve-cmd/external-runtime/requirements-e2s.lock"
       ],
       "sources": [
@@ -90,7 +91,7 @@
     },
     {
       "name": "Earth2Studio",
-      "version": "0.13.0",
+      "version": "0.20.0",
       "homepage": "https://github.com/NVIDIA/earth2studio",
       "license": "Apache-2.0",
       "copyright": "Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.",
@@ -100,36 +101,39 @@
         "Dockerfile.physicsnemo-serve.scicomp-rust-slim"
       ],
       "sources": [
-        "https://pypi.org/project/earth2studio/0.13.0/",
-        "https://github.com/NVIDIA/earth2studio/blob/0.13.0/LICENSE",
-        "https://github.com/NVIDIA/earth2studio/blob/0.13.0/earth2studio/__init__.py"
+        "https://pypi.org/project/earth2studio/0.20.0/",
+        "https://github.com/NVIDIA/earth2studio/blob/0.20.0/LICENSE",
+        "https://github.com/NVIDIA/earth2studio/blob/0.20.0/earth2studio/__init__.py"
       ],
       "notice_reference": {
         "path": ".licenses/licenses.txt",
         "component": "Earth2Studio",
-        "version": "0.13.0"
+        "version": "0.20.0"
       }
     },
     {
       "name": "NVIDIA-PhysicsNeMo",
-      "version": "2.1.1",
+      "version": "2.1.1, 2.2.2",
       "homepage": "https://github.com/NVIDIA/physicsnemo",
       "license": "Apache-2.0",
       "copyright": "Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.",
       "distribution_role": "Separately installed nvidia-physicsnemo package used by the ML runtimes, checkpoint import and native model export. Model conversion alone does not imply the whole Python package is redistributed. Retain applicable source/implementation notices if code is copied or included in generated payloads; include package license and notices when distributing the installed runtime, builder environment or image.",
       "version_evidence": [
+        "Dockerfile.physicsnemo-serve.scicomp-rust-slim",
         "packaging/physicsnemo-serve-cmd/external-runtime/requirements-e2s.lock",
         "packaging/physicsnemo-serve-cmd/external-runtime/requirements-cfd.lock",
         "native-inference/model-builder/images/geotransolver-environment.json"
       ],
       "sources": [
         "https://github.com/NVIDIA/physicsnemo/blob/v2.1.1/LICENSE.txt",
-        "https://github.com/NVIDIA/physicsnemo/blob/v2.1.1/physicsnemo/__init__.py"
+        "https://github.com/NVIDIA/physicsnemo/blob/v2.1.1/physicsnemo/__init__.py",
+        "https://github.com/NVIDIA/physicsnemo/blob/v2.2.2/LICENSE.txt",
+        "https://github.com/NVIDIA/physicsnemo/blob/v2.2.2/physicsnemo/__init__.py"
       ],
       "notice_reference": {
         "path": ".licenses/licenses.txt",
         "component": "NVIDIA-PhysicsNeMo",
-        "version": "2.1.1"
+        "version": "2.1.1, 2.2.2"
       }
     },
     {

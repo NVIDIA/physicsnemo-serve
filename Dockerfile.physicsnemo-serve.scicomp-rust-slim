@@ -235,25 +235,24 @@ RUN test -x "$PHYSICSNEMO_SERVE_PYTHON_EXECUTABLE"
 
 # Install third-party runtime dependencies before copying the repo-local wheel
 # so Rust/Python binding changes do not invalidate this heavy layer.
-RUN "$PHYSICSNEMO_SERVE_PYTHON_EXECUTABLE" -m pip install --no-cache-dir --no-build-isolation \
+# Keep the CUDA 12 Warp wheel used by the external runtime for R570 compatibility.
+RUN export PIP_CONSTRAINT="$PHYSICSNEMO_SERVE_VENV/torch-constraints.txt" && \
+    "$PHYSICSNEMO_SERVE_PYTHON_EXECUTABLE" -m pip install --no-cache-dir --no-build-isolation \
     "earth2grid @ git+https://github.com/NVlabs/earth2grid@${E2G_HASH}" && \
     "$PHYSICSNEMO_SERVE_PYTHON_EXECUTABLE" -m pip install --no-cache-dir \
     natten==0.21.5+torch2100cu130 -f https://whl.natten.org && \
     "$PHYSICSNEMO_SERVE_PYTHON_EXECUTABLE" -m pip install --no-cache-dir \
     redis 'pydantic>=2.0.0' boto3 s3fs python-dotenv aiofiles httpx \
-    'warp-lang<1.12.0' \
-    "earth2studio[dlwp,fcn,fcn3,stormcast,stormscope,perturbation,data]==0.13.0" \
+    "earth2studio[dlwp,fcn,fcn3,stormcast,stormscope,perturbation,data]==0.20.0" \
+    "nvidia-physicsnemo==2.2.2" \
+    "warp-lang==1.15.0" \
     "git+https://github.com/NVIDIA/makani.git@b38fcb2799d7dbc146fa60459f3f9823394a8bf1" \
-    'warp-lang<1.12.0' \
-    cartopy cfgrib && \
-    "$PHYSICSNEMO_SERVE_PYTHON_EXECUTABLE" -m pip install --no-cache-dir \
-        "numpy==${PHYSICSNEMO_NUMPY_VERSION}" "scipy==${PHYSICSNEMO_SCIPY_VERSION}" && \
+    cartopy cfgrib "numpy==${PHYSICSNEMO_NUMPY_VERSION}" "scipy==${PHYSICSNEMO_SCIPY_VERSION}" && \
     "$PHYSICSNEMO_SERVE_PYTHON_EXECUTABLE" -c \
-        "import numpy, scipy; assert numpy.__version__ == '${PHYSICSNEMO_NUMPY_VERSION}', numpy.__version__; assert scipy.__version__ == '${PHYSICSNEMO_SCIPY_VERSION}', scipy.__version__"
+        "import earth2grid, natten, numpy, scipy, torch_harmonics; from earth2studio.models.px import FCN3, StormCast, StormScopeGOES; assert numpy.__version__ == '${PHYSICSNEMO_NUMPY_VERSION}', numpy.__version__; assert scipy.__version__ == '${PHYSICSNEMO_SCIPY_VERSION}', scipy.__version__"
 
 # Keep PhysicsNeMo-CFD separate from the Earth2Studio environment. The venv
-# uses the base image's CUDA system libraries, while its Python packages and
-# newer Warp dependency remain isolated in this environment.
+# uses the base image's CUDA system libraries and installs its own Python packages.
 RUN test "$(python3.12 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')" = "3.12" \
     && python3.12 -m venv "$PHYSICSNEMO_CFD_VENV" \
     && env -u PIP_CONSTRAINT "$PHYSICSNEMO_CFD_PYTHON_EXECUTABLE" -m pip install \

@@ -24,12 +24,14 @@ def prepare_model_cache(_ctx: dict[str, Any]) -> dict[str, list[str]]:
     return {"model_names": ["FCN"]}
 
 
-def _build_perturbation(name: str, noise_amplitude: float) -> tuple[Any, str]:
+def _build_perturbation(
+    name: str, noise_amplitude: float, seed_base: int
+) -> tuple[Any, str]:
     normalized = str(name).strip().lower()
     if normalized == "gaussian":
         from earth2studio.perturbation import Gaussian
 
-        return Gaussian(noise_amplitude=noise_amplitude), normalized
+        return Gaussian(noise_amplitude=noise_amplitude, seed=seed_base), normalized
     if normalized == "brown":
         from earth2studio.perturbation import Brown
 
@@ -130,8 +132,9 @@ class EnsembleWorkflow(Earth2Workflow):
             raise ValueError(f"Unsupported output format: {output_format}")
 
         _package, model, data = self._ensure_runtime_loaded()
-        torch.manual_seed(int(seed_base))
-        sg, perturbation = _build_perturbation(perturbation, noise_amplitude)
+        seed = int(seed_base)
+        torch.manual_seed(seed)
+        sg, perturbation = _build_perturbation(perturbation, noise_amplitude, seed)
 
         # Optional output coordinate filter (variable subset)
         output_coords: OrderedDict = OrderedDict()

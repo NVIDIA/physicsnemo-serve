@@ -62060,7 +62060,7 @@ Certain files within this repository are subject to separate licensing terms:
   for the full terms.
 
 ----------------------------------------------------------------------------
- 489. Earth2Studio version: 0.13.0
+ 489. Earth2Studio version: 0.20.0
 ----------------------------------------------------------------------------
  homepage: https://github.com/NVIDIA/earth2studio
  Apache-2.0
@@ -62070,9 +62070,9 @@ Distribution role: Separately installed Python forecast/model/data dependency im
 Version evidence: packaging/physicsnemo-serve-cmd/external-runtime/requirements-e2s.lock; Dockerfile.physicsnemo-serve.scicomp-rust-slim
 
 Upstream notice sources:
-https://pypi.org/project/earth2studio/0.13.0/
-https://github.com/NVIDIA/earth2studio/blob/0.13.0/LICENSE
-https://github.com/NVIDIA/earth2studio/blob/0.13.0/earth2studio/__init__.py
+https://pypi.org/project/earth2studio/0.20.0/
+https://github.com/NVIDIA/earth2studio/blob/0.20.0/LICENSE
+https://github.com/NVIDIA/earth2studio/blob/0.20.0/earth2studio/__init__.py
 
 Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 
@@ -62279,18 +62279,20 @@ Apache License
    limitations under the License.
 
 ----------------------------------------------------------------------------
- 490. NVIDIA-PhysicsNeMo version: 2.1.1
+ 490. NVIDIA-PhysicsNeMo versions: 2.1.1, 2.2.2
 ----------------------------------------------------------------------------
  homepage: https://github.com/NVIDIA/physicsnemo
  Apache-2.0
 
 Distribution role: Separately installed nvidia-physicsnemo package used by the ML runtimes, checkpoint import and native model export. Model conversion alone does not imply the whole Python package is redistributed. Retain applicable source/implementation notices if code is copied or included in generated payloads; include package license and notices when distributing the installed runtime, builder environment or image.
 
-Version evidence: packaging/physicsnemo-serve-cmd/external-runtime/requirements-e2s.lock; packaging/physicsnemo-serve-cmd/external-runtime/requirements-cfd.lock; native-inference/model-builder/images/geotransolver-environment.json
+Version evidence: Dockerfile.physicsnemo-serve.scicomp-rust-slim; packaging/physicsnemo-serve-cmd/external-runtime/requirements-e2s.lock; packaging/physicsnemo-serve-cmd/external-runtime/requirements-cfd.lock; native-inference/model-builder/images/geotransolver-environment.json
 
 Upstream notice sources:
 https://github.com/NVIDIA/physicsnemo/blob/v2.1.1/LICENSE.txt
 https://github.com/NVIDIA/physicsnemo/blob/v2.1.1/physicsnemo/__init__.py
+https://github.com/NVIDIA/physicsnemo/blob/v2.2.2/LICENSE.txt
+https://github.com/NVIDIA/physicsnemo/blob/v2.2.2/physicsnemo/__init__.py
 
 Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 
@@ -63903,7 +63905,7 @@ POSSIBILITY OF SUCH DAMAGE.
 
 Distribution role: Separately installed warp-lang in the ML/native builder environments; the Transolver native SDF workflow also uses Warp headers and its native library. Source/template code compiled into outputs and redistributed Warp libraries require their applicable license and bundled notices, even if Python is not shipped.
 
-Version evidence: packaging/physicsnemo-serve-cmd/external-runtime/requirements-e2s.lock; packaging/physicsnemo-serve-cmd/external-runtime/requirements-cfd.lock; native-inference/model-builder/images/geotransolver-environment.json; native-inference/workflows/transolver/CMakeLists.txt
+Version evidence: Dockerfile.physicsnemo-serve.scicomp-rust-slim; packaging/physicsnemo-serve-cmd/external-runtime/requirements-e2s.lock; packaging/physicsnemo-serve-cmd/external-runtime/requirements-cfd.lock; native-inference/model-builder/images/geotransolver-environment.json; native-inference/workflows/transolver/CMakeLists.txt
 
 Upstream notice sources:
 https://github.com/NVIDIA/warp/blob/v1.15.0/LICENSE.md

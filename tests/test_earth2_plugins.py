@@ -973,6 +973,125 @@ def test_earth2_ensemble_execute_registers_forecast_output(tmp_path: Path, monke
     assert outputs.primary_output().path == str(expected_dataset)
 
 
+@pytest.mark.parametrize("plugin_id", ["e2s-ensemble", "earth2-ensemble"])
+def test_gaussian_ensemble_repeats_request_seed(tmp_path: Path, monkeypatch, plugin_id):
+    torch = pytest.importorskip("torch")
+    np = pytest.importorskip("numpy")
+    xr = pytest.importorskip("xarray")
+    data = pytest.importorskip("earth2studio.data")
+    models = pytest.importorskip("earth2studio.models.px")
+
+    from collections import OrderedDict
+
+    module = _load_module(
+        f"{plugin_id}_seed_test", REPO_ROOT / "plugins" / plugin_id / "workflow.py"
+    )
+    coords = OrderedDict(lat=np.array([0.0, 1.0]), lon=np.array([0.0, 1.0]))
+    model = models.Persistence("t2m", coords)
+    source = data.Constant(coords, value=0)
+    workflow = module.WORKFLOW()
+    monkeypatch.setenv("PHYSICSNEMO_SERVE_E2S_ZARR_BACKEND", "python")
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+
+    def forecast(run_id, seed):
+        run_dir = tmp_path / run_id
+        ctx = ExecutionContext(
+            run_id=run_id, run_dir=run_dir, outputs=OutputRegistry(run_dir)
+        )
+        parameters = dict(
+            nsteps=1, nensemble=5, batch_size=2, perturbation="gaussian", seed_base=seed
+        )
+        if plugin_id == "e2s-ensemble":
+            monkeypatch.setattr(
+                workflow, "_ensure_runtime_loaded", lambda: (None, model, source)
+            )
+            result = workflow.run({**parameters, "create_plots": False}, ctx)
+            path = result["dataset_path"]
+        else:
+            monkeypatch.setattr(
+                workflow,
+                "_ensure_runtime_loaded",
+                lambda *_: (model, source, torch.device("cpu")),
+            )
+            inputs = module._normalize_parameters(
+                {**parameters, "model": "dlwp", "start_time": "2025-05-01T00:00:00"}
+            )
+            result = workflow.run(inputs, ctx)
+            path = result.dataset_path
+        with xr.open_zarr(path, consolidated=False) as dataset:
+            return dataset["t2m"].values
+
+    first = forecast("first", 0)
+    np.testing.assert_array_equal(first, forecast("repeat", 0))
+    assert not np.array_equal(first, forecast("different", 1000))
+
+
+def test_fanout_gaussian_materialization_matches_batch_replay(
+    tmp_path: Path, monkeypatch
+):
+    torch = pytest.importorskip("torch")
+    np = pytest.importorskip("numpy")
+    data = pytest.importorskip("earth2studio.data")
+    models = pytest.importorskip("earth2studio.models.px")
+
+    from collections import OrderedDict
+
+    module = _load_module(
+        "earth2_ensemble_fanout_gaussian_seed_test",
+        REPO_ROOT
+        / "plugins"
+        / "earth2-ensemble-fanout"
+        / "earth2_ensemble_fanout_support.py",
+    )
+    coords = OrderedDict(lat=np.array([0.0, 1.0]), lon=np.array([0.0, 1.0]))
+    model_resource = (None, models.Persistence("t2m", coords))
+    monkeypatch.setattr(data, "GFS", lambda: data.Constant(coords, value=0))
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    inputs = module._normalize_parameters(
+        dict(
+            model="fcn",
+            start_time="2025-05-01T00:00:00",
+            nsteps=1,
+            nensemble=5,
+            batch_size=2,
+            perturbation="gaussian",
+            seed_base=0,
+        )
+    )
+    prepared = module.materialize_ensemble_fanout_perturbations(
+        inputs,
+        {"run_dir": str(tmp_path / "scheduled")},
+        model_resource=model_resource,
+    )["_pipeline_updates"]["fanout_items"]
+    cpu_prepared = module._materialize_prepared_batch_states(
+        inputs,
+        {"run_dir": str(tmp_path / "prepare-cpu")},
+        force_cpu=True,
+        model_resource=model_resource,
+    )["fanout_items"]
+    assert [item["parameters"]["batch_member_ids"] for item in prepared] == [
+        [0, 1],
+        [2, 3],
+        [4],
+    ]
+    for scheduled_item, cpu_item in zip(prepared, cpu_prepared, strict=True):
+        params = scheduled_item["parameters"]
+        scheduled = torch.load(params["prepared_state_path"], weights_only=False)
+        cpu = torch.load(
+            cpu_item["parameters"]["prepared_state_path"], weights_only=False
+        )
+        replay = module._load_and_perturb_batch_initial_conditions(
+            inputs,
+            {},
+            batch_index=params["batch_index"],
+            member_ids=params["batch_member_ids"],
+            model_resource=model_resource,
+        )
+        torch.testing.assert_close(scheduled["x"], cpu["x"], rtol=0, atol=0)
+        torch.testing.assert_close(scheduled["x"], replay[3], rtol=0, atol=0)
+    assert inputs.seed_base == 0
+
+
 def test_earth2_ensemble_run_closes_gfs_filesystem_session(tmp_path: Path, monkeypatch):
     gfs_close_calls: list[tuple[str, str]] = []
     module = _load_module(
@@ -1459,10 +1578,13 @@ def test_earth2_ensemble_fanout_builds_supported_perturbations(
     monkeypatch.setitem(sys.modules, "earth2studio", ModuleType("earth2studio"))
     monkeypatch.setitem(sys.modules, "earth2studio.perturbation", fake_perturbation)
 
-    built, normalized = module._build_perturbation(perturbation, 0.05)
+    built, normalized = module._build_perturbation(perturbation, 0.05, 1234)
 
     assert type(built).__name__ == expected_class_name
-    assert built.kwargs == {"noise_amplitude": 0.05}
+    expected_kwargs = {"noise_amplitude": 0.05}
+    if perturbation == "gaussian":
+        expected_kwargs["seed"] = 1234
+    assert built.kwargs == expected_kwargs
     assert normalized == perturbation
 
 
@@ -1530,7 +1652,7 @@ def test_earth2_ensemble_fanout_prepare_cpu_materializes_and_skips_to_fanout(
     monkeypatch.setattr(
         module,
         "_build_perturbation",
-        lambda _name, _noise: (FakePerturbation(), "spherical_gaussian"),
+        lambda _name, _noise, _seed: (FakePerturbation(), "spherical_gaussian"),
     )
     monkeypatch.setattr(
         module,
@@ -2439,7 +2561,7 @@ def test_earth2_ensemble_fanout_materializer_writes_prepared_states(
     monkeypatch.setattr(
         module,
         "_build_perturbation",
-        lambda _name, _noise: (FakePerturbation(), "spherical_gaussian"),
+        lambda _name, _noise, _seed: (FakePerturbation(), "spherical_gaussian"),
     )
     monkeypatch.setattr(
         module,

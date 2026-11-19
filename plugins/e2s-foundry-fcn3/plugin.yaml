@@ -72,7 +72,7 @@ developer:
       - earth2studio.utils.coords
       - earth2studio.utils.time
       - httpx
-      - planetary_computer
+      - obstore.auth.planetary_computer
       - rioxarray
       - pystac
       - pystac_client

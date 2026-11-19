@@ -140,7 +140,7 @@ jobs:
       - name: Install CPU build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends build-essential ca-certificates cmake curl nlohmann-json3-dev python3 python3-venv
+          sudo apt-get install -y --no-install-recommends build-essential ca-certificates cmake curl nlohmann-json3-dev python3 python3-venv unzip
       - name: Prepare isolated builder packaging environment
         run: |
           python3 -m venv "$RUNNER_TEMP/inference-packaging-venv"
@@ -204,13 +204,22 @@ jobs:
       - name: Prepare ONNX Runtime CPU SDK
         run: |
           set -euo pipefail
+          onnxruntime_package="$RUNNER_TEMP/microsoft.ml.onnxruntime.1.27.1.nupkg"
+          onnxruntime_root="$RUNNER_TEMP/onnxruntime-linux-x64-1.27.1"
           curl --fail --location --retry 3 \
-            https://github.com/microsoft/onnxruntime/releases/download/v1.27.1/onnxruntime-linux-x64-1.27.1.tgz \
-            --output "$RUNNER_TEMP/onnxruntime-linux-x64-1.27.1.tgz"
+            https://api.nuget.org/v3-flatcontainer/microsoft.ml.onnxruntime/1.27.1/microsoft.ml.onnxruntime.1.27.1.nupkg \
+            --output "$onnxruntime_package"
           printf '%s  %s\n' \
-            25b1ef1fea1acd210d63f8f24dc870ad6e077795ce1f54876252c6d3803c15af \
-            "$RUNNER_TEMP/onnxruntime-linux-x64-1.27.1.tgz" | sha256sum --check
-          tar -xzf "$RUNNER_TEMP/onnxruntime-linux-x64-1.27.1.tgz" -C "$RUNNER_TEMP"
+            9359e46eba4482ded00e678c98f22b68f51bb411d7934f5516d64050edfa3383 \
+            "$onnxruntime_package" | sha256sum --check
+          mkdir -p "$onnxruntime_root/include" "$onnxruntime_root/lib"
+          unzip -joq "$onnxruntime_package" 'build/native/include/*.h' -d "$onnxruntime_root/include"
+          unzip -joq "$onnxruntime_package" \
+            runtimes/linux-x64/native/libonnxruntime.so \
+            runtimes/linux-x64/native/libonnxruntime_providers_shared.so \
+            -d "$onnxruntime_root/lib"
+          # The NuGet library filename is unversioned, but its ELF SONAME is versioned.
+          ln -sfn libonnxruntime.so "$onnxruntime_root/lib/libonnxruntime.so.1"
       - name: Test installed ONNX Runtime SDK consumers
         run: |
           set -euo pipefail

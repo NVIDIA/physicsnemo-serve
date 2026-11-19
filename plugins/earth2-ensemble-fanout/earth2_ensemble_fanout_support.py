@@ -93,12 +93,12 @@ def _load_model(model_name: str) -> tuple[Any, Any]:
     raise ValueError("earth2-ensemble-fanout supports only model='fcn'")
 
 
-def _build_perturbation(name: str, noise_amplitude: float):
+def _build_perturbation(name: str, noise_amplitude: float, seed_base: int):
     normalized = _normalize_perturbation(name)
     if normalized == "gaussian":
         from earth2studio.perturbation import Gaussian
 
-        return Gaussian(noise_amplitude=noise_amplitude), normalized
+        return Gaussian(noise_amplitude=noise_amplitude, seed=seed_base), normalized
     if normalized == "brown":
         from earth2studio.perturbation import Brown
 
@@ -293,7 +293,7 @@ def _normalize_parameters(params: Mapping[str, Any]) -> EnsembleFanoutInput:
     if noise_amplitude <= 0:
         raise ValueError("noise_amplitude must be > 0")
 
-    seed_base = int(params.get("seed_base") or 1000)
+    seed_base = params.get("seed_base")
     materialization = (
         str(params.get("perturbation_materialization_mode") or "scheduled_gpu")
         .strip()
@@ -313,7 +313,7 @@ def _normalize_parameters(params: Mapping[str, Any]) -> EnsembleFanoutInput:
         max_in_flight=min(max_in_flight, nensemble),
         perturbation=perturbation,
         noise_amplitude=noise_amplitude,
-        seed_base=seed_base,
+        seed_base=1000 if seed_base is None else int(seed_base),
         perturbation_materialization_mode=materialization,
     )
 
@@ -420,6 +420,7 @@ def _load_and_perturb_batch_initial_conditions(
         perturbation, perturbation_name = _build_perturbation(
             inputs.perturbation,
             inputs.noise_amplitude,
+            inputs.seed_base,
         )
 
         torch.manual_seed(int(inputs.seed_base))
@@ -586,7 +587,7 @@ def _materialize_prepared_batch_states(
             interp_method=interp_method,
         )
         perturbation, perturbation_name = _build_perturbation(
-            inputs.perturbation, inputs.noise_amplitude
+            inputs.perturbation, inputs.noise_amplitude, inputs.seed_base
         )
 
         torch.manual_seed(int(inputs.seed_base))

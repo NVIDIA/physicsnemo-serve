@@ -1,0 +1,9 @@
+{
+  "start_time": "2026-11-04T12:00:00Z",
+  "ifs_member_id": 1,
+  "nsteps": 2,
+  "nensemble": 2,
+  "seed_base": 0,
+  "batch_size": 2,
+  "output_variables": ["t2m", "msl", "u10m", "v10m"]
+}

@@ -129,7 +129,7 @@ jobs:
       - name: Run tests
         env:
           PYTHONPATH: ${{ github.workspace }}:${{ github.workspace }}/python/e2s_tools
-        run: uv run pytest tests python/e2s_tools qa/scripts/test_rust_io_benchmark.py -v
+        run: uv run --frozen --extra qa pytest tests python/e2s_tools qa/scripts/test_rust_io_benchmark.py -v
 
   inference-cpu:
     name: Model Builder and Native SDK CPU

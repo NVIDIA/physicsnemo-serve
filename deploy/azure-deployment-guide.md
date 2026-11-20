@@ -24,7 +24,7 @@ export ACR_NAME="<your-acr-name>"
 export ACR_LOGIN_SERVER="${ACR_NAME}.azurecr.io"
 
 # ── Image names ──────────────────────────────────────────────────────────────
-export RUNTIME_BASE_IMAGE="${ACR_LOGIN_SERVER}/physicsnemo-serve-runtime-base:pytorch-26.01-py3-th0.8.0"
+export RUNTIME_BASE_IMAGE="${ACR_LOGIN_SERVER}/physicsnemo-serve-runtime-base:pytorch-26.01-py3-torch2.10.0-cu130-th0.8.1"
 export IMAGE_NAME="${ACR_LOGIN_SERVER}/physicsnemo-serve"
 export IMAGE_TAG="$(git rev-parse --short HEAD)"   # run from the repo root
 
@@ -102,7 +102,7 @@ Once you know the name, update your env:
 ```bash
 export ACR_NAME="<name-from-table-above>"
 export ACR_LOGIN_SERVER="${ACR_NAME}.azurecr.io"
-export RUNTIME_BASE_IMAGE="${ACR_LOGIN_SERVER}/physicsnemo-serve-runtime-base:pytorch-26.01-py3-th0.8.0"
+export RUNTIME_BASE_IMAGE="${ACR_LOGIN_SERVER}/physicsnemo-serve-runtime-base:pytorch-26.01-py3-torch2.10.0-cu130-th0.8.1"
 export IMAGE_NAME="${ACR_LOGIN_SERVER}/physicsnemo-serve"
 ```
 
@@ -125,7 +125,7 @@ Check if it already exists in ACR before building:
 
 ```bash
 az acr repository show --name "$ACR_NAME" \
-  --image "physicsnemo-serve-runtime-base:pytorch-26.01-py3-th0.8.0" 2>/dev/null \
+  --image "physicsnemo-serve-runtime-base:pytorch-26.01-py3-torch2.10.0-cu130-th0.8.1" 2>/dev/null \
   && echo "Runtime base already in ACR — skip build" \
   || echo "Not found — need to build"
 ```

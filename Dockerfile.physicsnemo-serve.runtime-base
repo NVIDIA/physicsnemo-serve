@@ -62,13 +62,19 @@ RUN mkdir -p /app/bin \
     && mv /tmp/prometheus /app/bin/prometheus \
     && chmod +x /app/bin/prometheus
 
-# Create an isolated plugin runtime env that can still reuse the base Torch/CUDA
-# stack from the PyTorch image.
+# Create a plugin runtime that can reuse system packages and CUDA libraries.
 RUN python3 -m venv --system-site-packages "$PHYSICSNEMO_SERVE_VENV"
 
-# Install stable Python build tooling and the expensive CUDA extension once in
-# the reusable base image.
+# Use the stable PyTorch release required by Earth2Studio's PhysicsNeMo
+# dependency and by the matching NATTEN wheel in the service image.
 RUN "$PHYSICSNEMO_SERVE_PYTHON_EXECUTABLE" -m pip install --no-cache-dir --upgrade pip setuptools wheel
-RUN "$PHYSICSNEMO_SERVE_PYTHON_EXECUTABLE" -m pip install --no-cache-dir --no-build-isolation \
-    "torch-harmonics==0.8.1"
-RUN "$PHYSICSNEMO_SERVE_PYTHON_EXECUTABLE" -c "import torch_harmonics"
+RUN printf '%s\n' 'torch==2.10.0+cu130' 'torchvision==0.25.0+cu130' > "$PHYSICSNEMO_SERVE_VENV/torch-constraints.txt" \
+    && env -u PIP_CONSTRAINT "$PHYSICSNEMO_SERVE_PYTHON_EXECUTABLE" -m pip install --no-cache-dir \
+        --index-url https://download.pytorch.org/whl/cu130 \
+        -r "$PHYSICSNEMO_SERVE_VENV/torch-constraints.txt"
+
+# Build the CUDA extension against the same PyTorch used by the service image.
+RUN PIP_CONSTRAINT="$PHYSICSNEMO_SERVE_VENV/torch-constraints.txt" \
+    "$PHYSICSNEMO_SERVE_PYTHON_EXECUTABLE" -m pip install --no-cache-dir --no-build-isolation \
+        "torch-harmonics==0.8.1" \
+    && "$PHYSICSNEMO_SERVE_PYTHON_EXECUTABLE" -c "import torch_harmonics"

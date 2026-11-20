@@ -181,8 +181,7 @@ def validate_results(
         workflow_name, exec_id, metadata_file_path
     )
     file_response = client.get(file_url)
-    local_file_name = f"{int(time.time())}-{metadata_file_path.split('/')[-1]}"
-    local_file = files_dir.joinpath(local_file_name)
+    local_file = files_dir.joinpath(f"{exec_id}-{target_file}")
     logger.info(f"Saving '{file_response.url}' to '{local_file}'")
     with open(local_file, "wb+") as f:
         f.write(file_response.content)
